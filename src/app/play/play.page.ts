@@ -86,6 +86,7 @@ export class PlayPageComponent implements OnInit {
   piano: Piano | null = null;
   metronome: Synth | null = null;
   computerPressedNotes = new Map<string, number>();
+  computerNotesService: NotesService;
   // Midi handlers
   midiHandlers: PluginListenerHandle[] = [];
 
@@ -95,7 +96,9 @@ export class PlayPageComponent implements OnInit {
     private notesService: NotesService,
     private toastCtrl: ToastController,
     private route: ActivatedRoute
-  ) {}
+  ) {
+    this.computerNotesService = new NotesService();
+  }
 
   ngOnInit(): void {
     this.playVersion = packageJson.version;
@@ -629,6 +632,7 @@ export class PlayPageComponent implements OnInit {
     this.mapNotesAutoPressed.clear();
     this.computerPressedNotes.clear();
     this.notesService.clear();
+    this.computerNotesService.clear();
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
   }
 
@@ -647,6 +651,7 @@ export class PlayPageComponent implements OnInit {
     // Additional tasks in case of new start, not required in repetition
     if (this.repeatValue == this.repeatCfg) {
       this.notesService.clear();
+      this.computerNotesService.clear();
       this.releaseComputerPressedNotes();
       // free auto pressed notes
       for (const [key] of this.mapNotesAutoPressed) {
@@ -1202,7 +1207,12 @@ export class PlayPageComponent implements OnInit {
       this.getPracticeStaffSelection(),
       back
     );
-    this.tempoInBPM = this.notesService.tempoInBPM;
+    this.computerNotesService.calculateRequired(
+      this.openSheetMusicDisplay.cursors[0],
+      this.getComputerStaffSelection(),
+      back
+    );
+    this.tempoInBPM = this.resolveRealtimeTempo();
     this.currentStepSatisfied =
       this.notesService.getMapRequired().size === 0 ||
       this.notesService.isRequiredNotesPressed();
@@ -1241,7 +1251,11 @@ export class PlayPageComponent implements OnInit {
       this.openSheetMusicDisplay.cursors[0],
       this.getPracticeStaffSelection()
     );
-    this.tempoInBPM = this.notesService.tempoInBPM;
+    this.computerNotesService.calculateRequired(
+      this.openSheetMusicDisplay.cursors[0],
+      this.getComputerStaffSelection()
+    );
+    this.tempoInBPM = this.resolveRealtimeTempo();
     this.currentStepSatisfied =
       this.notesService.getMapRequired().size === 0 ||
       this.notesService.isRequiredNotesPressed();
@@ -1256,40 +1270,41 @@ export class PlayPageComponent implements OnInit {
       return;
     }
 
-    const requiredNotes = new Map<string, { value: number }>();
-    this.openSheetMusicDisplay.cursors[0]
-      .VoicesUnderCursor()
-      .forEach((voice) => {
-        voice.Notes.forEach((note) => {
-          if (
-            this.getComputerStaffSelection()[note.ParentStaff.idInMusicSheet] &&
-            !note.isRest()
-          ) {
-            requiredNotes.set(note.halfTone.toString(), { value: 0 });
-          }
-        });
-      });
-
-    for (const [key] of this.computerPressedNotes) {
-      if (!requiredNotes.has(key)) {
-        this.computerPressedNotes.delete(key);
-        this.keyReleaseNoteInternal(parseInt(key) + 12, audioTime, false);
-      }
-    }
-
-    for (const [key] of requiredNotes) {
-      if (!this.computerPressedNotes.has(key)) {
+    this.computerNotesService.playRequiredNotes(
+      (note, velocity) => {
+        const key = (note - 12).toFixed();
         this.computerPressedNotes.set(key, 1);
-        this.keyPressNoteInternal(parseInt(key) + 12, 60, audioTime, false);
+        this.computerNotesService.press(key);
+        this.keyPressNoteInternal(note, velocity, audioTime, false);
+      },
+      (note) => {
+        const key = (note - 12).toFixed();
+        this.computerPressedNotes.delete(key);
+        this.computerNotesService.release(key);
+        this.keyReleaseNoteInternal(note, audioTime, false);
       }
-    }
+    );
   }
 
   private releaseComputerPressedNotes(): void {
     for (const [key] of this.computerPressedNotes) {
+      this.computerNotesService.release(key);
       this.keyReleaseNoteInternal(parseInt(key) + 12, undefined, false);
     }
     this.computerPressedNotes.clear();
+  }
+
+  private resolveRealtimeTempo(): number {
+    const candidates = [
+      this.notesService.tempoInBPM,
+      this.computerNotesService.tempoInBPM,
+    ];
+
+    const realtimeTempo = candidates.find(
+      (tempo) => Number.isFinite(tempo) && (tempo as number) > 0
+    );
+
+    return realtimeTempo ?? this.tempoInBPM;
   }
 
   // Keep screen on
