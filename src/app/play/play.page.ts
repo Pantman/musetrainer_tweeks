@@ -1,4 +1,4 @@
-import { Component, OnInit, ViewChild } from '@angular/core';
+import { Component, HostListener, OnInit, ViewChild } from '@angular/core';
 import {
   IonContent,
   NavController,
@@ -22,6 +22,15 @@ import packageJson from '../../../package.json';
 declare const Ionic: any;
 
 type TempoPreset = 'normal' | 'slow' | 'verySlow' | 'custom';
+type RangeHandle = 'start' | 'end';
+
+interface MeasureOverlay {
+  measureNumber: number;
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
 
 @Component({
   selector: 'app-home',
@@ -30,6 +39,7 @@ type TempoPreset = 'normal' | 'slow' | 'verySlow' | 'custom';
 })
 export class PlayPageComponent implements OnInit {
   private static readonly DEFAULT_TEMPO_BPM = 120;
+  private static readonly OSMD_UNIT_IN_PIXELS = 10;
   private static readonly MIN_SPEED_PERCENT = 30;
   private static readonly MAX_SPEED_PERCENT = 180;
   private static readonly TEMPO_STEP_BPM = 5;
@@ -55,8 +65,10 @@ export class PlayPageComponent implements OnInit {
   checkboxMetronome: boolean = false;
   checkboxWaitMode: boolean = true;
   checkboxFeedback: boolean = true;
+  showRangePicker: boolean = false;
   inputMeasure = { lower: 0, upper: 0 };
   inputMeasureRange = { lower: 0, upper: 0 };
+  measureOverlays: MeasureOverlay[] = [];
   checkboxRepeat: boolean = false;
   repeatValue: number = 0;
   repeatCfg: number = 10;
@@ -82,6 +94,7 @@ export class PlayPageComponent implements OnInit {
   realtimeMode: boolean = false;
   currentStepSatisfied: boolean = false;
   suppressPlayCursorAnimation: boolean = false;
+  private activeRangeHandle: RangeHandle | null = null;
 
   // tonejs/piano
   piano: Piano | null = null;
@@ -121,6 +134,13 @@ export class PlayPageComponent implements OnInit {
       this.zoomValue = 0.7;
       this.zoomText = this.zoomValue * 100 + '%';
       this.openSheetMusicDisplay.zoom = this.zoomValue;
+    }
+  }
+
+  @HostListener('window:resize')
+  onWindowResize(): void {
+    if (this.fileLoaded) {
+      this.refreshMeasureOverlaysDeferred();
     }
   }
 
@@ -205,6 +225,7 @@ export class PlayPageComponent implements OnInit {
     this.zoomText = (this.zoomValue * 100).toFixed(0) + '%';
     this.openSheetMusicDisplay.Zoom = this.zoomValue;
     this.openSheetMusicDisplay.render();
+    this.refreshMeasureOverlaysDeferred();
   }
 
   updateTempoPreset(preset: TempoPreset): void {
@@ -257,6 +278,56 @@ export class PlayPageComponent implements OnInit {
     return Array.from(Array(range).keys(), (item) => item + from);
   }
 
+  toggleRangePicker(): void {
+    if (this.running || !this.fileLoaded) {
+      return;
+    }
+
+    this.showRangePicker = !this.showRangePicker;
+    this.refreshMeasureOverlaysDeferred();
+  }
+
+  closeRangePicker(): void {
+    this.showRangePicker = false;
+  }
+
+  getRangeSummary(): string {
+    return `Bars ${this.inputMeasure.lower}-${this.inputMeasure.upper}`;
+  }
+
+  getRangeShadedMeasures(): MeasureOverlay[] {
+    return this.measureOverlays.filter(
+      (measure) =>
+        measure.measureNumber < this.inputMeasure.lower ||
+        measure.measureNumber > this.inputMeasure.upper
+    );
+  }
+
+  getRangeHandleStyle(handle: RangeHandle): Record<string, string> {
+    const measure = this.getMeasureOverlayForHandle(handle);
+    if (!measure) {
+      return {};
+    }
+
+    const left = handle === 'start' ? measure.left : measure.right;
+    const height = Math.max(measure.bottom - measure.top, 1);
+
+    return {
+      left: `${left}px`,
+      top: `${Math.max(measure.top - 20, 0)}px`,
+      height: `${height + 20}px`,
+    };
+  }
+
+  getMeasureShadeStyle(measure: MeasureOverlay): Record<string, string> {
+    return {
+      left: `${measure.left}px`,
+      top: `${measure.top}px`,
+      width: `${Math.max(measure.right - measure.left, 1)}px`,
+      height: `${Math.max(measure.bottom - measure.top, 1)}px`,
+    };
+  }
+
   // GUI Lower measure
   updateLowerMeasure(qp: string): void {
     this.inputMeasure.lower = parseInt(qp);
@@ -273,6 +344,8 @@ export class PlayPageComponent implements OnInit {
       }
       this.inputMeasure.upper = this.inputMeasure.lower;
     }
+
+    this.syncRepeatToMeasureRange();
   }
 
   // GUI Upper Measure
@@ -291,6 +364,29 @@ export class PlayPageComponent implements OnInit {
       }
       this.inputMeasure.lower = this.inputMeasure.upper;
     }
+
+    this.syncRepeatToMeasureRange();
+  }
+
+  updateRangeStart(qp: string): void {
+    this.updateLowerMeasure(qp);
+  }
+
+  updateRangeEnd(qp: string): void {
+    this.updateUpperMeasure(qp);
+  }
+
+  startRangeHandleDrag(handle: RangeHandle, event: PointerEvent): void {
+    if (!this.showRangePicker || this.running) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    this.activeRangeHandle = handle;
+    this.updateRangeHandleFromPointer(handle, event);
+    window.addEventListener('pointermove', this.onRangeHandlePointerMove);
+    window.addEventListener('pointerup', this.onRangeHandlePointerUp);
   }
 
   // Load selected file
@@ -310,6 +406,7 @@ export class PlayPageComponent implements OnInit {
               this.fileLoaded = true;
               this.fileLoadError = false;
               this.osmdReset();
+              this.refreshMeasureOverlaysDeferred();
             },
             () => {
               this.fileLoaded = false;
@@ -331,6 +428,7 @@ export class PlayPageComponent implements OnInit {
         this.fileLoaded = true;
         this.fileLoadError = false;
         this.osmdReset();
+        this.refreshMeasureOverlaysDeferred();
       },
       () => {
         this.fileLoaded = false;
@@ -413,6 +511,7 @@ export class PlayPageComponent implements OnInit {
     this.inputMeasureRange.lower = 1;
     this.inputMeasureRange.upper =
       this.openSheetMusicDisplay.Sheet.SourceMeasures.length;
+    this.showRangePicker = false;
 
     this.staffIdList = this.openSheetMusicDisplay.Sheet.Staves.map(
       (s) => s.idInMusicSheet
@@ -422,6 +521,8 @@ export class PlayPageComponent implements OnInit {
       .reduce((a, b) => ({ ...a, ...b }));
 
     this.initializeTempoFromScore();
+    this.syncRepeatToMeasureRange();
+    this.refreshMeasureOverlaysDeferred();
   }
 
   osmdStop(): void {
@@ -661,6 +762,9 @@ export class PlayPageComponent implements OnInit {
     this.notesService.clear();
     this.computerNotesService.clear();
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
+    this.activeRangeHandle = null;
+    window.removeEventListener('pointermove', this.onRangeHandlePointerMove);
+    window.removeEventListener('pointerup', this.onRangeHandlePointerUp);
   }
 
   // Resets the cursor to the first note
@@ -909,6 +1013,305 @@ export class PlayPageComponent implements OnInit {
 
     this.tempoInBPM = initialTempo ?? PlayPageComponent.DEFAULT_TEMPO_BPM;
     this.notesService.tempoInBPM = this.tempoInBPM;
+  }
+
+  private syncRepeatToMeasureRange(): void {
+    const isFullRange =
+      this.inputMeasure.lower === this.inputMeasureRange.lower &&
+      this.inputMeasure.upper === this.inputMeasureRange.upper;
+
+    this.checkboxRepeat = !isFullRange;
+    this.repeatValue = this.checkboxRepeat ? this.repeatCfg : 0;
+  }
+
+  private readonly onRangeHandlePointerMove = (event: PointerEvent): void => {
+    if (!this.activeRangeHandle) {
+      return;
+    }
+
+    event.preventDefault();
+    this.updateRangeHandleFromPointer(this.activeRangeHandle, event);
+  };
+
+  private readonly onRangeHandlePointerUp = (): void => {
+    this.activeRangeHandle = null;
+    window.removeEventListener('pointermove', this.onRangeHandlePointerMove);
+    window.removeEventListener('pointerup', this.onRangeHandlePointerUp);
+  };
+
+  private updateRangeHandleFromPointer(
+    handle: RangeHandle,
+    event: PointerEvent
+  ): void {
+    const measure = this.findClosestMeasureOverlay(handle, event);
+    if (!measure) {
+      return;
+    }
+
+    if (handle === 'start') {
+      this.updateLowerMeasure(measure.measureNumber.toString());
+    } else {
+      this.updateUpperMeasure(measure.measureNumber.toString());
+    }
+  }
+
+  private getMeasureOverlayForHandle(handle: RangeHandle): MeasureOverlay | undefined {
+    return this.measureOverlays.find((measure) =>
+      handle === 'start'
+        ? measure.measureNumber === this.inputMeasure.lower
+        : measure.measureNumber === this.inputMeasure.upper
+    );
+  }
+
+  private findClosestMeasureOverlay(
+    handle: RangeHandle,
+    event: PointerEvent
+  ): MeasureOverlay | undefined {
+    const container = document.getElementById('scoreOverlayHost');
+    if (!container || this.measureOverlays.length === 0) {
+      return undefined;
+    }
+
+    const rect = container.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+
+    const containingMeasure = this.measureOverlays.find(
+      (measure) =>
+        x >= measure.left &&
+        x <= measure.right &&
+        y >= measure.top - 24 &&
+        y <= measure.bottom + 16
+    );
+
+    if (containingMeasure) {
+      return containingMeasure;
+    }
+
+    let bestMeasure: MeasureOverlay | undefined;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    this.measureOverlays.forEach((measure) => {
+      const boundaryX = handle === 'start' ? measure.left : measure.right;
+      const clampedY = Math.max(measure.top, Math.min(y, measure.bottom));
+      const dx = x - boundaryX;
+      const dy = y - clampedY;
+      const distance = Math.hypot(dx, dy);
+
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestMeasure = measure;
+      }
+    });
+
+    return bestMeasure;
+  }
+
+  private refreshMeasureOverlaysDeferred(): void {
+    window.setTimeout(() => this.refreshMeasureOverlays(), 0);
+  }
+
+  private refreshMeasureOverlays(): void {
+    if (!this.fileLoaded) {
+      this.measureOverlays = [];
+      return;
+    }
+
+    const sheet: any = this.openSheetMusicDisplay?.Sheet;
+    const graphicSheet: any = this.openSheetMusicDisplay?.GraphicSheet;
+    const container = document.getElementById('scoreOverlayHost');
+
+    if (!sheet || !graphicSheet || !container) {
+      this.measureOverlays = [];
+      return;
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    const overlays: MeasureOverlay[] = [];
+
+    sheet.SourceMeasures.forEach((sourceMeasure: any, index: number) => {
+      const graphicalMeasures = this.getGraphicalMeasuresForSourceMeasure(
+        sourceMeasure,
+        index,
+        graphicSheet
+      );
+
+      if (!graphicalMeasures.length) {
+        return;
+      }
+
+      let left = Number.POSITIVE_INFINITY;
+      let right = Number.NEGATIVE_INFINITY;
+      let top = Number.POSITIVE_INFINITY;
+      let bottom = Number.NEGATIVE_INFINITY;
+
+      graphicalMeasures.forEach((measure: any) => {
+        const rect = this.getGraphicalMeasureDomRect(measure, graphicSheet);
+
+        if (!rect) {
+          return;
+        }
+
+        left = Math.min(left, rect.left - containerRect.left);
+        right = Math.max(right, rect.right - containerRect.left);
+        top = Math.min(top, rect.top - containerRect.top);
+        bottom = Math.max(bottom, rect.bottom - containerRect.top);
+      });
+
+      if (
+        !Number.isFinite(left) ||
+        !Number.isFinite(right) ||
+        !Number.isFinite(top) ||
+        !Number.isFinite(bottom)
+      ) {
+        return;
+      }
+
+      overlays.push({
+        measureNumber: index + 1,
+        left,
+        right,
+        top,
+        bottom,
+      });
+    });
+
+    this.measureOverlays = overlays;
+  }
+
+  private getGraphicalMeasuresForSourceMeasure(
+    sourceMeasure: any,
+    index: number,
+    graphicSheet: any
+  ): any[] {
+    const fromSource = (sourceMeasure?.VerticalMeasureList ?? []).filter(
+      (measure: any) => measure?.PositionAndShape
+    );
+
+    if (fromSource.length > 0) {
+      return fromSource;
+    }
+
+    const fromGraphicSheet = (graphicSheet?.MeasureList?.[index] ?? []).filter(
+      (measure: any) => measure?.PositionAndShape
+    );
+
+    return fromGraphicSheet;
+  }
+
+  private getGraphicalMeasureDomRect(
+    measure: any,
+    graphicSheet: any
+  ): { left: number; right: number; top: number; bottom: number } | null {
+    const box = measure?.PositionAndShape;
+    if (!box) {
+      return null;
+    }
+
+    const absoluteRect =
+      box.AbsolutePosition &&
+      Number.isFinite(box.BorderLeft) &&
+      Number.isFinite(box.BorderRight) &&
+      Number.isFinite(box.BorderTop) &&
+      Number.isFinite(box.BorderBottom)
+        ? {
+            x:
+              (box.AbsolutePosition.x + box.BorderLeft) *
+              PlayPageComponent.OSMD_UNIT_IN_PIXELS,
+            y:
+              (box.AbsolutePosition.y + box.BorderTop) *
+              PlayPageComponent.OSMD_UNIT_IN_PIXELS,
+            width:
+              (box.BorderRight - box.BorderLeft) *
+              PlayPageComponent.OSMD_UNIT_IN_PIXELS,
+            height:
+              (box.BorderBottom - box.BorderTop) *
+              PlayPageComponent.OSMD_UNIT_IN_PIXELS,
+          }
+        : null;
+
+    const rect =
+      absoluteRect ??
+      box.BoundingRectangle ??
+      (box.AbsolutePosition && box.Size
+        ? {
+            x: box.AbsolutePosition.x,
+            y: box.AbsolutePosition.y,
+            width: box.Size.width,
+            height: box.Size.height,
+          }
+        : null);
+
+    if (!rect) {
+      return null;
+    }
+
+    const svgRect = this.convertSvgRectToDomRect(rect);
+    if (svgRect) {
+      return svgRect;
+    }
+
+    const topLeft = graphicSheet.svgToDom?.({ x: rect.x, y: rect.y });
+    const bottomRight = graphicSheet.svgToDom?.({
+      x: rect.x + rect.width,
+      y: rect.y + rect.height,
+    });
+
+    if (
+      !topLeft ||
+      !bottomRight ||
+      !Number.isFinite(topLeft.x) ||
+      !Number.isFinite(topLeft.y) ||
+      !Number.isFinite(bottomRight.x) ||
+      !Number.isFinite(bottomRight.y)
+    ) {
+      return null;
+    }
+
+    return {
+      left: Math.min(topLeft.x, bottomRight.x),
+      right: Math.max(topLeft.x, bottomRight.x),
+      top: Math.min(topLeft.y, bottomRight.y),
+      bottom: Math.max(topLeft.y, bottomRight.y),
+    };
+  }
+
+  private convertSvgRectToDomRect(rect: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }): { left: number; right: number; top: number; bottom: number } | null {
+    const svg = document.querySelector('#osmdContainer svg') as SVGSVGElement | null;
+    if (!svg) {
+      return null;
+    }
+
+    const svgBounds = svg.getBoundingClientRect();
+    const viewBox = svg.viewBox?.baseVal;
+    const viewWidth = viewBox?.width || svg.width.baseVal.value;
+    const viewHeight = viewBox?.height || svg.height.baseVal.value;
+    const viewX = viewBox?.x ?? 0;
+    const viewY = viewBox?.y ?? 0;
+
+    if (
+      !Number.isFinite(viewWidth) ||
+      !Number.isFinite(viewHeight) ||
+      viewWidth <= 0 ||
+      viewHeight <= 0
+    ) {
+      return null;
+    }
+
+    const scaleX = svgBounds.width / viewWidth;
+    const scaleY = svgBounds.height / viewHeight;
+
+    return {
+      left: svgBounds.left + (rect.x - viewX) * scaleX,
+      right: svgBounds.left + (rect.x + rect.width - viewX) * scaleX,
+      top: svgBounds.top + (rect.y - viewY) * scaleY,
+      bottom: svgBounds.top + (rect.y + rect.height - viewY) * scaleY,
+    };
   }
 
   private startMetronome(): void {

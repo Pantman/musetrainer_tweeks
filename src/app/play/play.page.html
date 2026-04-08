@@ -48,28 +48,20 @@
       </ion-col>
       <ion-col size="{{ isMobileLayout ? 4 : 3 }}">
         <ion-row class="flex items-center">
-          <ion-label class="mr-2">
-            Range
-          </ion-label>
-          <select class="measure-select" [(ngModel)]="inputMeasure.lower" [disabled]="running"
-            (ngModelChange)="updateLowerMeasure($event)">
-            <option *ngFor="let m of listMeasure()" [ngValue]="m">{{ m }}</option>
-          </select>
-          <select class="measure-select" [(ngModel)]="inputMeasure.upper" [disabled]="running"
-            (ngModelChange)="updateUpperMeasure($event)">
-            <option *ngFor="let m of listMeasure()" [ngValue]="m">{{ m }}</option>
-          </select>
+          <ion-button color="dark" [disabled]="running || !fileLoaded" size="small"
+            [fill]="showRangePicker ? 'solid' : 'outline'" (click)="toggleRangePicker()">
+            <ion-icon name="albums-outline" slot="start"></ion-icon>
+            <ion-text>{{ getRangeSummary() }}</ion-text>
+          </ion-button>
         </ion-row>
       </ion-col>
       <ion-col size="3">
         <ion-row class="flex items-center">
-          <ion-label class="mr-2">
-            Repeat
+          <ion-label class="mr-2 opacity-80">
+            Loop
           </ion-label>
-          <ion-toggle [(ngModel)]="checkboxRepeat" (ionChange)="updateRepeat()"
-            color="dark" [enableOnOffLabels]="true" [disabled]="running"></ion-toggle>
-          <ion-label class="w-8 text-right opacity-80" *ngIf="checkboxRepeat">
-            {{repeatValue}}x
+          <ion-label class="w-20 text-right opacity-80">
+            {{ checkboxRepeat ? repeatCfg + 'x' : 'Off' }}
           </ion-label>
         </ion-row>
       </ion-col>
@@ -97,7 +89,40 @@
     <ion-spinner name="circles"></ion-spinner>
     <ion-label class="m-4">Preparing your masterpiece...</ion-label>
   </ion-row>
-  <ion-row style="background-color: white;" id="osmdContainer"></ion-row>
+  <div class="score-shell" id="scoreOverlayHost">
+    <ion-row style="background-color: white;" id="osmdContainer"></ion-row>
+
+    <div class="score-range-overlay" *ngIf="fileLoaded">
+      <div
+        *ngFor="let measure of getRangeShadedMeasures()"
+        class="score-range-overlay__shade"
+        [ngStyle]="getMeasureShadeStyle(measure)"
+      ></div>
+
+      <div class="score-range-overlay__selection" *ngIf="showRangePicker && !running">
+        <div
+          *ngIf="getRangeHandleStyle('start').left"
+          class="score-range-overlay__handle score-range-overlay__handle--start"
+          [ngStyle]="getRangeHandleStyle('start')"
+          (pointerdown)="startRangeHandleDrag('start', $event)"
+        >
+          <div class="score-range-overlay__grabber">
+            <ion-icon name="reorder-two-outline"></ion-icon>
+          </div>
+        </div>
+        <div
+          *ngIf="getRangeHandleStyle('end').left"
+          class="score-range-overlay__handle score-range-overlay__handle--end"
+          [ngStyle]="getRangeHandleStyle('end')"
+          (pointerdown)="startRangeHandleDrag('end', $event)"
+        >
+          <div class="score-range-overlay__grabber">
+            <ion-icon name="reorder-two-outline"></ion-icon>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </ion-content>
 
 

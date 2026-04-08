@@ -59,6 +59,65 @@ ion-input{
   margin-right: 0;
 }
 
+.score-shell {
+  position: relative;
+}
+
+.score-range-overlay {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
+.score-range-overlay__shade {
+  background: rgb(148 163 184 / 0.18);
+  border-radius: 0.35rem;
+  position: absolute;
+}
+
+.score-range-overlay__selection {
+  inset: 0;
+  position: absolute;
+}
+
+.score-range-overlay__handle {
+  pointer-events: auto;
+  position: absolute;
+  transform: translateX(-1px);
+  width: 2px;
+}
+
+.score-range-overlay__handle::after {
+  background: #111827;
+  bottom: 0;
+  content: '';
+  left: 0;
+  opacity: 0.7;
+  position: absolute;
+  top: 18px;
+  width: 2px;
+}
+
+.score-range-overlay__grabber {
+  align-items: center;
+  background: #111827;
+  border-radius: 999px;
+  color: #ffffff;
+  cursor: ew-resize;
+  display: flex;
+  height: 18px;
+  justify-content: center;
+  left: 50%;
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  width: 18px;
+}
+
+.score-range-overlay__grabber ion-icon {
+  font-size: 0.85rem;
+}
+
 .tempo-select {
   background: transparent;
   border: 1px solid #d1d5db;
