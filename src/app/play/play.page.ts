@@ -32,6 +32,11 @@ interface MeasureOverlay {
   bottom: number;
 }
 
+interface MeasureRange {
+  lower: number;
+  upper: number;
+}
+
 @Component({
   selector: 'app-home',
   templateUrl: 'play.page.html',
@@ -70,6 +75,7 @@ export class PlayPageComponent implements OnInit {
   inputMeasureRange = { lower: 0, upper: 0 };
   measureOverlays: MeasureOverlay[] = [];
   checkboxRepeat: boolean = false;
+  savedLoopRange: MeasureRange | null = null;
   loopPass: number = 0;
   zoomValue: number = 1;
   zoomText: string = '100%';
@@ -278,7 +284,12 @@ export class PlayPageComponent implements OnInit {
       return;
     }
 
-    this.showRangePicker = !this.showRangePicker;
+    if (this.checkboxRepeat || this.showRangePicker) {
+      this.clearLoopRange();
+    } else {
+      this.restoreLoopRange();
+    }
+
     this.refreshMeasureOverlaysDeferred();
   }
 
@@ -290,7 +301,15 @@ export class PlayPageComponent implements OnInit {
     return `Bars ${this.inputMeasure.lower}-${this.inputMeasure.upper}`;
   }
 
+  isLoopEnabled(): boolean {
+    return this.checkboxRepeat || this.showRangePicker;
+  }
+
   getRangeShadedMeasures(): MeasureOverlay[] {
+    if (!this.checkboxRepeat) {
+      return [];
+    }
+
     return this.measureOverlays.filter(
       (measure) =>
         measure.measureNumber < this.inputMeasure.lower ||
@@ -1015,7 +1034,42 @@ export class PlayPageComponent implements OnInit {
       this.inputMeasure.upper === this.inputMeasureRange.upper;
 
     this.checkboxRepeat = !isFullRange;
+    if (this.checkboxRepeat) {
+      this.savedLoopRange = {
+        lower: this.inputMeasure.lower,
+        upper: this.inputMeasure.upper,
+      };
+      this.showRangePicker = true;
+    }
     this.loopPass = 0;
+  }
+
+  private clearLoopRange(): void {
+    if (this.checkboxRepeat) {
+      this.savedLoopRange = {
+        lower: this.inputMeasure.lower,
+        upper: this.inputMeasure.upper,
+      };
+    }
+
+    this.checkboxRepeat = false;
+    this.showRangePicker = false;
+    this.loopPass = 0;
+    this.inputMeasure.lower = this.inputMeasureRange.lower;
+    this.inputMeasure.upper = this.inputMeasureRange.upper;
+  }
+
+  private restoreLoopRange(): void {
+    if (this.savedLoopRange) {
+      this.inputMeasure.lower = this.savedLoopRange.lower;
+      this.inputMeasure.upper = this.savedLoopRange.upper;
+      this.checkboxRepeat = true;
+      this.showRangePicker = true;
+      this.loopPass = 0;
+      return;
+    }
+
+    this.showRangePicker = true;
   }
 
   private readonly onRangeHandlePointerMove = (event: PointerEvent): void => {

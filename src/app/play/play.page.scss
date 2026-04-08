@@ -61,12 +61,34 @@ ion-input{
 
 .score-shell {
   position: relative;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.score-shell :deep(svg),
+.score-shell :deep(text),
+.score-shell :deep(tspan) {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.score-shell--locked #osmdContainer {
+  pointer-events: none;
+}
+
+.score-shell__interaction-blocker {
+  cursor: default;
+  inset: 0;
+  pointer-events: auto;
+  position: absolute;
+  z-index: 1;
 }
 
 .score-range-overlay {
   inset: 0;
   pointer-events: none;
   position: absolute;
+  z-index: 2;
 }
 
 .score-range-overlay__shade {

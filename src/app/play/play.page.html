@@ -49,9 +49,9 @@
       <ion-col size="{{ isMobileLayout ? 4 : 3 }}">
         <ion-row class="flex items-center">
           <ion-button color="dark" [disabled]="running || !fileLoaded" size="small"
-            [fill]="showRangePicker ? 'solid' : 'outline'" (click)="toggleRangePicker()">
-            <ion-icon name="albums-outline" slot="start"></ion-icon>
-            <ion-text>{{ getRangeSummary() }}</ion-text>
+            [fill]="isLoopEnabled() ? 'solid' : 'outline'" (click)="toggleRangePicker()">
+            <ion-icon name="sync-outline" slot="start"></ion-icon>
+            <ion-text>Loop</ion-text>
           </ion-button>
         </ion-row>
       </ion-col>
@@ -79,8 +79,9 @@
     <ion-spinner name="circles"></ion-spinner>
     <ion-label class="m-4">Preparing your masterpiece...</ion-label>
   </ion-row>
-  <div class="score-shell" id="scoreOverlayHost">
+  <div class="score-shell" id="scoreOverlayHost" [class.score-shell--locked]="running">
     <ion-row style="background-color: white;" id="osmdContainer"></ion-row>
+    <div class="score-shell__interaction-blocker" *ngIf="running"></div>
 
     <div class="score-range-overlay" *ngIf="fileLoaded">
       <div
