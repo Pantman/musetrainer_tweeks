@@ -1164,28 +1164,16 @@ export class PlayPageComponent implements OnInit {
     const rect = container.getBoundingClientRect();
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
-
-    const containingMeasure = this.measureOverlays.find(
-      (measure) =>
-        x >= measure.left &&
-        x <= measure.right &&
-        y >= measure.top - 24 &&
-        y <= measure.bottom + 16
-    );
-
-    if (containingMeasure) {
-      return containingMeasure;
-    }
+    const candidates = this.getMeasuresForNearestStaffLine(y);
 
     let bestMeasure: MeasureOverlay | undefined;
     let bestDistance = Number.POSITIVE_INFINITY;
 
-    this.measureOverlays.forEach((measure) => {
+    candidates.forEach((measure) => {
       const boundaryX = handle === 'start' ? measure.left : measure.right;
-      const clampedY = Math.max(measure.top, Math.min(y, measure.bottom));
-      const dx = x - boundaryX;
-      const dy = y - clampedY;
-      const distance = Math.hypot(dx, dy);
+      const dx = Math.abs(x - boundaryX);
+      const dy = Math.abs(y - (measure.top + measure.bottom) / 2);
+      const distance = dx + dy * 0.05;
 
       if (distance < bestDistance) {
         bestDistance = distance;
@@ -1235,6 +1223,39 @@ export class PlayPageComponent implements OnInit {
     });
 
     return bestMeasure;
+  }
+
+  private getMeasuresForNearestStaffLine(y: number): MeasureOverlay[] {
+    if (this.measureOverlays.length === 0) {
+      return [];
+    }
+
+    const tolerance = 12;
+    const matchingLine = this.measureOverlays.filter(
+      (measure) => y >= measure.top - tolerance && y <= measure.bottom + tolerance
+    );
+
+    if (matchingLine.length > 0) {
+      return matchingLine;
+    }
+
+    let bestCenterY = Number.POSITIVE_INFINITY;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    this.measureOverlays.forEach((measure) => {
+      const centerY = (measure.top + measure.bottom) / 2;
+      const distance = Math.abs(y - centerY);
+
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestCenterY = centerY;
+      }
+    });
+
+    return this.measureOverlays.filter(
+      (measure) =>
+        Math.abs((measure.top + measure.bottom) / 2 - bestCenterY) < tolerance
+    );
   }
 
   private applyDraggedRange(startMeasure: number, endMeasure: number): void {
