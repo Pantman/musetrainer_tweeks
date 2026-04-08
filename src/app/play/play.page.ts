@@ -27,6 +27,7 @@ declare const Ionic: any;
   styleUrls: ['play.page.scss'],
 })
 export class PlayPageComponent implements OnInit {
+  private static readonly DEFAULT_TEMPO_BPM = 120;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
   private pianoKeyboard?: PianoKeyboardComponent;
@@ -368,15 +369,11 @@ export class PlayPageComponent implements OnInit {
     if (this.osmdEndReached(1)) {
       // Caculate time to end of compass
       const iter = this.openSheetMusicDisplay.cursors[1].iterator;
-      const timeout =
-        (((iter.CurrentMeasure.AbsoluteTimestamp.RealValue +
+      const timeout = this.getPlaybackDelayMs(
+        iter.CurrentMeasure.AbsoluteTimestamp.RealValue +
           iter.CurrentMeasure.Duration.RealValue -
-          iter.CurrentSourceTimestamp.RealValue) *
-          4 *
-          60000) /
-          this.tempoInBPM /
-          this.speedValue) *
-        100;
+          iter.CurrentSourceTimestamp.RealValue
+      );
       this.timeouts.push(
         setTimeout(() => {
           this.openSheetMusicDisplay.cursors[1].hide();
@@ -387,28 +384,20 @@ export class PlayPageComponent implements OnInit {
       const iter = this.openSheetMusicDisplay.cursors[1].iterator;
       const it2 = this.openSheetMusicDisplay.cursors[1].iterator.clone();
       it2.moveToNext();
-      let timeout =
-        (((it2.CurrentSourceTimestamp.RealValue -
-          iter.CurrentSourceTimestamp.RealValue) *
-          4 *
-          60000) /
-          this.tempoInBPM /
-          this.speedValue) *
-        100;
+      let timeout = this.getPlaybackDelayMs(
+        it2.CurrentSourceTimestamp.RealValue -
+          iter.CurrentSourceTimestamp.RealValue
+      );
 
       // On repeat sign, manually calculate
       if (timeout < 0) {
         const currMeasure =
           this.openSheetMusicDisplay.cursors[1].iterator.CurrentMeasure;
-        timeout =
-          (((currMeasure.AbsoluteTimestamp.RealValue +
+        timeout = this.getPlaybackDelayMs(
+          currMeasure.AbsoluteTimestamp.RealValue +
             currMeasure.Duration.RealValue -
-            iter.CurrentSourceTimestamp.RealValue) *
-            4 *
-            60000) /
-            this.tempoInBPM /
-            this.speedValue) *
-          100;
+            iter.CurrentSourceTimestamp.RealValue
+        );
       }
 
       this.timeouts.push(
@@ -450,15 +439,11 @@ export class PlayPageComponent implements OnInit {
     // if ended reached check repeat and start or stop
     if (this.osmdEndReached(0)) {
       const iter = this.openSheetMusicDisplay.cursors[0].iterator;
-      const timeout =
-        (((iter.CurrentMeasure.AbsoluteTimestamp.RealValue +
+      const timeout = this.getPlaybackDelayMs(
+        iter.CurrentMeasure.AbsoluteTimestamp.RealValue +
           iter.CurrentMeasure.Duration.RealValue -
-          iter.CurrentSourceTimestamp.RealValue) *
-          4 *
-          60000) /
-          this.tempoInBPM /
-          this.speedValue) *
-        100;
+          iter.CurrentSourceTimestamp.RealValue
+      );
       this.openSheetMusicDisplay.cursors[0].hide();
       this.timeouts.push(
         setTimeout(() => {
@@ -590,15 +575,11 @@ export class PlayPageComponent implements OnInit {
     const it2 = this.openSheetMusicDisplay.cursors[0].iterator.clone();
     it2.moveToNext();
 
-    const timeout =
-      (((it2.CurrentSourceTimestamp.RealValue -
+    const timeout = this.getPlaybackDelayMs(
+      it2.CurrentSourceTimestamp.RealValue -
         this.openSheetMusicDisplay.cursors[0].iterator.CurrentSourceTimestamp
-          .RealValue) *
-        4 *
-        60000) /
-        this.tempoInBPM /
-        this.speedValue) *
-      100;
+          .RealValue
+    );
     this.timeouts.push(
       setTimeout(() => {
         this.osmdCursorTempoMoveNext();
@@ -691,6 +672,26 @@ export class PlayPageComponent implements OnInit {
 
   speedFormatter(s: number) {
     return `${(s / 100).toFixed(1).replace('.0', '')}x`;
+  }
+
+  private getPlaybackDelayMs(durationInWholeNotes: number): number {
+    const tempoInBPM =
+      Number.isFinite(this.tempoInBPM) && this.tempoInBPM > 0
+        ? this.tempoInBPM
+        : PlayPageComponent.DEFAULT_TEMPO_BPM;
+    const speedMultiplier =
+      Number.isFinite(this.speedValue) && this.speedValue > 0
+        ? this.speedValue / 100
+        : 1;
+
+    if (!Number.isFinite(durationInWholeNotes)) {
+      return 0;
+    }
+
+    return Math.max(
+      (durationInWholeNotes * 4 * 60000) / tempoInBPM / speedMultiplier,
+      0
+    );
   }
 
   async notifyMidiConnect() {

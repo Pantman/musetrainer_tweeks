@@ -15,6 +15,7 @@ export type NoteObject = {
   providedIn: 'root',
 })
 export class NotesService {
+  static readonly DEFAULT_TEMPO_BPM = 120;
   mapPressed: Map<string, number> = new Map();
   // Initialize maps of notes comming from Music Sheet
   mapRequired = new Map<string, NoteObject>();
@@ -22,7 +23,7 @@ export class NotesService {
   tempoInBPM: number;
 
   constructor() {
-    this.tempoInBPM = 120;
+    this.tempoInBPM = NotesService.DEFAULT_TEMPO_BPM;
   }
 
   getMapRequired(): Map<string, NoteObject> {
@@ -110,7 +111,12 @@ export class NotesService {
     // Register new notes under the cursor
     cursor.VoicesUnderCursor().forEach((voice) => {
       voice.Notes.forEach((value) => {
-        this.tempoInBPM = value.SourceMeasure.TempoInBPM;
+        const tempoInBPM = value.SourceMeasure.TempoInBPM;
+        // Imported scores do not always provide a usable tempo on every measure.
+        // Keep the last valid tempo so playback does not collapse into 0 ms timeouts.
+        if (Number.isFinite(tempoInBPM) && tempoInBPM > 0) {
+          this.tempoInBPM = tempoInBPM;
+        }
         // value.ParentStaff.idInMusicSheet = 0,1,2,3
         // value.ParentStaff.Id = 1,2
         if (staffIdEnabled[value.ParentStaff.idInMusicSheet]) {
