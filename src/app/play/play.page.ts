@@ -689,14 +689,16 @@ export class PlayPageComponent implements OnInit {
 
   osmdCursorStart2(): void {
     if (this.startFlashCount > 0) {
+      this.playCountInClick();
       if (this.openSheetMusicDisplay.cursors[0].hidden)
         this.openSheetMusicDisplay.cursors[0].show();
       else this.openSheetMusicDisplay.cursors[0].hide();
       this.startFlashCount--;
+      const countInDelay = this.getCountInDelayMs();
       this.timeouts.push(
         setTimeout(() => {
           this.osmdCursorStart2();
-        }, 1000)
+        }, countInDelay)
       );
       return;
     }
@@ -881,6 +883,23 @@ export class PlayPageComponent implements OnInit {
     }
 
     void startTone().catch(() => undefined);
+  }
+
+  private playCountInClick(): void {
+    void startTone().catch(() => undefined);
+
+    const isDownbeat = this.startFlashCount === 4;
+    this.metronome?.triggerAttackRelease(
+      isDownbeat ? 'A5' : 'E5',
+      '16n',
+      this.getScheduledAudioTime()
+    );
+  }
+
+  private getCountInDelayMs(): number {
+    const measure = this.openSheetMusicDisplay.cursors[0]?.iterator?.CurrentMeasure;
+    const beatLength = measure ? this.getBeatLengthInWholeNotes(measure) : 0.25;
+    return this.getPlaybackDelayMs(beatLength);
   }
 
   private scheduleMetronomeWindow(
