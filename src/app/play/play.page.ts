@@ -405,7 +405,7 @@ export class PlayPageComponent implements OnInit {
   }
 
   startRangeSelection(event: PointerEvent): void {
-    if (!this.showRangePicker || this.running) {
+    if (this.running || !this.fileLoaded) {
       return;
     }
 

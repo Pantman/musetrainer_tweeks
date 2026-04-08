@@ -90,13 +90,13 @@
         [ngStyle]="getMeasureShadeStyle(measure)"
       ></div>
 
-      <div class="score-range-overlay__selection" *ngIf="showRangePicker && !running">
+      <div class="score-range-overlay__selection" *ngIf="!running">
         <div
           class="score-range-overlay__surface"
           (pointerdown)="startRangeSelection($event)"
         ></div>
         <div
-          *ngIf="getRangeHandleStyle('start').left"
+          *ngIf="showRangePicker && getRangeHandleStyle('start').left"
           class="score-range-overlay__handle score-range-overlay__handle--start"
           [ngStyle]="getRangeHandleStyle('start')"
           (pointerdown)="startRangeHandleDrag('start', $event)"
@@ -106,7 +106,7 @@
           </div>
         </div>
         <div
-          *ngIf="getRangeHandleStyle('end').left"
+          *ngIf="showRangePicker && getRangeHandleStyle('end').left"
           class="score-range-overlay__handle score-range-overlay__handle--end"
           [ngStyle]="getRangeHandleStyle('end')"
           (pointerdown)="startRangeHandleDrag('end', $event)"
