@@ -671,6 +671,7 @@ export class PlayPageComponent implements OnInit {
     this.openSheetMusicDisplay.cursors.forEach((cursor, index) => {
       if (index != 0) cursor.show();
       cursor.reset();
+      cursor.update();
       if (this.listenMode && index == 1) {
         // Comment out this to enable debug mode
         cursor.hide();
@@ -697,6 +698,8 @@ export class PlayPageComponent implements OnInit {
       if (!this.osmdCursorMoveNext(0)) return;
       this.osmdCursorMoveNext(1);
     }
+
+    this.openSheetMusicDisplay.cursors.forEach((cursor) => cursor.update());
 
     this.suppressPlayCursorAnimation = false;
 
