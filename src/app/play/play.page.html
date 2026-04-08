@@ -92,6 +92,10 @@
 
       <div class="score-range-overlay__selection" *ngIf="showRangePicker && !running">
         <div
+          class="score-range-overlay__surface"
+          (pointerdown)="startRangeSelection($event)"
+        ></div>
+        <div
           *ngIf="getRangeHandleStyle('start').left"
           class="score-range-overlay__handle score-range-overlay__handle--start"
           [ngStyle]="getRangeHandleStyle('start')"

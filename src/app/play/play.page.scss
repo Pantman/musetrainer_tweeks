@@ -102,6 +102,13 @@ ion-input{
   position: absolute;
 }
 
+.score-range-overlay__surface {
+  cursor: crosshair;
+  inset: 0;
+  pointer-events: auto;
+  position: absolute;
+}
+
 .score-range-overlay__handle {
   pointer-events: auto;
   position: absolute;

@@ -100,6 +100,7 @@ export class PlayPageComponent implements OnInit {
   currentStepSatisfied: boolean = false;
   suppressPlayCursorAnimation: boolean = false;
   private activeRangeHandle: RangeHandle | null = null;
+  private activeRangeSelectionStart: number | null = null;
 
   // tonejs/piano
   piano: Piano | null = null;
@@ -401,6 +402,23 @@ export class PlayPageComponent implements OnInit {
     this.updateRangeHandleFromPointer(handle, event);
     window.addEventListener('pointermove', this.onRangeHandlePointerMove);
     window.addEventListener('pointerup', this.onRangeHandlePointerUp);
+  }
+
+  startRangeSelection(event: PointerEvent): void {
+    if (!this.showRangePicker || this.running) {
+      return;
+    }
+
+    event.preventDefault();
+    const measure = this.findClosestMeasureOverlayAtPointer(event);
+    if (!measure) {
+      return;
+    }
+
+    this.activeRangeSelectionStart = measure.measureNumber;
+    this.applyDraggedRange(measure.measureNumber, measure.measureNumber);
+    window.addEventListener('pointermove', this.onRangeSelectionPointerMove);
+    window.addEventListener('pointerup', this.onRangeSelectionPointerUp);
   }
 
   // Load selected file
@@ -776,8 +794,11 @@ export class PlayPageComponent implements OnInit {
     this.computerNotesService.clear();
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
     this.activeRangeHandle = null;
+    this.activeRangeSelectionStart = null;
     window.removeEventListener('pointermove', this.onRangeHandlePointerMove);
     window.removeEventListener('pointerup', this.onRangeHandlePointerUp);
+    window.removeEventListener('pointermove', this.onRangeSelectionPointerMove);
+    window.removeEventListener('pointerup', this.onRangeSelectionPointerUp);
   }
 
   // Resets the cursor to the first note
@@ -1087,6 +1108,26 @@ export class PlayPageComponent implements OnInit {
     window.removeEventListener('pointerup', this.onRangeHandlePointerUp);
   };
 
+  private readonly onRangeSelectionPointerMove = (event: PointerEvent): void => {
+    if (this.activeRangeSelectionStart === null) {
+      return;
+    }
+
+    event.preventDefault();
+    const measure = this.findClosestMeasureOverlayAtPointer(event);
+    if (!measure) {
+      return;
+    }
+
+    this.applyDraggedRange(this.activeRangeSelectionStart, measure.measureNumber);
+  };
+
+  private readonly onRangeSelectionPointerUp = (): void => {
+    this.activeRangeSelectionStart = null;
+    window.removeEventListener('pointermove', this.onRangeSelectionPointerMove);
+    window.removeEventListener('pointerup', this.onRangeSelectionPointerUp);
+  };
+
   private updateRangeHandleFromPointer(
     handle: RangeHandle,
     event: PointerEvent
@@ -1153,6 +1194,55 @@ export class PlayPageComponent implements OnInit {
     });
 
     return bestMeasure;
+  }
+
+  private findClosestMeasureOverlayAtPointer(
+    event: PointerEvent
+  ): MeasureOverlay | undefined {
+    const container = document.getElementById('scoreOverlayHost');
+    if (!container || this.measureOverlays.length === 0) {
+      return undefined;
+    }
+
+    const rect = container.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+
+    const containingMeasure = this.measureOverlays.find(
+      (measure) =>
+        x >= measure.left &&
+        x <= measure.right &&
+        y >= measure.top &&
+        y <= measure.bottom
+    );
+
+    if (containingMeasure) {
+      return containingMeasure;
+    }
+
+    let bestMeasure: MeasureOverlay | undefined;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    this.measureOverlays.forEach((measure) => {
+      const centerX = (measure.left + measure.right) / 2;
+      const centerY = (measure.top + measure.bottom) / 2;
+      const distance = Math.hypot(x - centerX, y - centerY);
+
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestMeasure = measure;
+      }
+    });
+
+    return bestMeasure;
+  }
+
+  private applyDraggedRange(startMeasure: number, endMeasure: number): void {
+    const lower = Math.min(startMeasure, endMeasure);
+    const upper = Math.max(startMeasure, endMeasure);
+
+    this.updateLowerMeasure(lower.toString());
+    this.updateUpperMeasure(upper.toString());
   }
 
   private refreshMeasureOverlaysDeferred(): void {
