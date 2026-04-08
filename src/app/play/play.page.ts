@@ -70,8 +70,7 @@ export class PlayPageComponent implements OnInit {
   inputMeasureRange = { lower: 0, upper: 0 };
   measureOverlays: MeasureOverlay[] = [];
   checkboxRepeat: boolean = false;
-  repeatValue: number = 0;
-  repeatCfg: number = 10;
+  loopPass: number = 0;
   zoomValue: number = 1;
   zoomText: string = '100%';
   startFlashCount: number = 0;
@@ -265,11 +264,7 @@ export class PlayPageComponent implements OnInit {
 
   // GUI Repeat
   updateRepeat(): void {
-    if (this.checkboxRepeat) {
-      this.repeatValue = this.repeatCfg;
-    } else {
-      this.repeatValue = 0;
-    }
+    this.loopPass = 0;
   }
 
   listMeasure(): number[] {
@@ -710,11 +705,10 @@ export class PlayPageComponent implements OnInit {
       this.openSheetMusicDisplay.cursors[0].hide();
       this.timeouts.push(
         setTimeout(() => {
-          if (this.repeatValue > 0) {
-            this.repeatValue--;
+          if (this.checkboxRepeat) {
+            this.loopPass++;
             this.osmdCursorStart();
           } else {
-            this.repeatValue = this.repeatCfg;
             this.osmdCursorStop();
           }
         }, timeout)
@@ -783,7 +777,7 @@ export class PlayPageComponent implements OnInit {
     });
 
     // Additional tasks in case of new start, not required in repetition
-    if (this.repeatValue == this.repeatCfg) {
+    if (this.loopPass === 0) {
       this.notesService.clear();
       this.computerNotesService.clear();
       this.releaseComputerPressedNotes();
@@ -934,7 +928,7 @@ export class PlayPageComponent implements OnInit {
       (document.getElementById('cursorImg-0')?.style.left ?? '') +
       y +
       '_' +
-      this.repeatValue;
+      this.loopPass;
 
     const feedbackElementId = `feedback-${id}`;
     const oldElem = document.getElementById(feedbackElementId);
@@ -945,7 +939,7 @@ export class PlayPageComponent implements OnInit {
     }
     const elem: HTMLElement = document.createElement('p');
     elem.id = feedbackElementId;
-    elem.className = 'feedback r' + this.repeatValue;
+    elem.className = 'feedback r' + this.loopPass;
     elem.style.position = 'absolute';
     elem.style.zIndex = '-1';
     elem.innerHTML = text;
@@ -1021,7 +1015,7 @@ export class PlayPageComponent implements OnInit {
       this.inputMeasure.upper === this.inputMeasureRange.upper;
 
     this.checkboxRepeat = !isFullRange;
-    this.repeatValue = this.checkboxRepeat ? this.repeatCfg : 0;
+    this.loopPass = 0;
   }
 
   private readonly onRangeHandlePointerMove = (event: PointerEvent): void => {
@@ -1767,11 +1761,10 @@ export class PlayPageComponent implements OnInit {
 
     if (this.osmdEndReached(0)) {
       this.openSheetMusicDisplay.cursors[0].hide();
-      if (this.repeatValue > 0) {
-        this.repeatValue--;
+      if (this.checkboxRepeat) {
+        this.loopPass++;
         this.osmdCursorStart();
       } else {
-        this.repeatValue = this.repeatCfg;
         this.osmdCursorStop();
       }
       return;
