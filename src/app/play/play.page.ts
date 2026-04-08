@@ -3,7 +3,6 @@ import {
   IonContent,
   NavController,
   Platform,
-  RangeCustomEvent,
   RefresherCustomEvent,
   ToastController,
 } from '@ionic/angular';
@@ -21,6 +20,8 @@ import packageJson from '../../../package.json';
 
 declare const Ionic: any;
 
+type TempoPreset = 'normal' | 'slow' | 'verySlow' | 'custom';
+
 @Component({
   selector: 'app-home',
   templateUrl: 'play.page.html',
@@ -28,6 +29,9 @@ declare const Ionic: any;
 })
 export class PlayPageComponent implements OnInit {
   private static readonly DEFAULT_TEMPO_BPM = 120;
+  private static readonly MIN_SPEED_PERCENT = 30;
+  private static readonly MAX_SPEED_PERCENT = 180;
+  private static readonly TEMPO_STEP_BPM = 5;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
   private pianoKeyboard?: PianoKeyboardComponent;
@@ -68,6 +72,7 @@ export class PlayPageComponent implements OnInit {
   skipPlayNotes: number = 0;
   tempoInBPM: number = 120;
   speedValue: number = 100;
+  tempoPreset: TempoPreset = 'normal';
   timeouts: NodeJS.Timeout[] = [];
 
   // tonejs/piano
@@ -172,15 +177,39 @@ export class PlayPageComponent implements OnInit {
     this.openSheetMusicDisplay.render();
   }
 
-  // GUI Play speed
-  updateSpeed(qp: string): void {
-    let speedInt = parseInt(qp);
-    if (isNaN(speedInt)) speedInt = 100;
+  updateTempoPreset(preset: TempoPreset): void {
+    this.tempoPreset = preset;
 
-    if (speedInt < 30) speedInt = 30;
-    if (speedInt > 180) speedInt = 180;
+    switch (preset) {
+      case 'normal':
+        this.speedValue = 100;
+        break;
+      case 'slow':
+        this.speedValue = 75;
+        break;
+      case 'verySlow':
+        this.speedValue = 50;
+        break;
+      default:
+        break;
+    }
+  }
 
-    this.speedValue = speedInt;
+  adjustTempo(deltaBPM: number): void {
+    const nextTempo = this.getEffectiveTempoBPM() + deltaBPM;
+    this.setEffectiveTempoBPM(nextTempo);
+  }
+
+  setEffectiveTempoBPM(nextTempoBPM: number): void {
+    const baseTempo = this.getScoreTempoBPM();
+    const clampedTempo = Math.max(nextTempoBPM, 20);
+    const nextSpeedPercent = Math.round((clampedTempo / baseTempo) * 100);
+
+    this.speedValue = Math.min(
+      Math.max(nextSpeedPercent, PlayPageComponent.MIN_SPEED_PERCENT),
+      PlayPageComponent.MAX_SPEED_PERCENT
+    );
+    this.tempoPreset = 'custom';
   }
 
   // GUI Repeat
@@ -316,6 +345,8 @@ export class PlayPageComponent implements OnInit {
     this.staffIdEnabled = this.staffIdList
       .map((id) => ({ [id]: true }))
       .reduce((a, b) => ({ ...a, ...b }));
+
+    this.initializeTempoFromScore();
   }
 
   osmdStop(): void {
@@ -663,35 +694,56 @@ export class PlayPageComponent implements OnInit {
     elem.style.color = color;
   }
 
-  onSpeedChange(ev: Event) {
-    const range = (ev as RangeCustomEvent).detail.value as any;
-    if (range) {
-      this.updateSpeed(range);
+  getEffectiveTempoBPM(): number {
+    return Math.round((this.getScoreTempoBPM() * this.speedValue) / 100);
+  }
+
+  getTempoPresetLabel(): string {
+    switch (this.tempoPreset) {
+      case 'normal':
+        return 'Normal';
+      case 'slow':
+        return 'Slow';
+      case 'verySlow':
+        return 'Very Slow';
+      default:
+        return 'Custom';
     }
   }
 
-  speedFormatter(s: number) {
-    return `${(s / 100).toFixed(1).replace('.0', '')}x`;
-  }
-
   private getPlaybackDelayMs(durationInWholeNotes: number): number {
-    const tempoInBPM =
-      Number.isFinite(this.tempoInBPM) && this.tempoInBPM > 0
-        ? this.tempoInBPM
-        : PlayPageComponent.DEFAULT_TEMPO_BPM;
-    const speedMultiplier =
-      Number.isFinite(this.speedValue) && this.speedValue > 0
-        ? this.speedValue / 100
-        : 1;
+    const tempoInBPM = this.getEffectiveTempoBPM();
 
     if (!Number.isFinite(durationInWholeNotes)) {
       return 0;
     }
 
     return Math.max(
-      (durationInWholeNotes * 4 * 60000) / tempoInBPM / speedMultiplier,
+      (durationInWholeNotes * 4 * 60000) / tempoInBPM,
       0
     );
+  }
+
+  private getScoreTempoBPM(): number {
+    return Number.isFinite(this.tempoInBPM) && this.tempoInBPM > 0
+      ? this.tempoInBPM
+      : PlayPageComponent.DEFAULT_TEMPO_BPM;
+  }
+
+  private initializeTempoFromScore(): void {
+    const sheet = this.openSheetMusicDisplay.Sheet;
+    const firstMeasure = sheet?.getFirstSourceMeasure();
+    const expressionTempo = sheet?.getExpressionsStartTempoInBPM?.();
+    const defaultTempo = sheet?.DefaultStartTempoInBpm;
+    const measureTempo = firstMeasure?.TempoInBPM;
+
+    const candidates = [expressionTempo, defaultTempo, measureTempo];
+    const initialTempo = candidates.find(
+      (tempo) => Number.isFinite(tempo) && (tempo as number) > 0
+    );
+
+    this.tempoInBPM = initialTempo ?? PlayPageComponent.DEFAULT_TEMPO_BPM;
+    this.notesService.tempoInBPM = this.tempoInBPM;
   }
 
   async notifyMidiConnect() {

@@ -59,6 +59,20 @@ ion-input{
   margin-right: 0;
 }
 
+.tempo-select {
+  background: transparent;
+  border: 1px solid #d1d5db;
+  border-radius: 0.5rem;
+  color: inherit;
+  font: inherit;
+  min-width: 7rem;
+  padding: 0.25rem 0.5rem;
+}
+
+.tempo-value {
+  min-width: 5rem;
+}
+
 .flag {
   width: 32px;
   height: 24px;
