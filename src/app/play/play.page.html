@@ -8,17 +8,21 @@
 
     <ion-row class="flex items-center justify-around text-sm">
       <ion-col size="1" class="mr-8">
-        <ion-button color="dark" disabled="{{ !fileLoaded || !midiAvailable }}" size="small"
-          (click)="isPracticing() ? osmdStop() : startPractice()" class="flex items-center w-20">
-          <ion-icon [name]="isPracticing() ? 'stop-outline' : 'play-outline'" slot="start"></ion-icon>
+        <ion-button color="dark" [disabled]="!running && !canStartTransport()" size="small"
+          (click)="running ? osmdStop() : startTransport()" class="flex items-center w-24">
+          <ion-icon [name]="running ? 'stop-outline' : 'play-outline'" slot="start"></ion-icon>
           <ion-text>
-            {{ isPracticing() ? 'STOP' : 'PLAY' }}
+            {{ getTransportLabel() }}
           </ion-text>
         </ion-button>
       </ion-col>
       <ion-col size="1">
-        <ion-button color="dark" disabled={{!fileLoaded}} size="small" (click)="isListening() ? osmdStop() : startListen()">
-          <ion-icon [name]="isListening() ? 'volume-mute-outline' : 'volume-high-outline'" slot="icon-only"></ion-icon>
+        <ion-button color="dark" [disabled]="running || !fileLoaded" size="small"
+          [fill]="checkboxWaitMode ? 'solid' : 'outline'" (click)="toggleWaitMode()">
+          <ion-icon name="pause-circle-outline" slot="start"></ion-icon>
+          <ion-text>
+            Wait {{ checkboxWaitMode ? 'On' : 'Off' }}
+          </ion-text>
         </ion-button>
       </ion-col>
       <ion-col size="3" class="mr-8" *ngIf="!isMobileLayout">
@@ -122,7 +126,7 @@
     </ion-item>
     <ion-list>
       <ion-item *ngFor="let id of staffIdList">
-        <ion-label color="dark">Staff {{ id+1 }}</ion-label>
+        <ion-label color="dark">{{ getStaffToggleLabel(id) }}</ion-label>
         <ion-toggle [disabled]="running || !fileLoaded" [(ngModel)]="staffIdEnabled[id]" color="dark" slot="end" [enableOnOffLabels]="true"></ion-toggle>
       </ion-item>
     </ion-list>

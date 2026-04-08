@@ -53,7 +53,8 @@ export class PlayPageComponent implements OnInit {
   checkboxKeyboard: boolean = true;
   checkboxMidiOut: boolean = false;
   checkboxMetronome: boolean = false;
-  checkboxFeedback: boolean = false;
+  checkboxWaitMode: boolean = true;
+  checkboxFeedback: boolean = true;
   inputMeasure = { lower: 0, upper: 0 };
   inputMeasureRange = { lower: 0, upper: 0 };
   checkboxRepeat: boolean = false;
@@ -78,10 +79,13 @@ export class PlayPageComponent implements OnInit {
   speedValue: number = 100;
   tempoPreset: TempoPreset = 'normal';
   timeouts: NodeJS.Timeout[] = [];
+  realtimeMode: boolean = false;
+  currentStepSatisfied: boolean = false;
 
   // tonejs/piano
   piano: Piano | null = null;
   metronome: Synth | null = null;
+  computerPressedNotes = new Map<string, number>();
   // Midi handlers
   midiHandlers: PluginListenerHandle[] = [];
 
@@ -331,18 +335,19 @@ export class PlayPageComponent implements OnInit {
     );
   }
 
-  startListen(): void {
+  startTransport(): void {
     void startTone().catch(() => undefined);
     this.updateRepeat();
     this.osmdStop();
-    this.osmdListen();
-  }
-
-  startPractice(): void {
-    void startTone().catch(() => undefined);
-    this.updateRepeat();
-    this.osmdStop();
-    this.osmdPractice();
+    if (this.checkboxWaitMode) {
+      this.osmdPractice();
+      return;
+    }
+    if (this.isRealtimePlaybackOnly()) {
+      this.osmdListen();
+      return;
+    }
+    this.osmdPracticeRealtime();
   }
 
   isListening(): boolean {
@@ -351,6 +356,48 @@ export class PlayPageComponent implements OnInit {
 
   isPracticing(): boolean {
     return this.running && !this.listenMode;
+  }
+
+  canStartTransport(): boolean {
+    if (!this.fileLoaded) {
+      return false;
+    }
+
+    if (this.checkboxWaitMode) {
+      return this.midiAvailable;
+    }
+
+    return this.isRealtimePlaybackOnly() || this.midiAvailable;
+  }
+
+  getTransportLabel(): string {
+    if (this.running) {
+      return 'STOP';
+    }
+
+    return 'PLAY';
+  }
+
+  getStaffToggleLabel(id: number): string {
+    if (this.checkboxWaitMode) {
+      return `Staff ${id + 1}`;
+    }
+
+    return `Computer staff ${id + 1}`;
+  }
+
+  toggleWaitMode(): void {
+    this.checkboxWaitMode = !this.checkboxWaitMode;
+
+    if (this.checkboxWaitMode) {
+      this.staffIdEnabled = this.staffIdList.reduce(
+        (selection, id) => ({
+          ...selection,
+          [id]: true,
+        }),
+        {} as Record<number, boolean>
+      );
+    }
   }
 
   // Reset selection on measures and set the cursor to the origin
@@ -375,9 +422,12 @@ export class PlayPageComponent implements OnInit {
 
   osmdStop(): void {
     this.running = false;
+    this.realtimeMode = false;
+    this.currentStepSatisfied = false;
     this.osmdCursorStop();
     this.timeouts.map((to) => clearTimeout(to));
     this.timeouts = [];
+    this.releaseComputerPressedNotes();
   }
 
   // Play
@@ -386,6 +436,7 @@ export class PlayPageComponent implements OnInit {
     this.skipPlayNotes = 0;
     this.osmdResetFeedback();
     this.listenMode = true;
+    this.realtimeMode = false;
     this.startFlashCount = 0;
     this.osmdCursorStart();
   }
@@ -396,6 +447,18 @@ export class PlayPageComponent implements OnInit {
     this.skipPlayNotes = 0;
     this.osmdResetFeedback();
     this.listenMode = false;
+    this.realtimeMode = false;
+    this.startFlashCount = 4;
+    this.osmdCursorStart();
+  }
+
+  osmdPracticeRealtime(): void {
+    this.running = true;
+    this.skipPlayNotes = 0;
+    this.osmdResetFeedback();
+    this.listenMode = false;
+    this.realtimeMode = true;
+    this.currentStepSatisfied = false;
     this.startFlashCount = 4;
     this.osmdCursorStart();
   }
@@ -423,6 +486,11 @@ export class PlayPageComponent implements OnInit {
       this.openSheetMusicDisplay.cursors[1].iterator.CurrentSourceTimestamp
         .RealValue;
     const audioTime = this.getScheduledAudioTime();
+
+    if (this.realtimeMode) {
+      this.advanceRealtimePractice(audioTime);
+    }
+
     let nextTimestamp = currentTimestamp;
 
     // if ended reached check repeat and start or stop
@@ -529,7 +597,7 @@ export class PlayPageComponent implements OnInit {
     // Calculate notes
     this.notesService.calculateRequired(
       this.openSheetMusicDisplay.cursors[0],
-      this.staffIdEnabled
+      this.getPracticeStaffSelection()
     );
 
     this.tempoInBPM = this.notesService.tempoInBPM;
@@ -547,6 +615,7 @@ export class PlayPageComponent implements OnInit {
   // Stop cursor
   osmdCursorStop(): void {
     this.listenMode = false;
+    this.realtimeMode = false;
     this.running = false;
 
     this.openSheetMusicDisplay.cursors.forEach((cursor) => {
@@ -558,6 +627,7 @@ export class PlayPageComponent implements OnInit {
       this.keyReleaseNote(parseInt(key) + 12);
     }
     this.mapNotesAutoPressed.clear();
+    this.computerPressedNotes.clear();
     this.notesService.clear();
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
   }
@@ -577,6 +647,7 @@ export class PlayPageComponent implements OnInit {
     // Additional tasks in case of new start, not required in repetition
     if (this.repeatValue == this.repeatCfg) {
       this.notesService.clear();
+      this.releaseComputerPressedNotes();
       // free auto pressed notes
       for (const [key] of this.mapNotesAutoPressed) {
         this.keyReleaseNote(parseInt(key) + 12);
@@ -596,11 +667,15 @@ export class PlayPageComponent implements OnInit {
     // Calculate first notes
     this.notesService.calculateRequired(
       this.openSheetMusicDisplay.cursors[0],
-      this.staffIdEnabled,
+      this.getPracticeStaffSelection(),
       true
     );
 
     this.tempoInBPM = this.notesService.tempoInBPM;
+
+    if (this.realtimeMode) {
+      this.syncRealtimeStepState(true);
+    }
 
     // Update keyboard
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
@@ -625,7 +700,7 @@ export class PlayPageComponent implements OnInit {
     this.openSheetMusicDisplay.cursors[0].show();
 
     // Skip initial rests
-    if (this.notesService.isRequiredNotesPressed()) {
+    if (!this.realtimeMode && this.notesService.isRequiredNotesPressed()) {
       this.skipPlayNotes++;
       this.osmdCursorPlayMoveNext();
     }
@@ -641,6 +716,8 @@ export class PlayPageComponent implements OnInit {
     // Play initial notes
     if (this.listenMode) {
       this.playNote(audioTime);
+    } else if (this.realtimeMode) {
+      this.playComputerNotes(audioTime);
     }
 
     const it2 = this.openSheetMusicDisplay.cursors[0].iterator.clone();
@@ -996,12 +1073,23 @@ export class PlayPageComponent implements OnInit {
 
   // Press note on Ouput MIDI Device
   keyPressNote(pitch: number, velocity: number, audioTime?: number): void {
+    this.keyPressNoteInternal(pitch, velocity, audioTime, true);
+  }
+
+  keyPressNoteInternal(
+    pitch: number,
+    velocity: number,
+    audioTime?: number,
+    reflectInput: boolean = true
+  ): void {
     this.mapNotesAutoPressed.set((pitch - 12).toFixed(), 1);
-    this.timeouts.push(
-      setTimeout(() => {
-        this.keyNoteOn(Date.now() - this.timePlayStart, pitch);
-      }, 0)
-    );
+    if (reflectInput) {
+      this.timeouts.push(
+        setTimeout(() => {
+          this.keyNoteOn(Date.now() - this.timePlayStart, pitch);
+        }, 0)
+      );
+    }
 
     if (this.midiAvailable && this.checkboxMidiOut) {
       CapacitorMuseTrainerMidi.sendCommand({
@@ -1015,12 +1103,22 @@ export class PlayPageComponent implements OnInit {
 
   // Release note on Ouput MIDI Device
   keyReleaseNote(pitch: number, audioTime?: number): void {
+    this.keyReleaseNoteInternal(pitch, audioTime, true);
+  }
+
+  keyReleaseNoteInternal(
+    pitch: number,
+    audioTime?: number,
+    reflectInput: boolean = true
+  ): void {
     this.mapNotesAutoPressed.delete((pitch - 12).toFixed());
-    this.timeouts.push(
-      setTimeout(() => {
-        this.keyNoteOff(Date.now() - this.timePlayStart, pitch);
-      }, 0)
-    );
+    if (reflectInput) {
+      this.timeouts.push(
+        setTimeout(() => {
+          this.keyNoteOff(Date.now() - this.timePlayStart, pitch);
+        }, 0)
+      );
+    }
 
     if (this.midiAvailable && this.checkboxMidiOut) {
       CapacitorMuseTrainerMidi.sendCommand({
@@ -1042,14 +1140,19 @@ export class PlayPageComponent implements OnInit {
     if (
       !this.notesService.getMapRequired().has(name) &&
       this.isPracticing() &&
-      this.checkboxFeedback
+      (this.checkboxFeedback || this.realtimeMode)
     ) {
       this.osmdTextFeedback('&#9888;', 10, 30);
     }
 
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
-    if (this.notesService.isRequiredNotesPressed())
-      this.osmdCursorPlayMoveNext();
+    if (this.notesService.isRequiredNotesPressed()) {
+      if (this.realtimeMode) {
+        this.currentStepSatisfied = true;
+      } else {
+        this.osmdCursorPlayMoveNext();
+      }
+    }
   }
 
   // Input note released
@@ -1059,8 +1162,134 @@ export class PlayPageComponent implements OnInit {
     this.notesService.release(name);
 
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
-    if (this.notesService.isRequiredNotesPressed())
+    if (!this.realtimeMode && this.notesService.isRequiredNotesPressed())
       this.osmdCursorPlayMoveNext();
+  }
+
+  private isRealtimePlaybackOnly(): boolean {
+    return this.staffIdList.length > 0
+      ? this.staffIdList.every((id) => this.staffIdEnabled[id])
+      : true;
+  }
+
+  private getPracticeStaffSelection(): Record<number, boolean> {
+    if (!this.realtimeMode) {
+      return this.staffIdEnabled;
+    }
+
+    return this.staffIdList.reduce(
+      (selection, id) => ({
+        ...selection,
+        [id]: !this.staffIdEnabled[id],
+      }),
+      {} as Record<number, boolean>
+    );
+  }
+
+  private getComputerStaffSelection(): Record<number, boolean> {
+    return this.staffIdList.reduce(
+      (selection, id) => ({
+        ...selection,
+        [id]: this.realtimeMode ? this.staffIdEnabled[id] : false,
+      }),
+      {} as Record<number, boolean>
+    );
+  }
+
+  private syncRealtimeStepState(back = false): void {
+    this.notesService.calculateRequired(
+      this.openSheetMusicDisplay.cursors[0],
+      this.getPracticeStaffSelection(),
+      back
+    );
+    this.tempoInBPM = this.notesService.tempoInBPM;
+    this.currentStepSatisfied =
+      this.notesService.getMapRequired().size === 0 ||
+      this.notesService.isRequiredNotesPressed();
+  }
+
+  private advanceRealtimePractice(audioTime: number): void {
+    if (!this.realtimeMode) {
+      return;
+    }
+
+    if (
+      !this.currentStepSatisfied &&
+      this.notesService.getMapRequired().size > 0 &&
+      this.checkboxFeedback
+    ) {
+      this.osmdTextFeedback('&#9888;', 10, 30);
+    }
+
+    if (this.osmdEndReached(0)) {
+      this.openSheetMusicDisplay.cursors[0].hide();
+      if (this.repeatValue > 0) {
+        this.repeatValue--;
+        this.osmdCursorStart();
+      } else {
+        this.repeatValue = this.repeatCfg;
+        this.osmdCursorStop();
+      }
+      return;
+    }
+
+    if (!this.osmdCursorMoveNext(0)) {
+      return;
+    }
+
+    this.notesService.calculateRequired(
+      this.openSheetMusicDisplay.cursors[0],
+      this.getPracticeStaffSelection()
+    );
+    this.tempoInBPM = this.notesService.tempoInBPM;
+    this.currentStepSatisfied =
+      this.notesService.getMapRequired().size === 0 ||
+      this.notesService.isRequiredNotesPressed();
+    if (this.pianoKeyboard) {
+      this.pianoKeyboard.updateNotesStatus();
+    }
+    this.playComputerNotes(audioTime);
+  }
+
+  private playComputerNotes(audioTime?: number): void {
+    if (!this.realtimeMode) {
+      return;
+    }
+
+    const requiredNotes = new Map<string, { value: number }>();
+    this.openSheetMusicDisplay.cursors[0]
+      .VoicesUnderCursor()
+      .forEach((voice) => {
+        voice.Notes.forEach((note) => {
+          if (
+            this.getComputerStaffSelection()[note.ParentStaff.idInMusicSheet] &&
+            !note.isRest()
+          ) {
+            requiredNotes.set(note.halfTone.toString(), { value: 0 });
+          }
+        });
+      });
+
+    for (const [key] of this.computerPressedNotes) {
+      if (!requiredNotes.has(key)) {
+        this.computerPressedNotes.delete(key);
+        this.keyReleaseNoteInternal(parseInt(key) + 12, audioTime, false);
+      }
+    }
+
+    for (const [key] of requiredNotes) {
+      if (!this.computerPressedNotes.has(key)) {
+        this.computerPressedNotes.set(key, 1);
+        this.keyPressNoteInternal(parseInt(key) + 12, 60, audioTime, false);
+      }
+    }
+  }
+
+  private releaseComputerPressedNotes(): void {
+    for (const [key] of this.computerPressedNotes) {
+      this.keyReleaseNoteInternal(parseInt(key) + 12, undefined, false);
+    }
+    this.computerPressedNotes.clear();
   }
 
   // Keep screen on
