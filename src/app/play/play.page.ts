@@ -520,6 +520,30 @@ export class PlayPageComponent implements OnInit {
     return `Computer staff ${id + 1}`;
   }
 
+  getStaffToolbarIcon(id: number): string {
+    if (id === 0) {
+      return 'hand-right-outline';
+    }
+
+    if (id === 1) {
+      return 'hand-left-outline';
+    }
+
+    return 'musical-note-outline';
+  }
+
+  getStaffToolbarLabel(id: number): string {
+    if (id === 0) {
+      return 'Staff 1';
+    }
+
+    if (id === 1) {
+      return 'Staff 2';
+    }
+
+    return `Staff ${id + 1}`;
+  }
+
   toggleWaitMode(): void {
     this.checkboxWaitMode = !this.checkboxWaitMode;
 

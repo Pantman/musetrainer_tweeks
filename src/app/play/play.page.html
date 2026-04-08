@@ -59,6 +59,17 @@
             <ion-icon name="musical-notes-outline" slot="start"></ion-icon>
             <ion-text>Metronome</ion-text>
           </ion-button>
+          <ion-button
+            *ngFor="let id of staffIdList.slice().reverse()"
+            color="dark"
+            [disabled]="running || !fileLoaded"
+            size="small"
+            [fill]="staffIdEnabled[id] ? 'solid' : 'outline'"
+            (click)="staffIdEnabled[id] = !staffIdEnabled[id]"
+            [attr.aria-label]="getStaffToolbarLabel(id)"
+          >
+            <ion-icon [name]="getStaffToolbarIcon(id)"></ion-icon>
+          </ion-button>
         </ion-row>
       </ion-col>
     </ion-row>
@@ -146,12 +157,6 @@
       <ion-label color="dark">Listen on MIDI</ion-label>
       <ion-toggle [disabled]="running || !midiAvailable" [(ngModel)]="checkboxMidiOut"  color="dark" slot="end" [enableOnOffLabels]="true"></ion-toggle>
     </ion-item>
-    <ion-list>
-      <ion-item *ngFor="let id of staffIdList">
-        <ion-label color="dark">{{ getStaffToggleLabel(id) }}</ion-label>
-        <ion-toggle [disabled]="running || !fileLoaded" [(ngModel)]="staffIdEnabled[id]" color="dark" slot="end" [enableOnOffLabels]="true"></ion-toggle>
-      </ion-item>
-    </ion-list>
     <ion-item>
       <ion-label color="dark">Show feedback</ion-label>
       <ion-toggle [(ngModel)]="checkboxFeedback" color="dark" slot="end" [enableOnOffLabels]="true"></ion-toggle>
