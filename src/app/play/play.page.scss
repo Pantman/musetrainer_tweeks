@@ -44,6 +44,21 @@ ion-input{
   width: 50em;
 }
 
+.measure-select {
+  background: transparent;
+  border: 1px solid #d1d5db;
+  border-radius: 0.5rem;
+  color: inherit;
+  font: inherit;
+  margin-right: 0.5rem;
+  min-width: 4.5rem;
+  padding: 0.25rem 0.5rem;
+}
+
+.measure-select:last-child {
+  margin-right: 0;
+}
+
 .flag {
   width: 32px;
   height: 24px;

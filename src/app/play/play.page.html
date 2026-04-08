@@ -37,14 +37,14 @@
           <ion-label class="mr-2">
             Range
           </ion-label>
-          <ion-select interface="popover" [value]="inputMeasure.lower" [disabled]="running"
-            [interfaceOptions]="{subHeader: 'From measure'}" (ionChange)="updateLowerMeasure($event.target.value)">
-            <ion-select-option *ngFor="let m of listMeasure()" [value]="m">{{ m }}</ion-select-option>
-          </ion-select>
-          <ion-select interface="popover" [value]="inputMeasure.upper" [disabled]="running"
-            [interfaceOptions]="{subHeader: 'To measure'}" (ionChange)="updateUpperMeasure($event.target.value)">
-            <ion-select-option *ngFor="let m of listMeasure()" [value]="m">{{ m }}</ion-select-option>
-          </ion-select>
+          <select class="measure-select" [(ngModel)]="inputMeasure.lower" [disabled]="running"
+            (ngModelChange)="updateLowerMeasure($event)">
+            <option *ngFor="let m of listMeasure()" [ngValue]="m">{{ m }}</option>
+          </select>
+          <select class="measure-select" [(ngModel)]="inputMeasure.upper" [disabled]="running"
+            (ngModelChange)="updateUpperMeasure($event)">
+            <option *ngFor="let m of listMeasure()" [ngValue]="m">{{ m }}</option>
+          </select>
         </ion-row>
       </ion-col>
       <ion-col size="3">
