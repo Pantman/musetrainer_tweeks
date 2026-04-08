@@ -67,8 +67,8 @@ export class PlayPageComponent implements OnInit {
   checkboxColor: boolean = false;
   checkboxKeyboard: boolean = true;
   checkboxMidiOut: boolean = false;
-  checkboxMetronome: boolean = false;
-  checkboxWaitMode: boolean = true;
+  checkboxMetronome: boolean = true;
+  checkboxWaitMode: boolean = false;
   checkboxFeedback: boolean = true;
   showRangePicker: boolean = false;
   inputMeasure = { lower: 0, upper: 0 };
