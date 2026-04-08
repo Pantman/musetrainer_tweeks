@@ -7,20 +7,63 @@ Source code of https://musetrainer.github.io.
 Unmaintained. Fork this to fix bugs or add new features.
 
 
-## Setup
+## Local web development
 
-- Dependencies:
+This repository contains the web app and the iOS wrapper. If you only want to run the browser version locally, you do not need the global Ionic CLI.
+
+Recommended environment:
+
+- Node.js 18 LTS
+- npm 8 or 9
+- Chrome or another Chromium browser for MIDI support
+
+Install dependencies:
+
+```sh
+npm install --legacy-peer-deps
+```
+
+If your install fails because `@ionic-native/core` or `webmidi` are missing, install them explicitly:
+
+```sh
+npm install @ionic-native/core@5.36.0 webmidi@^2.5.1 --legacy-peer-deps
+```
+
+Start the web app:
+
+```sh
+npm start
+```
+
+Then open `http://localhost:4200/` in Chrome.
+
+Notes:
+
+- Safari does not currently provide the same MIDI support expected by this project.
+- The app uses Angular for local web development, so `npm start` is the normal entry point.
+- The dependency tree is old enough that newer npm versions may require `--legacy-peer-deps`.
+
+## iOS development
+
+Use the Ionic/Capacitor flow only if you want to run the wrapped iOS app.
+
+Install the Ionic CLI:
 
 ```sh
 npm i -g @ionic/cli
-ionic capacitor copy ios && ionic capacitor update
+```
+
+Sync and run the iOS project:
+
+```sh
+ionic capacitor copy ios
+ionic capacitor update ios
 ionic capacitor run ios -l --external
 ```
 
+To make piano sounds work on iOS:
 
-- To make Piano sounds work on iOS:
-
-Remove `mp3` out of `isMediaExtension` in `node_modules/@capacitor/ios/Capacitor/Capacitor/WebViewAssetHandler.swift`
+Remove `mp3` from `isMediaExtension` in `node_modules/@capacitor/ios/Capacitor/Capacitor/WebViewAssetHandler.swift`
 
 ```swift
     func isMediaExtension(pathExtension: String) -> Bool {
