@@ -1138,10 +1138,63 @@ export class PlayPageComponent implements OnInit {
     }
 
     if (handle === 'start') {
-      this.updateLowerMeasure(measure.measureNumber.toString());
+      const nextLower = this.resolveDraggedLowerMeasure(measure.measureNumber, event);
+      this.updateLowerMeasure(nextLower.toString());
     } else {
-      this.updateUpperMeasure(measure.measureNumber.toString());
+      const nextUpper = this.resolveDraggedUpperMeasure(measure.measureNumber, event);
+      this.updateUpperMeasure(nextUpper.toString());
     }
+  }
+
+  private resolveDraggedLowerMeasure(
+    candidateMeasure: number,
+    event: PointerEvent
+  ): number {
+    if (candidateMeasure <= this.inputMeasure.upper) {
+      return candidateMeasure;
+    }
+
+    const currentUpper = this.measureOverlays.find(
+      (measure) => measure.measureNumber === this.inputMeasure.upper
+    );
+    const pointerX = this.getPointerXInScore(event);
+
+    if (!currentUpper || pointerX === null) {
+      return this.inputMeasure.upper;
+    }
+
+    const centerX = (currentUpper.left + currentUpper.right) / 2;
+    return pointerX >= centerX ? candidateMeasure : this.inputMeasure.upper;
+  }
+
+  private resolveDraggedUpperMeasure(
+    candidateMeasure: number,
+    event: PointerEvent
+  ): number {
+    if (candidateMeasure >= this.inputMeasure.lower) {
+      return candidateMeasure;
+    }
+
+    const currentLower = this.measureOverlays.find(
+      (measure) => measure.measureNumber === this.inputMeasure.lower
+    );
+    const pointerX = this.getPointerXInScore(event);
+
+    if (!currentLower || pointerX === null) {
+      return this.inputMeasure.lower;
+    }
+
+    const centerX = (currentLower.left + currentLower.right) / 2;
+    return pointerX <= centerX ? candidateMeasure : this.inputMeasure.lower;
+  }
+
+  private getPointerXInScore(event: PointerEvent): number | null {
+    const container = document.getElementById('scoreOverlayHost');
+    if (!container) {
+      return null;
+    }
+
+    return event.clientX - container.getBoundingClientRect().left;
   }
 
   private getMeasureOverlayForHandle(handle: RangeHandle): MeasureOverlay | undefined {
