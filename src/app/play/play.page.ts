@@ -81,6 +81,7 @@ export class PlayPageComponent implements OnInit {
   timeouts: NodeJS.Timeout[] = [];
   realtimeMode: boolean = false;
   currentStepSatisfied: boolean = false;
+  suppressPlayCursorAnimation: boolean = false;
 
   // tonejs/piano
   piano: Piano | null = null;
@@ -469,7 +470,10 @@ export class PlayPageComponent implements OnInit {
 
   // Move cursor to next note
   osmdCursorMoveNext(index: number): boolean {
-    const shouldAnimate = index === 0 && this.shouldAnimatePlayCursor();
+    const shouldAnimate =
+      index === 0 &&
+      this.shouldAnimatePlayCursor() &&
+      !this.suppressPlayCursorAnimation;
     const previousPosition = shouldAnimate ? this.getPlayCursorPosition() : null;
     const transitionDuration = shouldAnimate
       ? this.getCursorStepDelayMs(index)
@@ -663,6 +667,7 @@ export class PlayPageComponent implements OnInit {
   osmdCursorStart(): void {
     // this.content.scrollToTop();
     this.resetPlayCursorTransition();
+    this.suppressPlayCursorAnimation = true;
     this.openSheetMusicDisplay.cursors.forEach((cursor, index) => {
       if (index != 0) cursor.show();
       cursor.reset();
@@ -692,6 +697,8 @@ export class PlayPageComponent implements OnInit {
       if (!this.osmdCursorMoveNext(0)) return;
       this.osmdCursorMoveNext(1);
     }
+
+    this.suppressPlayCursorAnimation = false;
 
     // Calculate first notes
     this.notesService.calculateRequired(
