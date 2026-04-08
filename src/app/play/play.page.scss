@@ -77,3 +77,8 @@ ion-input{
   width: 32px;
   height: 24px;
 }
+
+#cursorImg-0 {
+  transition: none;
+  will-change: left, top;
+}

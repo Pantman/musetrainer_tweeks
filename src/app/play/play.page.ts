@@ -427,6 +427,7 @@ export class PlayPageComponent implements OnInit {
     this.running = false;
     this.realtimeMode = false;
     this.currentStepSatisfied = false;
+    this.resetPlayCursorTransition();
     this.osmdCursorStop();
     this.timeouts.map((to) => clearTimeout(to));
     this.timeouts = [];
@@ -468,6 +469,16 @@ export class PlayPageComponent implements OnInit {
 
   // Move cursor to next note
   osmdCursorMoveNext(index: number): boolean {
+    const shouldAnimate = index === 0 && this.shouldAnimatePlayCursor();
+    const previousPosition = shouldAnimate ? this.getPlayCursorPosition() : null;
+    const transitionDuration = shouldAnimate
+      ? this.getCursorStepDelayMs(index)
+      : 0;
+
+    if (shouldAnimate && transitionDuration > 0) {
+      this.applyPlayCursorTransition(transitionDuration);
+    }
+
     this.openSheetMusicDisplay.cursors[index].next();
     // Move to first valid measure
     if (
@@ -476,6 +487,18 @@ export class PlayPageComponent implements OnInit {
     ) {
       return this.osmdCursorMoveNext(index);
     }
+
+    if (shouldAnimate) {
+      const nextPosition = this.getPlayCursorPosition();
+      if (
+        !previousPosition ||
+        !nextPosition ||
+        Math.abs(nextPosition.top - previousPosition.top) > 4
+      ) {
+        this.resetPlayCursorTransition();
+      }
+    }
+
     return true;
   }
 
@@ -639,6 +662,7 @@ export class PlayPageComponent implements OnInit {
   // Resets the cursor to the first note
   osmdCursorStart(): void {
     // this.content.scrollToTop();
+    this.resetPlayCursorTransition();
     this.openSheetMusicDisplay.cursors.forEach((cursor, index) => {
       if (index != 0) cursor.show();
       cursor.reset();
@@ -900,6 +924,84 @@ export class PlayPageComponent implements OnInit {
     const measure = this.openSheetMusicDisplay.cursors[0]?.iterator?.CurrentMeasure;
     const beatLength = measure ? this.getBeatLengthInWholeNotes(measure) : 0.25;
     return this.getPlaybackDelayMs(beatLength);
+  }
+
+  private getCursorStepDelayMs(cursorId: number): number {
+    const cursor = this.openSheetMusicDisplay.cursors[cursorId];
+    const iter = cursor?.iterator;
+
+    if (!iter) {
+      return 0;
+    }
+
+    if (this.osmdEndReached(cursorId)) {
+      return this.getPlaybackDelayMs(
+        iter.CurrentMeasure.AbsoluteTimestamp.RealValue +
+          iter.CurrentMeasure.Duration.RealValue -
+          iter.CurrentSourceTimestamp.RealValue
+      );
+    }
+
+    const it2 = iter.clone();
+    it2.moveToNext();
+    let nextTimestamp = it2.CurrentSourceTimestamp.RealValue;
+    let timeout = this.getPlaybackDelayMs(
+      nextTimestamp - iter.CurrentSourceTimestamp.RealValue
+    );
+
+    if (timeout < 0) {
+      nextTimestamp =
+        iter.CurrentMeasure.AbsoluteTimestamp.RealValue +
+        iter.CurrentMeasure.Duration.RealValue;
+      timeout = this.getPlaybackDelayMs(
+        nextTimestamp - iter.CurrentSourceTimestamp.RealValue
+      );
+    }
+
+    return timeout;
+  }
+
+  private shouldAnimatePlayCursor(): boolean {
+    return this.listenMode || this.realtimeMode;
+  }
+
+  private getPlayCursorElement(): HTMLElement | null {
+    return document.getElementById('cursorImg-0');
+  }
+
+  private getPlayCursorPosition(): { left: number; top: number } | null {
+    const cursorElement = this.getPlayCursorElement();
+
+    if (!cursorElement) {
+      return null;
+    }
+
+    const left = parseFloat(cursorElement.style.left ?? '');
+    const top = parseFloat(cursorElement.style.top ?? '');
+
+    if (!Number.isFinite(left) || !Number.isFinite(top)) {
+      return null;
+    }
+
+    return { left, top };
+  }
+
+  private applyPlayCursorTransition(durationMs: number): void {
+    const cursorElement = this.getPlayCursorElement();
+
+    if (!cursorElement || durationMs <= 0) {
+      return;
+    }
+
+    cursorElement.style.transition = `left ${durationMs}ms linear, top ${durationMs}ms linear`;
+  }
+
+  private resetPlayCursorTransition(): void {
+    const cursorElement = this.getPlayCursorElement();
+
+    if (cursorElement) {
+      cursorElement.style.transition = 'none';
+    }
   }
 
   private scheduleMetronomeWindow(
