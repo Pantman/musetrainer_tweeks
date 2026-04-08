@@ -116,6 +116,10 @@
       <ion-label color="dark">Listen on MIDI</ion-label>
       <ion-toggle [disabled]="running || !midiAvailable" [(ngModel)]="checkboxMidiOut"  color="dark" slot="end" [enableOnOffLabels]="true"></ion-toggle>
     </ion-item>
+    <ion-item>
+      <ion-label color="dark">Metronome</ion-label>
+      <ion-toggle [(ngModel)]="checkboxMetronome" color="dark" slot="end" [enableOnOffLabels]="true"></ion-toggle>
+    </ion-item>
     <ion-list>
       <ion-item *ngFor="let id of staffIdList">
         <ion-label color="dark">Staff {{ id+1 }}</ion-label>

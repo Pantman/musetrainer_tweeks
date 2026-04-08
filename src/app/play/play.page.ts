@@ -11,6 +11,7 @@ import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay';
 import { CapacitorMuseTrainerMidi } from 'capacitor-musetrainer-midi';
 import { ActivatedRoute } from '@angular/router';
 import { KeepAwake } from '@capacitor-community/keep-awake';
+import { now as toneNow, start as startTone, Synth } from 'tone';
 
 import { NotesService } from '../notes.service';
 import { PianoKeyboardComponent } from '../piano-keyboard/piano-keyboard.component';
@@ -32,6 +33,7 @@ export class PlayPageComponent implements OnInit {
   private static readonly MIN_SPEED_PERCENT = 30;
   private static readonly MAX_SPEED_PERCENT = 180;
   private static readonly TEMPO_STEP_BPM = 5;
+  private static readonly AUDIO_SCHEDULE_AHEAD_SEC = 0.05;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
   private pianoKeyboard?: PianoKeyboardComponent;
@@ -50,6 +52,7 @@ export class PlayPageComponent implements OnInit {
   checkboxColor: boolean = false;
   checkboxKeyboard: boolean = true;
   checkboxMidiOut: boolean = false;
+  checkboxMetronome: boolean = false;
   checkboxFeedback: boolean = false;
   inputMeasure = { lower: 0, upper: 0 };
   inputMeasureRange = { lower: 0, upper: 0 };
@@ -69,6 +72,7 @@ export class PlayPageComponent implements OnInit {
 
   // Play
   timePlayStart: number = 0;
+  playbackStartScoreTimestamp: number = 0;
   skipPlayNotes: number = 0;
   tempoInBPM: number = 120;
   speedValue: number = 100;
@@ -77,6 +81,7 @@ export class PlayPageComponent implements OnInit {
 
   // tonejs/piano
   piano: Piano | null = null;
+  metronome: Synth | null = null;
   // Midi handlers
   midiHandlers: PluginListenerHandle[] = [];
 
@@ -114,6 +119,7 @@ export class PlayPageComponent implements OnInit {
   ionViewWillEnter() {
     this.platform.ready().then(() => {
       this.pianoSetup();
+      this.metronomeSetup();
       this.midiSetup();
       this.keepAwake();
     });
@@ -143,6 +149,7 @@ export class PlayPageComponent implements OnInit {
     this.openSheetMusicDisplay.clear();
     // piano
     this.piano = null;
+    this.metronome = null;
     // wake
     this.allowSleep();
     // midi
@@ -164,6 +171,21 @@ export class PlayPageComponent implements OnInit {
     //connect it to the speaker output
     this.piano.toDestination();
     this.piano.load();
+  }
+
+  metronomeSetup() {
+    this.metronome = new Synth({
+      oscillator: {
+        type: 'square',
+      },
+      envelope: {
+        attack: 0.001,
+        decay: 0.03,
+        sustain: 0,
+        release: 0.03,
+      },
+      volume: -10,
+    }).toDestination();
   }
 
   // GUI Zoom
@@ -310,12 +332,14 @@ export class PlayPageComponent implements OnInit {
   }
 
   startListen(): void {
+    void startTone().catch(() => undefined);
     this.updateRepeat();
     this.osmdStop();
     this.osmdListen();
   }
 
   startPractice(): void {
+    void startTone().catch(() => undefined);
     this.updateRepeat();
     this.osmdStop();
     this.osmdPractice();
@@ -395,15 +419,21 @@ export class PlayPageComponent implements OnInit {
     if (!this.running) return;
 
     if (!this.osmdEndReached(1)) this.osmdCursorMoveNext(1);
+    const currentTimestamp =
+      this.openSheetMusicDisplay.cursors[1].iterator.CurrentSourceTimestamp
+        .RealValue;
+    const audioTime = this.getScheduledAudioTime();
+    let nextTimestamp = currentTimestamp;
 
     // if ended reached check repeat and start or stop
     if (this.osmdEndReached(1)) {
       // Caculate time to end of compass
       const iter = this.openSheetMusicDisplay.cursors[1].iterator;
-      const timeout = this.getPlaybackDelayMs(
+      nextTimestamp =
         iter.CurrentMeasure.AbsoluteTimestamp.RealValue +
-          iter.CurrentMeasure.Duration.RealValue -
-          iter.CurrentSourceTimestamp.RealValue
+        iter.CurrentMeasure.Duration.RealValue;
+      const timeout = this.getPlaybackDelayMs(
+        nextTimestamp - iter.CurrentSourceTimestamp.RealValue
       );
       this.timeouts.push(
         setTimeout(() => {
@@ -415,19 +445,20 @@ export class PlayPageComponent implements OnInit {
       const iter = this.openSheetMusicDisplay.cursors[1].iterator;
       const it2 = this.openSheetMusicDisplay.cursors[1].iterator.clone();
       it2.moveToNext();
+      nextTimestamp = it2.CurrentSourceTimestamp.RealValue;
       let timeout = this.getPlaybackDelayMs(
-        it2.CurrentSourceTimestamp.RealValue -
-          iter.CurrentSourceTimestamp.RealValue
+        nextTimestamp - iter.CurrentSourceTimestamp.RealValue
       );
 
       // On repeat sign, manually calculate
       if (timeout < 0) {
         const currMeasure =
           this.openSheetMusicDisplay.cursors[1].iterator.CurrentMeasure;
-        timeout = this.getPlaybackDelayMs(
+        nextTimestamp =
           currMeasure.AbsoluteTimestamp.RealValue +
-            currMeasure.Duration.RealValue -
-            iter.CurrentSourceTimestamp.RealValue
+          currMeasure.Duration.RealValue;
+        timeout = this.getPlaybackDelayMs(
+          nextTimestamp - iter.CurrentSourceTimestamp.RealValue
         );
       }
 
@@ -438,9 +469,11 @@ export class PlayPageComponent implements OnInit {
       );
     }
 
+    this.scheduleMetronomeWindow(currentTimestamp, nextTimestamp, audioTime);
+
     // Play note in listen mode, so the play cursor can advance forward
     if (this.listenMode) {
-      this.playNote();
+      this.playNote(audioTime);
     }
   }
 
@@ -590,7 +623,6 @@ export class PlayPageComponent implements OnInit {
 
     this.startFlashCount = 0;
     this.openSheetMusicDisplay.cursors[0].show();
-    this.timePlayStart = Date.now();
 
     // Skip initial rests
     if (this.notesService.isRequiredNotesPressed()) {
@@ -598,16 +630,31 @@ export class PlayPageComponent implements OnInit {
       this.osmdCursorPlayMoveNext();
     }
 
+    this.timePlayStart = Date.now();
+    this.playbackStartScoreTimestamp =
+      this.openSheetMusicDisplay.cursors[0].iterator.CurrentSourceTimestamp
+        .RealValue;
+    const audioTime = this.getScheduledAudioTime();
+
+    this.startMetronome();
+
     // Play initial notes
     if (this.listenMode) {
-      this.playNote();
+      this.playNote(audioTime);
     }
 
     const it2 = this.openSheetMusicDisplay.cursors[0].iterator.clone();
     it2.moveToNext();
+    const nextTimestamp = it2.CurrentSourceTimestamp.RealValue;
+
+    this.scheduleMetronomeWindow(
+      this.playbackStartScoreTimestamp,
+      nextTimestamp,
+      audioTime
+    );
 
     const timeout = this.getPlaybackDelayMs(
-      it2.CurrentSourceTimestamp.RealValue -
+      nextTimestamp -
         this.openSheetMusicDisplay.cursors[0].iterator.CurrentSourceTimestamp
           .RealValue
     );
@@ -618,13 +665,13 @@ export class PlayPageComponent implements OnInit {
     );
   }
 
-  playNote(): void {
+  playNote(audioTime?: number): void {
     if (this.skipPlayNotes > 0) {
       this.skipPlayNotes--;
     } else {
       this.notesService.playRequiredNotes(
-        this.keyPressNote.bind(this),
-        this.keyReleaseNote.bind(this)
+        (note, velocity) => this.keyPressNote(note, velocity, audioTime),
+        (note) => this.keyReleaseNote(note, audioTime)
       );
     }
   }
@@ -746,6 +793,135 @@ export class PlayPageComponent implements OnInit {
     this.notesService.tempoInBPM = this.tempoInBPM;
   }
 
+  private startMetronome(): void {
+    if (!this.checkboxMetronome) {
+      return;
+    }
+
+    void startTone().catch(() => undefined);
+  }
+
+  private scheduleMetronomeWindow(
+    startTimestamp: number,
+    endTimestamp: number,
+    audioStartTime: number
+  ): void {
+    if (
+      !this.running ||
+      !this.checkboxMetronome ||
+      !Number.isFinite(startTimestamp) ||
+      !Number.isFinite(endTimestamp) ||
+      endTimestamp < startTimestamp
+    ) {
+      return;
+    }
+
+    const boundaryEpsilon = 1e-7;
+    let beat = this.getMetronomeBeatAtOrAfter(startTimestamp);
+    while (
+      beat &&
+      (Math.abs(beat.timestamp - startTimestamp) <= boundaryEpsilon ||
+        beat.timestamp < endTimestamp - boundaryEpsilon)
+    ) {
+      const beatOffsetMs = this.getPlaybackDelayMs(beat.timestamp - startTimestamp);
+      this.metronome?.triggerAttackRelease(
+        beat.isDownbeat ? 'C6' : 'G5',
+        '32n',
+        audioStartTime + beatOffsetMs / 1000
+      );
+      beat = this.getNextMetronomeBeatAfter(beat.timestamp);
+    }
+  }
+
+  private getMetronomeBeatAtOrAfter(timestamp: number): {
+    timestamp: number;
+    isDownbeat: boolean;
+  } | null {
+    const measure = this.getMeasureAtTimestamp(timestamp);
+    if (!measure) {
+      return null;
+    }
+
+    const beatLength = this.getBeatLengthInWholeNotes(measure);
+    const measureStart = measure.AbsoluteTimestamp.RealValue;
+    const measureEnd = measureStart + measure.Duration.RealValue;
+    const beatIndex = Math.ceil(
+      (timestamp - measureStart - Number.EPSILON) / beatLength
+    );
+    let beatTimestamp = measureStart + Math.max(beatIndex, 0) * beatLength;
+
+    if (beatTimestamp > measureEnd + Number.EPSILON) {
+      const nextMeasure = this.getMeasureAtTimestamp(measureEnd + Number.EPSILON);
+      if (!nextMeasure) {
+        return null;
+      }
+      return {
+        timestamp: nextMeasure.AbsoluteTimestamp.RealValue,
+        isDownbeat: true,
+      };
+    }
+
+    return {
+      timestamp: beatTimestamp,
+      isDownbeat:
+        Math.abs(beatTimestamp - measureStart) <= beatLength * Number.EPSILON * 8,
+    };
+  }
+
+  private getNextMetronomeBeatAfter(timestamp: number): {
+    timestamp: number;
+    isDownbeat: boolean;
+  } | null {
+    const measure = this.getMeasureAtTimestamp(timestamp);
+    if (!measure) {
+      return null;
+    }
+
+    const beatLength = this.getBeatLengthInWholeNotes(measure);
+    const measureStart = measure.AbsoluteTimestamp.RealValue;
+    const measureEnd = measureStart + measure.Duration.RealValue;
+    const nextTimestamp = timestamp + beatLength;
+
+    if (nextTimestamp < measureEnd - Number.EPSILON) {
+      return {
+        timestamp: nextTimestamp,
+        isDownbeat: false,
+      };
+    }
+
+    const nextMeasure = this.getMeasureAtTimestamp(measureEnd + Number.EPSILON);
+    if (!nextMeasure) {
+      return null;
+    }
+
+    return {
+      timestamp: nextMeasure.AbsoluteTimestamp.RealValue,
+      isDownbeat: true,
+    };
+  }
+
+  private getMeasureAtTimestamp(timestamp: number): any {
+    const boundaryEpsilon = 1e-7;
+
+    return this.openSheetMusicDisplay.Sheet.SourceMeasures.find(
+      (measure: any) =>
+        measure.AbsoluteTimestamp.RealValue <= timestamp + boundaryEpsilon &&
+        timestamp <
+          measure.AbsoluteTimestamp.RealValue +
+            measure.Duration.RealValue -
+            boundaryEpsilon
+    );
+  }
+
+  private getBeatLengthInWholeNotes(measure: any): number {
+    const denominator = measure.ActiveTimeSignature?.Denominator ?? 4;
+    return 1 / denominator;
+  }
+
+  private getScheduledAudioTime(): number {
+    return toneNow() + PlayPageComponent.AUDIO_SCHEDULE_AHEAD_SEC;
+  }
+
   async notifyMidiConnect() {
     const toast = await this.toastCtrl.create({
       message: `MIDI device connected: ${this.midiDevice}. Practice mode enabled.`,
@@ -819,7 +995,7 @@ export class PlayPageComponent implements OnInit {
   }
 
   // Press note on Ouput MIDI Device
-  keyPressNote(pitch: number, velocity: number): void {
+  keyPressNote(pitch: number, velocity: number, audioTime?: number): void {
     this.mapNotesAutoPressed.set((pitch - 12).toFixed(), 1);
     this.timeouts.push(
       setTimeout(() => {
@@ -833,12 +1009,12 @@ export class PlayPageComponent implements OnInit {
         timestamp: performance.now(),
       }).catch((e) => console.error(e));
     } else {
-      this.piano?.keyDown({ midi: pitch });
+      this.piano?.keyDown({ midi: pitch, time: audioTime });
     }
   }
 
   // Release note on Ouput MIDI Device
-  keyReleaseNote(pitch: number): void {
+  keyReleaseNote(pitch: number, audioTime?: number): void {
     this.mapNotesAutoPressed.delete((pitch - 12).toFixed());
     this.timeouts.push(
       setTimeout(() => {
@@ -852,7 +1028,7 @@ export class PlayPageComponent implements OnInit {
         timestamp: performance.now(),
       }).catch((e) => console.error(e));
     } else {
-      this.piano?.keyUp({ midi: pitch });
+      this.piano?.keyUp({ midi: pitch, time: audioTime });
     }
   }
 
