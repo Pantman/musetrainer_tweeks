@@ -84,15 +84,47 @@ ion-input{
   z-index: 1;
 }
 
+.realtime-debug-panel {
+  background: rgb(15 23 42 / 0.9);
+  border-radius: 0.5rem;
+  color: #e5e7eb;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  left: 0.75rem;
+  line-height: 1.35;
+  padding: 0.5rem 0.65rem;
+  pointer-events: none;
+  position: absolute;
+  top: 0.75rem;
+  z-index: 4;
+}
+
+.realtime-debug-panel__events {
+  border-top: 1px solid rgb(148 163 184 / 0.35);
+  margin-top: 0.45rem;
+  max-height: 11rem;
+  overflow: auto;
+  padding-top: 0.35rem;
+}
+
 .feedback-notehead {
-  background: #dc2626;
-  border: 1px solid #991b1b;
   border-radius: 50% 48% 52% 50%;
-  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.25);
   pointer-events: none;
   position: absolute;
   transform: rotate(-24deg);
   z-index: 3;
+}
+
+.feedback-notehead--correct {
+  background: #16a34a;
+  border: 1px solid #166534;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.18);
+}
+
+.feedback-notehead--incorrect {
+  background: #dc2626;
+  border: 1px solid #991b1b;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.25);
 }
 
 .score-range-overlay {

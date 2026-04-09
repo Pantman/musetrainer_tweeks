@@ -60,6 +60,16 @@
             <ion-text>Metronome</ion-text>
           </ion-button>
           <ion-button
+            color="dark"
+            [disabled]="running || !fileLoaded"
+            size="small"
+            fill="outline"
+            (click)="clearFeedback()"
+          >
+            <ion-icon name="sparkles-outline" slot="start"></ion-icon>
+            <ion-text>Clear</ion-text>
+          </ion-button>
+          <ion-button
             *ngFor="let id of staffIdList.slice().reverse()"
             color="dark"
             [disabled]="running || !fileLoaded"
@@ -99,6 +109,20 @@
   <div class="score-shell" id="scoreOverlayHost" [class.score-shell--locked]="running">
     <ion-row style="background-color: white;" id="osmdContainer"></ion-row>
     <div class="score-shell__interaction-blocker" *ngIf="running"></div>
+    <div class="realtime-debug-panel" *ngIf="showRealtimeDebugPanel()">
+      <div>tol {{ debugRealtimeStats.toleranceMs }}ms</div>
+      <div>late win {{ debugRealtimeStats.lateWindowRemainingMs }}ms</div>
+      <div>played {{ debugRealtimeStats.playedTotal }}</div>
+      <div>on-time {{ debugRealtimeStats.acceptedOnTime }}</div>
+      <div>late {{ debugRealtimeStats.acceptedLate }}</div>
+      <div>early {{ debugRealtimeStats.early }}</div>
+      <div>rejected {{ debugRealtimeStats.rejected }}</div>
+      <div>missed {{ debugRealtimeStats.missedExpected }}</div>
+      <div>last {{ debugRealtimeStats.lastPitch }} {{ debugRealtimeStats.lastResult }}</div>
+      <div class="realtime-debug-panel__events" *ngIf="realtimeDebugEvents.length">
+        <div *ngFor="let event of realtimeDebugEvents">{{ event }}</div>
+      </div>
+    </div>
 
     <div class="score-range-overlay" *ngIf="fileLoaded">
       <div

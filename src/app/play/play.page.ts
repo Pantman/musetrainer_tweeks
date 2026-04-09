@@ -38,9 +38,23 @@ interface MeasureRange {
 }
 
 interface PracticeGraphicalNote {
+  graphicalNote: any;
   anchorElement: SVGElement;
   groupElement: SVGElement;
   halfTone: number;
+}
+
+interface RealtimeDebugStats {
+  playedTotal: number;
+  acceptedOnTime: number;
+  acceptedLate: number;
+  early: number;
+  rejected: number;
+  missedExpected: number;
+  lastPitch: string;
+  lastResult: string;
+  toleranceMs: number;
+  lateWindowRemainingMs: number;
 }
 
 @Component({
@@ -55,6 +69,7 @@ export class PlayPageComponent implements OnInit {
   private static readonly MAX_SPEED_PERCENT = 180;
   private static readonly TEMPO_STEP_BPM = 5;
   private static readonly AUDIO_SCHEDULE_AHEAD_SEC = 0.05;
+  private static readonly REALTIME_ACCEPT_TOLERANCE_WHOLE_NOTES = 1 / 4;
   private static readonly FEEDBACK_CORRECT_COLOR = '#16a34a';
   private static readonly FEEDBACK_ERROR_COLOR = '#dc2626';
   @ViewChild(IonContent, { static: false }) content!: IonContent;
@@ -106,6 +121,18 @@ export class PlayPageComponent implements OnInit {
   timeouts: NodeJS.Timeout[] = [];
   realtimeMode: boolean = false;
   currentStepSatisfied: boolean = false;
+  debugRealtimeStats: RealtimeDebugStats = {
+    playedTotal: 0,
+    acceptedOnTime: 0,
+    acceptedLate: 0,
+    early: 0,
+    rejected: 0,
+    missedExpected: 0,
+    lastPitch: '',
+    lastResult: 'none',
+    toleranceMs: 0,
+    lateWindowRemainingMs: 0,
+  };
   suppressPlayCursorAnimation: boolean = false;
   private activeRangeHandle: RangeHandle | null = null;
   private activeRangeSelectionStart: number | null = null;
@@ -115,13 +142,19 @@ export class PlayPageComponent implements OnInit {
   metronome: Synth | null = null;
   computerPressedNotes = new Map<string, number>();
   computerNotesService: NotesService;
-  private noteFeedbackElements = new Map<
-    SVGElement,
-    { fill: string | null; stroke: string | null; style: string | null }
-  >();
+  private correctNoteheadElements = new Map<string, HTMLElement>();
   private incorrectNoteheadElements = new Map<string, HTMLElement>();
   private activePracticeNoteElements: SVGElement[] = [];
   private activePracticeGraphicalNotes: PracticeGraphicalNote[] = [];
+  private realtimePreviousStepKeys = new Set<string>();
+  private realtimePreviousStepMatchedKeys = new Set<string>();
+  private realtimePreviousStepElements: SVGElement[] = [];
+  private realtimePreviousStepGraphicalNotes: PracticeGraphicalNote[] = [];
+  private realtimePreviousStepTimestamp = 0;
+  private realtimeLateToleranceUntil = 0;
+  private realtimeNextStepKeys = new Set<string>();
+  private realtimeCurrentStepMatchedKeys = new Set<string>();
+  realtimeDebugEvents: string[] = [];
   // Midi handlers
   midiHandlers: PluginListenerHandle[] = [];
 
@@ -573,9 +606,14 @@ export class PlayPageComponent implements OnInit {
     }
   }
 
+  clearFeedback(): void {
+    this.osmdResetFeedback();
+  }
+
   // Reset selection on measures and set the cursor to the origin
   osmdReset(): void {
     this.osmdStop();
+    this.osmdResetFeedback();
     this.inputMeasure.lower = 1;
     this.inputMeasure.upper =
       this.openSheetMusicDisplay.Sheet.SourceMeasures.length;
@@ -633,6 +671,7 @@ export class PlayPageComponent implements OnInit {
     this.running = true;
     this.skipPlayNotes = 0;
     this.osmdResetFeedback();
+    this.resetRealtimeDebugStats();
     this.listenMode = false;
     this.realtimeMode = true;
     this.currentStepSatisfied = false;
@@ -829,7 +868,6 @@ export class PlayPageComponent implements OnInit {
       cursor.reset();
       cursor.hide();
     });
-    this.osmdResetFeedback();
     for (const [key] of this.mapNotesAutoPressed) {
       this.keyReleaseNote(parseInt(key) + 12);
     }
@@ -839,6 +877,8 @@ export class PlayPageComponent implements OnInit {
     this.computerNotesService.clear();
     this.activePracticeNoteElements = [];
     this.activePracticeGraphicalNotes = [];
+    this.clearRealtimeCurrentStepMatches();
+    this.clearRealtimeToleranceWindow();
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
     this.activeRangeHandle = null;
     this.activeRangeSelectionStart = null;
@@ -852,6 +892,7 @@ export class PlayPageComponent implements OnInit {
   osmdCursorStart(): void {
     // this.content.scrollToTop();
     this.resetPlayCursorTransition();
+    this.clearRealtimeToleranceWindow();
     this.suppressPlayCursorAnimation = true;
     this.openSheetMusicDisplay.cursors.forEach((cursor, index) => {
       if (index != 0) cursor.show();
@@ -983,7 +1024,7 @@ export class PlayPageComponent implements OnInit {
 
   // Remove all feedback elements
   osmdResetFeedback(): void {
-    this.resetNoteFeedbackColors();
+    this.resetCorrectNoteheads();
     this.resetIncorrectNoteheads();
     let elems = document.getElementsByClassName('feedback');
     // Remove all elements
@@ -1001,13 +1042,279 @@ export class PlayPageComponent implements OnInit {
       return;
     }
 
-    const elements =
-      this.activePracticeNoteElements.length > 0
-        ? this.activePracticeNoteElements
-        : this.getCurrentPracticeNoteElements();
-    this.colorPracticeNoteElements(
-      elements,
-      PlayPageComponent.FEEDBACK_CORRECT_COLOR
+    const graphicalNotes =
+      this.activePracticeGraphicalNotes.length > 0
+        ? this.activePracticeGraphicalNotes
+        : this.getCurrentPracticeGraphicalNotes();
+    this.renderCorrectPracticeNotes(
+      graphicalNotes,
+      this.getCurrentPracticeTimestamp()
+    );
+  }
+
+  private markCurrentNoteCorrect(name: string): void {
+    if (!this.checkboxFeedback) {
+      return;
+    }
+
+    const halfTone = parseInt(name, 10);
+    if (!Number.isFinite(halfTone)) {
+      return;
+    }
+
+    const matchingNotes = this.activePracticeGraphicalNotes.filter(
+      (note) => note.halfTone === halfTone
+    );
+
+    if (matchingNotes.length === 0) {
+      return;
+    }
+
+    this.renderCorrectPracticeNotes(
+      matchingNotes,
+      this.getCurrentPracticeTimestamp()
+    );
+  }
+
+  private markPreviousStepNoteCorrect(name: string): void {
+    if (!this.checkboxFeedback) {
+      return;
+    }
+
+    const halfTone = parseInt(name, 10);
+    if (!Number.isFinite(halfTone)) {
+      return;
+    }
+
+    const matchingNotes = this.realtimePreviousStepGraphicalNotes.filter(
+      (note) => note.halfTone === halfTone
+    );
+
+    if (matchingNotes.length === 0) {
+      return;
+    }
+
+    this.renderCorrectPracticeNotes(
+      matchingNotes,
+      this.realtimePreviousStepTimestamp
+    );
+  }
+
+  private renderCorrectPracticeNotes(
+    graphicalNotes: PracticeGraphicalNote[],
+    timestamp: number
+  ): void {
+    graphicalNotes.forEach((note, index) => {
+      const placement = this.getRenderedNoteheadPlacement(note);
+      if (!placement) {
+        return;
+      }
+
+      const id = `correct-${this.loopPass}-${timestamp}-${note.halfTone}-${index}`;
+      this.renderFeedbackNotehead(
+        this.correctNoteheadElements,
+        'feedback-notehead feedback-notehead--correct',
+        id,
+        placement
+      );
+    });
+  }
+
+  private renderFeedbackNotehead(
+    registry: Map<string, HTMLElement>,
+    className: string,
+    id: string,
+    placement: { left: number; top: number; width: number; height: number }
+  ): void {
+    let element = registry.get(id);
+    if (!element) {
+      element = document.createElement('div');
+      element.className = className;
+      element.dataset.feedbackId = id;
+      const parent = document.getElementById('scoreOverlayHost');
+      if (!parent) {
+        return;
+      }
+      parent.appendChild(element);
+      registry.set(id, element);
+    }
+
+    const isCorrect = className.includes('feedback-notehead--correct');
+    element.style.position = 'absolute';
+    element.style.pointerEvents = 'none';
+    element.style.borderRadius = '50% 48% 52% 50%';
+    element.style.transform = 'rotate(-24deg)';
+    element.style.zIndex = '3';
+    element.style.background = isCorrect ? '#16a34a' : '#dc2626';
+    element.style.border = isCorrect
+      ? '1px solid #166534'
+      : '1px solid #991b1b';
+    element.style.boxShadow = isCorrect
+      ? '0 0 0 1px rgb(255 255 255 / 0.18)'
+      : '0 0 0 1px rgb(255 255 255 / 0.25)';
+
+    element.style.left = `${placement.left}px`;
+    element.style.top = `${placement.top}px`;
+    element.style.width = `${placement.width}px`;
+    element.style.height = `${placement.height}px`;
+  }
+
+  private getRenderedNoteheadPlacement(note: PracticeGraphicalNote): {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null {
+    const container = document.getElementById('scoreOverlayHost');
+    if (!container) {
+      return null;
+    }
+
+    const noteRect = this.getGraphicalNoteDomRect(note.graphicalNote, container);
+    const anchorRect = this.getAnchorDomRect(
+      note.anchorElement,
+      note.groupElement,
+      container
+    );
+    if (noteRect || anchorRect) {
+      const horizontalRect = anchorRect ?? noteRect;
+      const verticalRect = noteRect ?? anchorRect;
+      if (!horizontalRect || !verticalRect) {
+        return this.getCursorFallbackNoteheadPlacement();
+      }
+
+      const width = Math.max(horizontalRect.width * 0.95, 10);
+      const height = Math.max(verticalRect.height * 0.82, 8);
+      const left =
+        horizontalRect.left + (horizontalRect.width - width) / 2;
+      const top = verticalRect.top + (verticalRect.height - height) / 2;
+
+      return { left, top, width, height };
+    }
+
+    return this.getCursorFallbackNoteheadPlacement();
+  }
+
+  private getAnchorDomRect(
+    anchorElement: SVGElement | null | undefined,
+    groupElement: SVGElement | null | undefined,
+    container: HTMLElement
+  ): { left: number; top: number; width: number; height: number } | null {
+    const renderableRect = this.getRenderableRect(anchorElement, groupElement);
+    if (!renderableRect) {
+      return null;
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    return {
+      left: renderableRect.left - containerRect.left,
+      top: renderableRect.top - containerRect.top,
+      width: Math.max(renderableRect.width, 1),
+      height: Math.max(renderableRect.height, 1),
+    };
+  }
+
+  private getGraphicalNoteDomRect(
+    graphicalNote: any,
+    container: HTMLElement
+  ): { left: number; top: number; width: number; height: number } | null {
+    const box = graphicalNote?.PositionAndShape;
+    if (!box) {
+      return null;
+    }
+
+    const absoluteRect =
+      box.AbsolutePosition &&
+      Number.isFinite(box.BorderLeft) &&
+      Number.isFinite(box.BorderRight) &&
+      Number.isFinite(box.BorderTop) &&
+      Number.isFinite(box.BorderBottom)
+        ? {
+            x:
+              (box.AbsolutePosition.x + box.BorderLeft) *
+              PlayPageComponent.OSMD_UNIT_IN_PIXELS,
+            y:
+              (box.AbsolutePosition.y + box.BorderTop) *
+              PlayPageComponent.OSMD_UNIT_IN_PIXELS,
+            width:
+              (box.BorderRight - box.BorderLeft) *
+              PlayPageComponent.OSMD_UNIT_IN_PIXELS,
+            height:
+              (box.BorderBottom - box.BorderTop) *
+              PlayPageComponent.OSMD_UNIT_IN_PIXELS,
+          }
+        : null;
+
+    const rect =
+      absoluteRect ??
+      box.BoundingRectangle ??
+      (box.AbsolutePosition && box.Size
+        ? {
+            x: box.AbsolutePosition.x,
+            y: box.AbsolutePosition.y,
+            width: box.Size.width,
+            height: box.Size.height,
+          }
+        : null);
+
+    if (!rect) {
+      return null;
+    }
+
+    const domRect = this.convertSvgRectToDomRect(rect);
+    if (!domRect) {
+      return null;
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    return {
+      left: domRect.left - containerRect.left,
+      top: domRect.top - containerRect.top,
+      width: Math.max(domRect.right - domRect.left, 1),
+      height: Math.max(domRect.bottom - domRect.top, 1),
+    };
+  }
+
+  private getCursorFallbackNoteheadPlacement(): {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null {
+    const cursorPosition = this.getPlayCursorPosition();
+    if (!cursorPosition) {
+      return null;
+    }
+
+    return {
+      left: cursorPosition.left + 8,
+      top: Math.max(cursorPosition.top + 8, 0),
+      width: 14,
+      height: 11,
+    };
+  }
+
+  private getRenderableRect(
+    primary: SVGElement | null | undefined,
+    fallback?: SVGElement | null
+  ): DOMRect | null {
+    const primaryRect = primary?.getBoundingClientRect?.() ?? null;
+    if (primaryRect && (primaryRect.width > 0 || primaryRect.height > 0)) {
+      return primaryRect;
+    }
+
+    const fallbackRect = fallback?.getBoundingClientRect?.() ?? null;
+    if (fallbackRect && (fallbackRect.width > 0 || fallbackRect.height > 0)) {
+      return fallbackRect;
+    }
+
+    return primaryRect ?? fallbackRect ?? null;
+  }
+
+  private getCurrentPracticeTimestamp(): number {
+    return (
+      this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentSourceTimestamp
+        ?.RealValue ?? 0
     );
   }
 
@@ -1022,28 +1329,20 @@ export class PlayPageComponent implements OnInit {
     }
 
     const { id, left, top, width, height } = placement;
-    let element = this.incorrectNoteheadElements.get(id);
-
-    if (!element) {
-      element = document.createElement('div');
-      element.className = 'feedback-notehead';
-      element.dataset.feedbackId = id;
-      const parent = document.getElementById('scoreOverlayHost');
-      if (!parent) {
-        return;
-      }
-      parent.appendChild(element);
-      this.incorrectNoteheadElements.set(id, element);
-    }
-
-    element.style.left = `${left}px`;
-    element.style.top = `${top}px`;
-    element.style.width = `${width}px`;
-    element.style.height = `${height}px`;
+    this.renderFeedbackNotehead(
+      this.incorrectNoteheadElements,
+      'feedback-notehead feedback-notehead--incorrect',
+      id,
+      { left, top, width, height }
+    );
   }
 
   private getCurrentPracticeNoteElements(): SVGElement[] {
-    return this.getCurrentPracticeGraphicalNotes().map((note) => note.groupElement);
+    return Array.from(
+      new Set(
+        this.getCurrentPracticeGraphicalNotes().map((note) => note.groupElement)
+      )
+    );
   }
 
   private getCurrentPracticeGraphicalNotes(): PracticeGraphicalNote[] {
@@ -1060,7 +1359,7 @@ export class PlayPageComponent implements OnInit {
       return staffId === undefined || practiceSelection[staffId];
     });
 
-    const visited = new Set<SVGElement>();
+    const visited = new Set<any>();
     const elements: PracticeGraphicalNote[] = [];
     graphicalNotes.forEach((graphicalNote: any) => {
       const groupElement = graphicalNote?.getSVGGElement?.() as SVGElement | null;
@@ -1069,14 +1368,15 @@ export class PlayPageComponent implements OnInit {
       if (
         !groupElement ||
         !anchorElement ||
-        visited.has(groupElement) ||
+        visited.has(graphicalNote) ||
         !Number.isFinite(halfTone)
       ) {
         return;
       }
 
-      visited.add(groupElement);
+      visited.add(graphicalNote);
       elements.push({
+        graphicalNote,
         anchorElement,
         groupElement,
         halfTone,
@@ -1086,65 +1386,35 @@ export class PlayPageComponent implements OnInit {
     return elements;
   }
 
-  private colorPracticeNoteElements(elements: SVGElement[], color: string): void {
-    elements.forEach((element) => {
-      this.applyColorToNoteElement(element, color);
-    });
-  }
-
-  private applyColorToNoteElement(root: SVGElement, color: string): void {
-    const elements = [
-      root,
-      ...Array.from(root.querySelectorAll<SVGElement>('*')),
-    ];
-
-    elements.forEach((element) => {
-      if (!this.noteFeedbackElements.has(element)) {
-        this.noteFeedbackElements.set(element, {
-          fill: element.getAttribute('fill'),
-          stroke: element.getAttribute('stroke'),
-          style: element.getAttribute('style'),
-        });
-      }
-
-      element.setAttribute('fill', color);
-      element.setAttribute('stroke', color);
-      element.style.color = color;
-    });
-  }
-
   private getGraphicalNoteAnchorElement(graphicalNote: any): SVGElement | null {
     const group = graphicalNote?.getSVGGElement?.() as SVGElement | null;
     if (!group) {
       return null;
     }
 
-    const noteheadElement = group.querySelector<SVGElement>('ellipse, circle, path');
-    return noteheadElement ?? group;
+    const explicitNotehead =
+      group.querySelector<SVGElement>(
+        '.vf-notehead ellipse, .vf-notehead circle, .vf-notehead path, [class*="notehead"] ellipse, [class*="notehead"] circle, [class*="notehead"] path'
+      ) ??
+      group.querySelector<SVGElement>(
+        '.vf-notehead, [class*="notehead"]'
+      );
+
+    if (explicitNotehead) {
+      return explicitNotehead;
+    }
+
+    const ellipseOrCircle = group.querySelector<SVGElement>('ellipse, circle');
+    if (ellipseOrCircle) {
+      return ellipseOrCircle;
+    }
+
+    return group;
   }
 
-  private resetNoteFeedbackColors(): void {
-    this.noteFeedbackElements.forEach((original, element) => {
-      if (original.fill === null) {
-        element.removeAttribute('fill');
-      } else {
-        element.setAttribute('fill', original.fill);
-      }
-
-      if (original.stroke === null) {
-        element.removeAttribute('stroke');
-      } else {
-        element.setAttribute('stroke', original.stroke);
-      }
-
-      if (original.style === null) {
-        element.removeAttribute('style');
-      } else {
-        element.setAttribute('style', original.style);
-      }
-    });
-
-    this.noteFeedbackElements.clear();
+  private resetCorrectNoteheads(): void {
+    this.correctNoteheadElements.forEach((element) => element.remove());
+    this.correctNoteheadElements.clear();
   }
 
   private resetIncorrectNoteheads(): void {
@@ -1166,11 +1436,15 @@ export class PlayPageComponent implements OnInit {
 
     const candidates = this.activePracticeGraphicalNotes.length
       ? this.activePracticeGraphicalNotes.map((note) => ({
+          graphicalNote: note.graphicalNote,
           element: note.anchorElement,
+          groupElement: note.groupElement,
           halfTone: note.halfTone,
         }))
       : this.getCurrentPracticeGraphicalNotes().map((note) => ({
+          graphicalNote: note.graphicalNote,
           element: note.anchorElement,
+          groupElement: note.groupElement,
           halfTone: note.halfTone,
         }));
 
@@ -1188,8 +1462,30 @@ export class PlayPageComponent implements OnInit {
       return currentDistance < bestDistance ? current : best;
     }, null);
 
-    const anchorRect = anchor?.element?.getBoundingClientRect?.();
-    const containerRect = container.getBoundingClientRect();
+    const anchorNoteRect = this.getGraphicalNoteDomRect(
+      anchor?.graphicalNote,
+      container
+    );
+    const anchorRect =
+      anchorNoteRect ??
+      (() => {
+        const renderableRect = this.getRenderableRect(
+          anchor?.element,
+          anchor?.groupElement
+        );
+        if (!renderableRect) {
+          return null;
+        }
+
+        const containerRect = container.getBoundingClientRect();
+        return {
+          left: renderableRect.left - containerRect.left,
+          top: renderableRect.top - containerRect.top,
+          width: renderableRect.width,
+          height: renderableRect.height,
+        };
+      })();
+
     if (!anchorRect) {
       return null;
     }
@@ -1197,14 +1493,12 @@ export class PlayPageComponent implements OnInit {
     const stepDelta =
       this.getDiatonicStepIndex(halfTone) -
       this.getDiatonicStepIndex(anchor.halfTone);
-    const stepHeight = Math.max(anchorRect.height * 0.55, 4);
+    const stepHeight = this.getRedNoteStepHeight(anchor) ?? Math.max(anchorRect.height * 0.55, 4);
     const width = Math.max(anchorRect.width * 0.9, 10);
     const height = Math.max(anchorRect.height * 0.75, 8);
-    const left = anchorRect.left - containerRect.left + (anchorRect.width - width) / 2;
+    const left = anchorRect.left + (anchorRect.width - width) / 2;
     const centerY =
-      anchorRect.top -
-      containerRect.top +
-      anchorRect.height / 2 -
+      anchorRect.top + anchorRect.height / 2 -
       stepDelta * stepHeight;
     const top = centerY - height / 2;
     const timestamp =
@@ -1215,11 +1509,173 @@ export class PlayPageComponent implements OnInit {
     return { id, left, top, width, height };
   }
 
+  private getRedNoteStepHeight(anchor: any): number | null {
+    const stave = anchor?.graphicalNote?.vfnote?.[0]?.getStave?.();
+    const spacingBetweenLines = stave?.getSpacingBetweenLines?.();
+    const scale = this.getSvgScaleFactors();
+
+    if (
+      !Number.isFinite(spacingBetweenLines) ||
+      !scale ||
+      !Number.isFinite(scale.scaleY)
+    ) {
+      return null;
+    }
+
+    // One diatonic step is half the distance between adjacent staff lines.
+    return Math.max((spacingBetweenLines * scale.scaleY) / 2, 4);
+  }
+
   private getDiatonicStepIndex(halfTone: number): number {
     const pitchClass = ((halfTone % 12) + 12) % 12;
     const octave = Math.floor(halfTone / 12);
     const stepByPitchClass = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6];
     return octave * 7 + stepByPitchClass[pitchClass];
+  }
+
+  private clearRealtimeToleranceWindow(): void {
+    this.realtimePreviousStepKeys.clear();
+    this.realtimePreviousStepMatchedKeys.clear();
+    this.realtimePreviousStepElements = [];
+    this.realtimePreviousStepGraphicalNotes = [];
+    this.realtimePreviousStepTimestamp = 0;
+    this.realtimeLateToleranceUntil = 0;
+    this.updateRealtimeDebugWindow();
+  }
+
+  private clearRealtimeDebugPrediction(): void {
+    this.realtimeNextStepKeys.clear();
+  }
+
+  private clearRealtimeCurrentStepMatches(): void {
+    this.realtimeCurrentStepMatchedKeys.clear();
+  }
+
+  private getCurrentRequiredPressKeys(notesService = this.notesService): Set<string> {
+    return new Set(
+      Array.from(notesService.getMapRequired().entries())
+        .filter(([, noteObj]) => noteObj.value === 0)
+        .map(([key]) => key)
+    );
+  }
+
+  private hasCurrentRequiredPressKeys(notesService = this.notesService): boolean {
+    for (const [, noteObj] of notesService.getMapRequired()) {
+      if (noteObj.value === 0) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private noteKeyToLabel(name: string): string {
+    const halfTone = parseInt(name, 10);
+    if (!Number.isFinite(halfTone)) {
+      return name;
+    }
+
+    const pitchClasses = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    const pitchClass = ((halfTone % 12) + 12) % 12;
+    const octave = Math.floor(halfTone / 12) - 1;
+    return `${pitchClasses[pitchClass]}${octave}`;
+  }
+
+  private appendRealtimeDebugEvent(message: string): void {
+    this.realtimeDebugEvents.unshift(message);
+    this.realtimeDebugEvents = this.realtimeDebugEvents.slice(0, 12);
+  }
+
+  private getRealtimeAcceptanceToleranceMs(): number {
+    const toleranceMs = this.getPlaybackDelayMs(
+      PlayPageComponent.REALTIME_ACCEPT_TOLERANCE_WHOLE_NOTES
+    );
+    this.debugRealtimeStats.toleranceMs = Math.round(toleranceMs);
+    return toleranceMs;
+  }
+
+  private snapshotRealtimePreviousStep(): void {
+    this.realtimePreviousStepKeys = this.getCurrentRequiredPressKeys();
+    this.realtimePreviousStepMatchedKeys = new Set(
+      Array.from(this.notesService.getMapPressed().keys()).filter((key) =>
+        this.realtimePreviousStepKeys.has(key)
+      )
+    );
+    this.realtimePreviousStepElements = [...this.activePracticeNoteElements];
+    this.realtimePreviousStepGraphicalNotes = [
+      ...this.activePracticeGraphicalNotes,
+    ];
+    this.realtimePreviousStepTimestamp = this.getCurrentPracticeTimestamp();
+    this.realtimeLateToleranceUntil =
+      performance.now() + this.getRealtimeAcceptanceToleranceMs();
+    this.updateRealtimeDebugWindow();
+  }
+
+  private isAcceptedLateRealtimeNote(name: string): boolean {
+    return (
+      this.realtimeMode &&
+      this.realtimePreviousStepKeys.has(name) &&
+      performance.now() <= this.realtimeLateToleranceUntil
+    );
+  }
+
+  private acceptLateRealtimeNote(name: string): void {
+    this.realtimePreviousStepMatchedKeys.add(name);
+    this.markPreviousStepNoteCorrect(name);
+    this.debugRealtimeStats.acceptedLate++;
+    this.debugRealtimeStats.lastPitch = this.noteKeyToLabel(name);
+    this.debugRealtimeStats.lastResult = 'accepted late';
+    this.appendRealtimeDebugEvent(`${this.noteKeyToLabel(name)} late`);
+    this.updateRealtimeDebugWindow();
+
+    if (
+      this.realtimePreviousStepKeys.size > 0 &&
+      this.realtimePreviousStepMatchedKeys.size >=
+        this.realtimePreviousStepKeys.size
+    ) {
+      this.renderCorrectPracticeNotes(
+        this.realtimePreviousStepGraphicalNotes,
+        this.realtimePreviousStepTimestamp
+      );
+      this.clearRealtimeToleranceWindow();
+    }
+  }
+
+  private updateRealtimeDebugWindow(): void {
+    const remaining =
+      this.realtimeLateToleranceUntil > 0
+        ? Math.max(this.realtimeLateToleranceUntil - performance.now(), 0)
+        : 0;
+    this.debugRealtimeStats.lateWindowRemainingMs = Math.round(remaining);
+  }
+
+  private resetRealtimeDebugStats(): void {
+    this.debugRealtimeStats = {
+      playedTotal: 0,
+      acceptedOnTime: 0,
+      acceptedLate: 0,
+      early: 0,
+      rejected: 0,
+      missedExpected: 0,
+      lastPitch: '',
+      lastResult: 'none',
+      toleranceMs: Math.round(this.getPlaybackDelayMs(PlayPageComponent.REALTIME_ACCEPT_TOLERANCE_WHOLE_NOTES)),
+      lateWindowRemainingMs: 0,
+    };
+    this.realtimeDebugEvents = [];
+    this.clearRealtimeDebugPrediction();
+    this.clearRealtimeCurrentStepMatches();
+    this.clearRealtimeToleranceWindow();
+  }
+
+  showRealtimeDebugPanel(): boolean {
+    return (
+      this.realtimeMode ||
+      this.debugRealtimeStats.acceptedOnTime > 0 ||
+      this.debugRealtimeStats.acceptedLate > 0 ||
+      this.debugRealtimeStats.rejected > 0 ||
+      this.debugRealtimeStats.lastResult !== 'none'
+    );
   }
 
   // Hide all feedback elements
@@ -1803,6 +2259,32 @@ export class PlayPageComponent implements OnInit {
     };
   }
 
+  private getSvgScaleFactors(): { scaleX: number; scaleY: number } | null {
+    const svg = document.querySelector('#osmdContainer svg') as SVGSVGElement | null;
+    if (!svg) {
+      return null;
+    }
+
+    const svgBounds = svg.getBoundingClientRect();
+    const viewBox = svg.viewBox?.baseVal;
+    const viewWidth = viewBox?.width || svg.width.baseVal.value;
+    const viewHeight = viewBox?.height || svg.height.baseVal.value;
+
+    if (
+      !Number.isFinite(viewWidth) ||
+      !Number.isFinite(viewHeight) ||
+      viewWidth <= 0 ||
+      viewHeight <= 0
+    ) {
+      return null;
+    }
+
+    return {
+      scaleX: svgBounds.width / viewWidth,
+      scaleY: svgBounds.height / viewHeight,
+    };
+  }
+
   private startMetronome(): void {
     if (!this.checkboxMetronome) {
       return;
@@ -2162,19 +2644,63 @@ export class PlayPageComponent implements OnInit {
   keyNoteOn(time: number, pitch: number): void {
     const halbTone = pitch - 12;
     const name = halbTone.toFixed();
-    this.notesService.press(name);
+    const pitchLabel = this.noteKeyToLabel(name);
+    const requiredPressKeys = this.getCurrentRequiredPressKeys();
+    const acceptedLateRealtimeNote = this.isAcceptedLateRealtimeNote(name);
+    const matchesCurrentStep = requiredPressKeys.has(name);
+    this.updateRealtimeDebugWindow();
+    this.debugRealtimeStats.playedTotal++;
+
+    if (!acceptedLateRealtimeNote) {
+      this.notesService.press(name);
+    }
 
     // Key wrong pressed
     if (
-      !this.notesService.getMapRequired().has(name) &&
+      !matchesCurrentStep &&
       this.isPracticing() &&
       (this.checkboxFeedback || this.realtimeMode)
     ) {
-      this.markIncorrectInputNote(halbTone);
+      if (acceptedLateRealtimeNote) {
+        this.acceptLateRealtimeNote(name);
+      } else {
+        if (this.realtimeMode && this.realtimeNextStepKeys.has(name)) {
+          this.debugRealtimeStats.early++;
+          this.debugRealtimeStats.lastPitch = pitchLabel;
+          this.debugRealtimeStats.lastResult = 'early';
+          this.appendRealtimeDebugEvent(`${pitchLabel} early`);
+          this.updateRealtimeDebugWindow();
+        } else {
+          this.debugRealtimeStats.rejected++;
+          this.debugRealtimeStats.lastPitch = pitchLabel;
+          this.debugRealtimeStats.lastResult = 'rejected';
+          this.appendRealtimeDebugEvent(`${pitchLabel} rejected`);
+          this.updateRealtimeDebugWindow();
+          this.markIncorrectInputNote(halbTone);
+        }
+      }
+    }
+
+    if (
+      !acceptedLateRealtimeNote &&
+      matchesCurrentStep &&
+      !this.realtimeCurrentStepMatchedKeys.has(name)
+    ) {
+      this.realtimeCurrentStepMatchedKeys.add(name);
+      this.markCurrentNoteCorrect(name);
+      this.debugRealtimeStats.acceptedOnTime++;
+      this.debugRealtimeStats.lastPitch = pitchLabel;
+      this.debugRealtimeStats.lastResult = 'hit current';
+      this.appendRealtimeDebugEvent(`${pitchLabel} hit`);
+      this.updateRealtimeDebugWindow();
     }
 
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
-    if (this.notesService.isRequiredNotesPressed()) {
+    if (!acceptedLateRealtimeNote && this.notesService.isRequiredNotesPressed()) {
+      this.debugRealtimeStats.lastPitch = pitchLabel;
+      this.debugRealtimeStats.lastResult = 'step satisfied';
+      this.appendRealtimeDebugEvent(`${pitchLabel} step satisfied`);
+      this.updateRealtimeDebugWindow();
       this.markCurrentNotesCorrect();
       if (this.realtimeMode) {
         this.currentStepSatisfied = true;
@@ -2188,6 +2714,10 @@ export class PlayPageComponent implements OnInit {
   keyNoteOff(time: number, pitch: number): void {
     const halbTone = pitch - 12;
     const name = halbTone.toFixed();
+    this.updateRealtimeDebugWindow();
+    if (this.isAcceptedLateRealtimeNote(name)) {
+      return;
+    }
     this.notesService.release(name);
 
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
@@ -2233,6 +2763,7 @@ export class PlayPageComponent implements OnInit {
       this.getPracticeStaffSelection(),
       back
     );
+    this.clearRealtimeCurrentStepMatches();
     this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
     this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
     this.computerNotesService.calculateRequired(
@@ -2241,9 +2772,42 @@ export class PlayPageComponent implements OnInit {
       back
     );
     this.tempoInBPM = this.resolveRealtimeTempo();
+    const hasCurrentRequiredPressKeys = this.hasCurrentRequiredPressKeys();
     this.currentStepSatisfied =
-      this.notesService.getMapRequired().size === 0 ||
+      !hasCurrentRequiredPressKeys ||
       this.notesService.isRequiredNotesPressed();
+    this.refreshRealtimeNextStepKeys();
+  }
+
+  private refreshRealtimeNextStepKeys(): void {
+    if (!this.realtimeMode) {
+      this.clearRealtimeDebugPrediction();
+      return;
+    }
+
+    const cursor = this.openSheetMusicDisplay?.cursors?.[0];
+    const iter = cursor?.iterator?.clone?.();
+    if (!iter) {
+      this.clearRealtimeDebugPrediction();
+      return;
+    }
+
+    iter.moveToNext();
+    if (iter.EndReached) {
+      this.clearRealtimeDebugPrediction();
+      return;
+    }
+
+    const debugCursor: any = {
+      iterator: iter,
+      VoicesUnderCursor: () => iter.CurrentVisibleVoiceEntries(),
+    };
+    const debugNotesService = new NotesService();
+    debugNotesService.calculateRequired(
+      debugCursor,
+      this.getPracticeStaffSelection()
+    );
+    this.realtimeNextStepKeys = this.getCurrentRequiredPressKeys(debugNotesService);
   }
 
   private advanceRealtimePractice(audioTime: number): void {
@@ -2262,9 +2826,25 @@ export class PlayPageComponent implements OnInit {
       return;
     }
 
-    if (this.currentStepSatisfied && this.notesService.getMapRequired().size > 0) {
+    const currentRequiredPressKeys = this.getCurrentRequiredPressKeys();
+
+    if (this.currentStepSatisfied && currentRequiredPressKeys.size > 0) {
       this.markCurrentNotesCorrect();
+    } else if (currentRequiredPressKeys.size > 0) {
+      const missedKeys = Array.from(currentRequiredPressKeys).filter(
+        (key) => !this.realtimeCurrentStepMatchedKeys.has(key)
+      );
+      if (missedKeys.length > 0) {
+        this.debugRealtimeStats.missedExpected += missedKeys.length;
+        this.appendRealtimeDebugEvent(
+          `missed ${missedKeys
+            .map((key) => this.noteKeyToLabel(key))
+            .join(', ')}`
+        );
+      }
     }
+
+    this.snapshotRealtimePreviousStep();
 
     if (!this.osmdCursorMoveNext(0)) {
       return;
@@ -2274,6 +2854,7 @@ export class PlayPageComponent implements OnInit {
       this.openSheetMusicDisplay.cursors[0],
       this.getPracticeStaffSelection()
     );
+    this.clearRealtimeCurrentStepMatches();
     this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
     this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
     this.computerNotesService.calculateRequired(
@@ -2281,8 +2862,9 @@ export class PlayPageComponent implements OnInit {
       this.getComputerStaffSelection()
     );
     this.tempoInBPM = this.resolveRealtimeTempo();
+    const hasCurrentRequiredPressKeys = this.hasCurrentRequiredPressKeys();
     this.currentStepSatisfied =
-      this.notesService.getMapRequired().size === 0 ||
+      !hasCurrentRequiredPressKeys ||
       this.notesService.isRequiredNotesPressed();
     if (this.pianoKeyboard) {
       this.pianoKeyboard.updateNotesStatus();
