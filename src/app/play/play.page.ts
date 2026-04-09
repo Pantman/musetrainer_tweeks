@@ -845,6 +845,7 @@ export class PlayPageComponent implements OnInit {
     );
     this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
     this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
+    this.updatePlayCursorVisualAlignment();
 
     this.tempoInBPM = this.notesService.tempoInBPM;
 
@@ -877,6 +878,10 @@ export class PlayPageComponent implements OnInit {
     this.computerNotesService.clear();
     this.activePracticeNoteElements = [];
     this.activePracticeGraphicalNotes = [];
+    const cursorElement = this.getPlayCursorElement();
+    if (cursorElement) {
+      cursorElement.style.transform = '';
+    }
     this.clearRealtimeCurrentStepMatches();
     this.clearRealtimeToleranceWindow();
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
@@ -937,6 +942,7 @@ export class PlayPageComponent implements OnInit {
     );
     this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
     this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
+    this.updatePlayCursorVisualAlignment();
 
     this.tempoInBPM = this.notesService.tempoInBPM;
 
@@ -1318,6 +1324,46 @@ export class PlayPageComponent implements OnInit {
     );
   }
 
+  private updatePlayCursorVisualAlignment(): void {
+    const cursorElement = this.getPlayCursorElement();
+    const container = document.getElementById('scoreOverlayHost');
+
+    if (!cursorElement || !container) {
+      return;
+    }
+
+    this.enforcePlayCursorThickness(cursorElement);
+
+    const currentPosition = this.getPlayCursorPosition();
+    if (!currentPosition) {
+      cursorElement.style.transform = '';
+      return;
+    }
+
+    const anchorRects = this.activePracticeGraphicalNotes
+      .map((note) =>
+        this.getAnchorDomRect(note.anchorElement, note.groupElement, container)
+      )
+      .filter(
+        (
+          rect
+        ): rect is { left: number; top: number; width: number; height: number } =>
+          !!rect
+      );
+
+    if (anchorRects.length === 0) {
+      cursorElement.style.transform = '';
+      return;
+    }
+
+    const targetCenterX =
+      anchorRects.reduce((sum, rect) => sum + rect.left + rect.width / 2, 0) /
+      anchorRects.length;
+    const offsetX = targetCenterX - currentPosition.left;
+
+    cursorElement.style.transform = `translateX(${offsetX}px)`;
+  }
+
   private markIncorrectInputNote(halfTone: number): void {
     if (!this.checkboxFeedback && !this.realtimeMode) {
       return;
@@ -1496,7 +1542,11 @@ export class PlayPageComponent implements OnInit {
     const stepHeight = this.getRedNoteStepHeight(anchor) ?? Math.max(anchorRect.height * 0.55, 4);
     const width = Math.max(anchorRect.width * 0.9, 10);
     const height = Math.max(anchorRect.height * 0.75, 8);
-    const left = anchorRect.left + (anchorRect.width - width) / 2;
+    const cursorCenterX = this.getPlayCursorOverlayCenterX(container);
+    const left =
+      cursorCenterX !== null
+        ? cursorCenterX - width / 2
+        : anchorRect.left + (anchorRect.width - width) / 2;
     const centerY =
       anchorRect.top + anchorRect.height / 2 -
       stepDelta * stepHeight;
@@ -1507,6 +1557,21 @@ export class PlayPageComponent implements OnInit {
     const id = `wrong-${this.loopPass}-${timestamp}-${halfTone}`;
 
     return { id, left, top, width, height };
+  }
+
+  private getPlayCursorOverlayCenterX(container: HTMLElement): number | null {
+    const cursorElement = this.getPlayCursorElement();
+    if (!cursorElement) {
+      return null;
+    }
+
+    const cursorRect = cursorElement.getBoundingClientRect();
+    if (!Number.isFinite(cursorRect.left) || !Number.isFinite(cursorRect.width)) {
+      return null;
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    return cursorRect.left - containerRect.left + cursorRect.width / 2;
   }
 
   private getRedNoteStepHeight(anchor: any): number | null {
@@ -2353,6 +2418,18 @@ export class PlayPageComponent implements OnInit {
     return document.getElementById('cursorImg-0');
   }
 
+  private enforcePlayCursorThickness(cursorElement?: HTMLElement | null): void {
+    const element = cursorElement ?? this.getPlayCursorElement();
+
+    if (!element) {
+      return;
+    }
+
+    element.style.width = '2px';
+    element.style.minWidth = '2px';
+    element.style.borderLeftWidth = '2px';
+  }
+
   private getPlayCursorPosition(): { left: number; top: number } | null {
     const cursorElement = this.getPlayCursorElement();
 
@@ -2377,13 +2454,15 @@ export class PlayPageComponent implements OnInit {
       return;
     }
 
-    cursorElement.style.transition = `left ${durationMs}ms linear, top ${durationMs}ms linear`;
+    this.enforcePlayCursorThickness(cursorElement);
+    cursorElement.style.transition = `left ${durationMs}ms linear, top ${durationMs}ms linear, transform ${durationMs}ms linear`;
   }
 
   private resetPlayCursorTransition(): void {
     const cursorElement = this.getPlayCursorElement();
 
     if (cursorElement) {
+      this.enforcePlayCursorThickness(cursorElement);
       cursorElement.style.transition = 'none';
     }
   }
@@ -2766,6 +2845,7 @@ export class PlayPageComponent implements OnInit {
     this.clearRealtimeCurrentStepMatches();
     this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
     this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
+    this.updatePlayCursorVisualAlignment();
     this.computerNotesService.calculateRequired(
       this.openSheetMusicDisplay.cursors[0],
       this.getComputerStaffSelection(),
@@ -2857,6 +2937,7 @@ export class PlayPageComponent implements OnInit {
     this.clearRealtimeCurrentStepMatches();
     this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
     this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
+    this.updatePlayCursorVisualAlignment();
     this.computerNotesService.calculateRequired(
       this.openSheetMusicDisplay.cursors[0],
       this.getComputerStaffSelection()

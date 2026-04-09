@@ -210,6 +210,9 @@ ion-input{
 }
 
 #cursorImg-0 {
+  width: 2px !important;
+  min-width: 2px !important;
+  border-left-width: 2px !important;
   transition: none;
   will-change: left, top;
 }
