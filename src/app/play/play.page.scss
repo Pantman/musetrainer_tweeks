@@ -84,6 +84,17 @@ ion-input{
   z-index: 1;
 }
 
+.feedback-notehead {
+  background: #dc2626;
+  border: 1px solid #991b1b;
+  border-radius: 50% 48% 52% 50%;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.25);
+  pointer-events: none;
+  position: absolute;
+  transform: rotate(-24deg);
+  z-index: 3;
+}
+
 .score-range-overlay {
   inset: 0;
   pointer-events: none;

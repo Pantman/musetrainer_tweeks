@@ -37,6 +37,12 @@ interface MeasureRange {
   upper: number;
 }
 
+interface PracticeGraphicalNote {
+  anchorElement: SVGElement;
+  groupElement: SVGElement;
+  halfTone: number;
+}
+
 @Component({
   selector: 'app-home',
   templateUrl: 'play.page.html',
@@ -49,6 +55,8 @@ export class PlayPageComponent implements OnInit {
   private static readonly MAX_SPEED_PERCENT = 180;
   private static readonly TEMPO_STEP_BPM = 5;
   private static readonly AUDIO_SCHEDULE_AHEAD_SEC = 0.05;
+  private static readonly FEEDBACK_CORRECT_COLOR = '#16a34a';
+  private static readonly FEEDBACK_ERROR_COLOR = '#dc2626';
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
   private pianoKeyboard?: PianoKeyboardComponent;
@@ -107,6 +115,13 @@ export class PlayPageComponent implements OnInit {
   metronome: Synth | null = null;
   computerPressedNotes = new Map<string, number>();
   computerNotesService: NotesService;
+  private noteFeedbackElements = new Map<
+    SVGElement,
+    { fill: string | null; stroke: string | null; style: string | null }
+  >();
+  private incorrectNoteheadElements = new Map<string, HTMLElement>();
+  private activePracticeNoteElements: SVGElement[] = [];
+  private activePracticeGraphicalNotes: PracticeGraphicalNote[] = [];
   // Midi handlers
   midiHandlers: PluginListenerHandle[] = [];
 
@@ -755,6 +770,10 @@ export class PlayPageComponent implements OnInit {
     // Required to stop next calls if stop is pressed during play
     if (!this.running) return;
 
+    if (this.notesService.getMapRequired().size > 0) {
+      this.markCurrentNotesCorrect();
+    }
+
     // if ended reached check repeat and start or stop
     if (this.osmdEndReached(0)) {
       const iter = this.openSheetMusicDisplay.cursors[0].iterator;
@@ -785,6 +804,8 @@ export class PlayPageComponent implements OnInit {
       this.openSheetMusicDisplay.cursors[0],
       this.getPracticeStaffSelection()
     );
+    this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
+    this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
 
     this.tempoInBPM = this.notesService.tempoInBPM;
 
@@ -816,6 +837,8 @@ export class PlayPageComponent implements OnInit {
     this.computerPressedNotes.clear();
     this.notesService.clear();
     this.computerNotesService.clear();
+    this.activePracticeNoteElements = [];
+    this.activePracticeGraphicalNotes = [];
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
     this.activeRangeHandle = null;
     this.activeRangeSelectionStart = null;
@@ -871,6 +894,8 @@ export class PlayPageComponent implements OnInit {
       this.getPracticeStaffSelection(),
       true
     );
+    this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
+    this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
 
     this.tempoInBPM = this.notesService.tempoInBPM;
 
@@ -958,6 +983,8 @@ export class PlayPageComponent implements OnInit {
 
   // Remove all feedback elements
   osmdResetFeedback(): void {
+    this.resetNoteFeedbackColors();
+    this.resetIncorrectNoteheads();
     let elems = document.getElementsByClassName('feedback');
     // Remove all elements
     while (elems.length > 0) {
@@ -967,6 +994,232 @@ export class PlayPageComponent implements OnInit {
       }
       elems = document.getElementsByClassName('feedback');
     }
+  }
+
+  private markCurrentNotesCorrect(): void {
+    if (!this.checkboxFeedback) {
+      return;
+    }
+
+    const elements =
+      this.activePracticeNoteElements.length > 0
+        ? this.activePracticeNoteElements
+        : this.getCurrentPracticeNoteElements();
+    this.colorPracticeNoteElements(
+      elements,
+      PlayPageComponent.FEEDBACK_CORRECT_COLOR
+    );
+  }
+
+  private markIncorrectInputNote(halfTone: number): void {
+    if (!this.checkboxFeedback && !this.realtimeMode) {
+      return;
+    }
+
+    const placement = this.getIncorrectNotePlacement(halfTone);
+    if (!placement) {
+      return;
+    }
+
+    const { id, left, top, width, height } = placement;
+    let element = this.incorrectNoteheadElements.get(id);
+
+    if (!element) {
+      element = document.createElement('div');
+      element.className = 'feedback-notehead';
+      element.dataset.feedbackId = id;
+      const parent = document.getElementById('scoreOverlayHost');
+      if (!parent) {
+        return;
+      }
+      parent.appendChild(element);
+      this.incorrectNoteheadElements.set(id, element);
+    }
+
+    element.style.left = `${left}px`;
+    element.style.top = `${top}px`;
+    element.style.width = `${width}px`;
+    element.style.height = `${height}px`;
+  }
+
+  private getCurrentPracticeNoteElements(): SVGElement[] {
+    return this.getCurrentPracticeGraphicalNotes().map((note) => note.groupElement);
+  }
+
+  private getCurrentPracticeGraphicalNotes(): PracticeGraphicalNote[] {
+    const cursor: any = this.openSheetMusicDisplay?.cursors?.[0];
+    if (!cursor?.GNotesUnderCursor) {
+      return [];
+    }
+
+    cursor.update?.();
+
+    const practiceSelection = this.getPracticeStaffSelection();
+    const graphicalNotes = (cursor.GNotesUnderCursor() ?? []).filter((note: any) => {
+      const staffId = note?.sourceNote?.ParentStaff?.idInMusicSheet;
+      return staffId === undefined || practiceSelection[staffId];
+    });
+
+    const visited = new Set<SVGElement>();
+    const elements: PracticeGraphicalNote[] = [];
+    graphicalNotes.forEach((graphicalNote: any) => {
+      const groupElement = graphicalNote?.getSVGGElement?.() as SVGElement | null;
+      const anchorElement = this.getGraphicalNoteAnchorElement(graphicalNote);
+      const halfTone = graphicalNote?.sourceNote?.halfTone;
+      if (
+        !groupElement ||
+        !anchorElement ||
+        visited.has(groupElement) ||
+        !Number.isFinite(halfTone)
+      ) {
+        return;
+      }
+
+      visited.add(groupElement);
+      elements.push({
+        anchorElement,
+        groupElement,
+        halfTone,
+      });
+    });
+
+    return elements;
+  }
+
+  private colorPracticeNoteElements(elements: SVGElement[], color: string): void {
+    elements.forEach((element) => {
+      this.applyColorToNoteElement(element, color);
+    });
+  }
+
+  private applyColorToNoteElement(root: SVGElement, color: string): void {
+    const elements = [
+      root,
+      ...Array.from(root.querySelectorAll<SVGElement>('*')),
+    ];
+
+    elements.forEach((element) => {
+      if (!this.noteFeedbackElements.has(element)) {
+        this.noteFeedbackElements.set(element, {
+          fill: element.getAttribute('fill'),
+          stroke: element.getAttribute('stroke'),
+          style: element.getAttribute('style'),
+        });
+      }
+
+      element.setAttribute('fill', color);
+      element.setAttribute('stroke', color);
+      element.style.color = color;
+    });
+  }
+
+  private getGraphicalNoteAnchorElement(graphicalNote: any): SVGElement | null {
+    const group = graphicalNote?.getSVGGElement?.() as SVGElement | null;
+    if (!group) {
+      return null;
+    }
+
+    const noteheadElement = group.querySelector<SVGElement>('ellipse, circle, path');
+    return noteheadElement ?? group;
+  }
+
+  private resetNoteFeedbackColors(): void {
+    this.noteFeedbackElements.forEach((original, element) => {
+      if (original.fill === null) {
+        element.removeAttribute('fill');
+      } else {
+        element.setAttribute('fill', original.fill);
+      }
+
+      if (original.stroke === null) {
+        element.removeAttribute('stroke');
+      } else {
+        element.setAttribute('stroke', original.stroke);
+      }
+
+      if (original.style === null) {
+        element.removeAttribute('style');
+      } else {
+        element.setAttribute('style', original.style);
+      }
+    });
+
+    this.noteFeedbackElements.clear();
+  }
+
+  private resetIncorrectNoteheads(): void {
+    this.incorrectNoteheadElements.forEach((element) => element.remove());
+    this.incorrectNoteheadElements.clear();
+  }
+
+  private getIncorrectNotePlacement(halfTone: number): {
+    id: string;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null {
+    const container = document.getElementById('scoreOverlayHost');
+    if (!container) {
+      return null;
+    }
+
+    const candidates = this.activePracticeGraphicalNotes.length
+      ? this.activePracticeGraphicalNotes.map((note) => ({
+          element: note.anchorElement,
+          halfTone: note.halfTone,
+        }))
+      : this.getCurrentPracticeGraphicalNotes().map((note) => ({
+          element: note.anchorElement,
+          halfTone: note.halfTone,
+        }));
+
+    if (!candidates.length) {
+      return null;
+    }
+
+    const anchor = candidates.reduce((best: any, current: any) => {
+      if (!best) {
+        return current;
+      }
+
+      const bestDistance = Math.abs(best.halfTone - halfTone);
+      const currentDistance = Math.abs(current.halfTone - halfTone);
+      return currentDistance < bestDistance ? current : best;
+    }, null);
+
+    const anchorRect = anchor?.element?.getBoundingClientRect?.();
+    const containerRect = container.getBoundingClientRect();
+    if (!anchorRect) {
+      return null;
+    }
+
+    const stepDelta =
+      this.getDiatonicStepIndex(halfTone) -
+      this.getDiatonicStepIndex(anchor.halfTone);
+    const stepHeight = Math.max(anchorRect.height * 0.55, 4);
+    const width = Math.max(anchorRect.width * 0.9, 10);
+    const height = Math.max(anchorRect.height * 0.75, 8);
+    const left = anchorRect.left - containerRect.left + (anchorRect.width - width) / 2;
+    const centerY =
+      anchorRect.top -
+      containerRect.top +
+      anchorRect.height / 2 -
+      stepDelta * stepHeight;
+    const top = centerY - height / 2;
+    const timestamp =
+      this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentSourceTimestamp
+        ?.RealValue ?? 0;
+    const id = `wrong-${this.loopPass}-${timestamp}-${halfTone}`;
+
+    return { id, left, top, width, height };
+  }
+
+  private getDiatonicStepIndex(halfTone: number): number {
+    const pitchClass = ((halfTone % 12) + 12) % 12;
+    const octave = Math.floor(halfTone / 12);
+    const stepByPitchClass = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6];
+    return octave * 7 + stepByPitchClass[pitchClass];
   }
 
   // Hide all feedback elements
@@ -1917,11 +2170,12 @@ export class PlayPageComponent implements OnInit {
       this.isPracticing() &&
       (this.checkboxFeedback || this.realtimeMode)
     ) {
-      this.osmdTextFeedback('&#9888;', 10, 30);
+      this.markIncorrectInputNote(halbTone);
     }
 
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
     if (this.notesService.isRequiredNotesPressed()) {
+      this.markCurrentNotesCorrect();
       if (this.realtimeMode) {
         this.currentStepSatisfied = true;
       } else {
@@ -1937,8 +2191,10 @@ export class PlayPageComponent implements OnInit {
     this.notesService.release(name);
 
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
-    if (!this.realtimeMode && this.notesService.isRequiredNotesPressed())
+    if (!this.realtimeMode && this.notesService.isRequiredNotesPressed()) {
+      this.markCurrentNotesCorrect();
       this.osmdCursorPlayMoveNext();
+    }
   }
 
   private isRealtimePlaybackOnly(): boolean {
@@ -1977,6 +2233,8 @@ export class PlayPageComponent implements OnInit {
       this.getPracticeStaffSelection(),
       back
     );
+    this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
+    this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
     this.computerNotesService.calculateRequired(
       this.openSheetMusicDisplay.cursors[0],
       this.getComputerStaffSelection(),
@@ -1993,14 +2251,6 @@ export class PlayPageComponent implements OnInit {
       return;
     }
 
-    if (
-      !this.currentStepSatisfied &&
-      this.notesService.getMapRequired().size > 0 &&
-      this.checkboxFeedback
-    ) {
-      this.osmdTextFeedback('&#9888;', 10, 30);
-    }
-
     if (this.osmdEndReached(0)) {
       this.openSheetMusicDisplay.cursors[0].hide();
       if (this.checkboxRepeat) {
@@ -2012,6 +2262,10 @@ export class PlayPageComponent implements OnInit {
       return;
     }
 
+    if (this.currentStepSatisfied && this.notesService.getMapRequired().size > 0) {
+      this.markCurrentNotesCorrect();
+    }
+
     if (!this.osmdCursorMoveNext(0)) {
       return;
     }
@@ -2020,6 +2274,8 @@ export class PlayPageComponent implements OnInit {
       this.openSheetMusicDisplay.cursors[0],
       this.getPracticeStaffSelection()
     );
+    this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
+    this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
     this.computerNotesService.calculateRequired(
       this.openSheetMusicDisplay.cursors[0],
       this.getComputerStaffSelection()
