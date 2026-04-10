@@ -73,6 +73,9 @@ interface CursorWrapDebugSnapshot {
   timestamp: number;
   actionable: boolean;
   targetX: number | null;
+  actionableTargets: number[];
+  allTargets: number[];
+  noteTargets: string[];
   baseLeft: number | null;
   renderedLeft: number | null;
   renderedTop: number | null;
@@ -175,6 +178,8 @@ export class PlayPageComponent implements OnInit {
   playCursorLoopWrapAnimation: PlayCursorLoopWrapAnimation | null = null;
   pendingLoopRestartCursorTeleport: boolean = false;
   suppressPlayCursorAlignmentForStep: boolean = false;
+  private lastPlayCursorTransitionDurationMs: number = 0;
+  private pendingDeferredTieStepAdvance: boolean = false;
   private activeRangeHandle: RangeHandle | null = null;
   private activeRangeSelectionStart: number | null = null;
 
@@ -703,6 +708,8 @@ export class PlayPageComponent implements OnInit {
     this.loopStartMeasureLeftX = null;
     this.playCursorLoopWrapAnimation = null;
     this.pendingLoopRestartCursorTeleport = false;
+    this.lastPlayCursorTransitionDurationMs = 0;
+    this.pendingDeferredTieStepAdvance = false;
     this.refreshCursorDebugMarkersDeferred();
   }
 
@@ -778,12 +785,31 @@ export class PlayPageComponent implements OnInit {
       : 0;
 
     if (index === 0) {
+      this.lastPlayCursorTransitionDurationMs = transitionDuration;
+    }
+
+    if (index === 0) {
+      const container = document.getElementById('scoreOverlayHost');
+      const visualDebug = container
+        ? this.getCurrentPlayCursorVisualDebug(container)
+        : null;
       this.tracePlayCursor('move start', `dur ${Math.round(transitionDuration)}`);
       this.appendCursorWrapDebugEvent(
         `step m${previousMeasureNumber ?? '?'} t${
           previousTimestamp !== null ? previousTimestamp.toFixed(3) : '?'
         } dur ${Math.round(transitionDuration)}`
       );
+      if (visualDebug) {
+        this.appendCursorWrapDebugEvent(
+          `vis a[${this.formatCursorDebugTargets(
+            visualDebug.actionableTargets
+          )}] all[${this.formatCursorDebugTargets(
+            visualDebug.allTargets
+          )}] use[${
+            this.formatCursorDebugTargets(visualDebug.preferredTargets)
+          }] ${visualDebug.noteTargets.join(' ') || 'none'}`
+        );
+      }
     }
 
     if (shouldAnimate && transitionDuration > 0) {
@@ -1027,7 +1053,11 @@ export class PlayPageComponent implements OnInit {
     // If ties occured, move to next and skip one additional note
     if (this.notesService.isRequiredNotesPressed()) {
       this.skipPlayNotes++;
-      this.osmdCursorPlayMoveNext();
+      if (this.shouldDeferAutoAdvanceForTieOnlyStep()) {
+        this.scheduleDeferredTieStepAdvance();
+      } else {
+        this.osmdCursorPlayMoveNext();
+      }
     }
   }
 
@@ -1073,6 +1103,8 @@ export class PlayPageComponent implements OnInit {
     this.resetPlayCursorTransition();
     this.tracePlayCursor('start reset');
     this.clearRealtimeToleranceWindow();
+    this.lastPlayCursorTransitionDurationMs = 0;
+    this.pendingDeferredTieStepAdvance = false;
     this.suppressPlayCursorAnimation = true;
     this.openSheetMusicDisplay.cursors.forEach((cursor, index) => {
       cursor.show();
@@ -1621,18 +1653,22 @@ export class PlayPageComponent implements OnInit {
       .sort((a, b) => a - b);
   }
 
-  private getCurrentPlayCursorTargetX(): number | null {
-    const container = document.getElementById('scoreOverlayHost');
-    if (!container) {
-      return null;
-    }
-
+  private getPreferredActivePracticeTargetCenters(container: HTMLElement): number[] {
     const actionableTargetCenters = this.getActivePracticeTargetCenters(
       container,
       true
     );
     if (actionableTargetCenters.length > 0) {
-      return actionableTargetCenters[0];
+      return actionableTargetCenters;
+    }
+
+    return this.getActivePracticeTargetCenters(container);
+  }
+
+  private getCurrentPlayCursorTargetX(): number | null {
+    const container = document.getElementById('scoreOverlayHost');
+    if (!container) {
+      return null;
     }
 
     const targetCenters = this.getActivePracticeTargetCenters(container);
@@ -2510,6 +2546,8 @@ export class PlayPageComponent implements OnInit {
       `m${snapshot.measureNumber} t${snapshot.timestamp.toFixed(3)}`,
       `actionable ${snapshot.actionable ? 'yes' : 'no'}`,
       `target ${snapshot.targetX !== null ? Math.round(snapshot.targetX) : 'na'}`,
+      `a[${this.formatCursorDebugTargets(snapshot.actionableTargets)}] all[${this.formatCursorDebugTargets(snapshot.allTargets)}]`,
+      `notes ${snapshot.noteTargets.join(' ') || 'none'}`,
       `base ${snapshot.baseLeft !== null ? Math.round(snapshot.baseLeft) : 'na'}`,
       `render ${
         snapshot.renderedLeft !== null && snapshot.renderedTop !== null
@@ -2530,7 +2568,11 @@ export class PlayPageComponent implements OnInit {
     const timestamp =
       this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentSourceTimestamp
         ?.RealValue ?? NaN;
-    const targetX = this.getCurrentPlayCursorTargetX();
+    const container = document.getElementById('scoreOverlayHost');
+    const visualDebug = container
+      ? this.getCurrentPlayCursorVisualDebug(container)
+      : null;
+    const targetX = visualDebug?.preferredTargets[0] ?? null;
     const base = this.getPlayCursorPosition();
     const rendered = this.getTraceRenderedPlayCursorPosition();
     const actionable = this.activePracticeGraphicalNotes.some((note) =>
@@ -2547,10 +2589,140 @@ export class PlayPageComponent implements OnInit {
       timestamp,
       actionable,
       targetX,
+      actionableTargets: visualDebug?.actionableTargets ?? [],
+      allTargets: visualDebug?.allTargets ?? [],
+      noteTargets: visualDebug?.noteTargets ?? [],
       baseLeft: base?.left ?? null,
       renderedLeft: rendered?.left ?? null,
       renderedTop: rendered?.top ?? null,
     };
+  }
+
+  private formatCursorDebugTargets(targets: number[]): string {
+    return targets.map((target) => Math.round(target)).join(',');
+  }
+
+  private getCurrentPlayCursorVisualDebug(container: HTMLElement): {
+    actionableTargets: number[];
+    allTargets: number[];
+    preferredTargets: number[];
+    noteTargets: string[];
+  } {
+    const actionableTargets = this.getActivePracticeTargetCenters(container, true);
+    const allTargets = this.getActivePracticeTargetCenters(container);
+    const preferredTargets =
+      actionableTargets.length > 0 ? actionableTargets : allTargets;
+
+    const noteTargets = this.activePracticeGraphicalNotes
+      .map((note) => {
+        const rect = this.getAnchorDomRect(
+          note.anchorElement,
+          note.groupElement,
+          container
+        );
+        if (!rect) {
+          return null;
+        }
+
+        const centerX = rect.left + rect.width / 2;
+        const prefix = this.isActionableGraphicalPracticeNote(note.graphicalNote)
+          ? 'A'
+          : 'T';
+        return `${prefix}${note.halfTone}@${Math.round(centerX)}`;
+      })
+      .filter((value): value is string => !!value)
+      .sort();
+
+    return {
+      actionableTargets,
+      allTargets,
+      preferredTargets,
+      noteTargets,
+    };
+  }
+
+  private hasActionableActivePracticeGraphicalNotes(): boolean {
+    return this.activePracticeGraphicalNotes.some((note) =>
+      this.isActionableGraphicalPracticeNote(note.graphicalNote)
+    );
+  }
+
+  private shouldDeferAutoAdvanceForTieOnlyStep(): boolean {
+    return (
+      this.shouldAnimatePlayCursor() &&
+      !this.pendingDeferredTieStepAdvance &&
+      !this.hasActionableActivePracticeGraphicalNotes() &&
+      this.lastPlayCursorTransitionDurationMs > 0
+    );
+  }
+
+  private scheduleDeferredTieStepAdvance(): void {
+    const delayMs = this.lastPlayCursorTransitionDurationMs;
+    if (delayMs <= 0) {
+      this.osmdCursorPlayMoveNext();
+      return;
+    }
+
+    this.pendingDeferredTieStepAdvance = true;
+    this.appendCursorWrapDebugEvent(`tie defer ${Math.round(delayMs)}`);
+    this.timeouts.push(
+      setTimeout(() => {
+        this.pendingDeferredTieStepAdvance = false;
+        if (!this.running) {
+          return;
+        }
+
+        this.appendCursorWrapDebugEvent('tie resume');
+        this.osmdCursorPlayMoveNext();
+      }, delayMs)
+    );
+  }
+
+  private getCurrentPlayCursorBridgeTargetX(): number | null {
+    const marker = this.getCurrentCursorDebugMarker();
+    if (!marker || marker.actionable) {
+      return null;
+    }
+
+    const markerIndex = this.cursorDebugMarkers.indexOf(marker);
+    if (markerIndex < 0) {
+      return null;
+    }
+
+    let previousActionableMarker: CursorDebugMarker | null = null;
+    for (let index = markerIndex - 1; index >= 0; index--) {
+      const candidate = this.cursorDebugMarkers[index];
+      if (candidate.actionable) {
+        previousActionableMarker = candidate;
+        break;
+      }
+    }
+
+    if (!previousActionableMarker) {
+      return null;
+    }
+
+    return previousActionableMarker.left;
+  }
+
+  private getCurrentCursorDebugMarker(): CursorDebugMarker | null {
+    const measureNumber =
+      (this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasureIndex ?? -1) + 1;
+    const timestamp =
+      this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentSourceTimestamp
+        ?.RealValue ?? NaN;
+
+    if (!Number.isFinite(measureNumber) || !Number.isFinite(timestamp)) {
+      return null;
+    }
+
+    return (
+      this.cursorDebugMarkers.find(
+        (marker) =>
+          marker.measureNumber === measureNumber &&
+          Math.abs(marker.timestamp - timestamp) < 0.0001
+      ) ?? null
+    );
   }
 
   // Hide all feedback elements
