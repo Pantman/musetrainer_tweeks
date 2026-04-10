@@ -157,7 +157,7 @@ export class NotesService {
   // Update note status for piano keyboard
   playRequiredNotes(
     notePress: (note: number, velocity: number) => void,
-    noteRelease: (note: number) => void
+    noteRelease: (note: number, retrigger?: boolean) => void
   ): void {
     // Release notes no longer required
     for (const [key] of this.mapPressed) {
@@ -171,7 +171,7 @@ export class NotesService {
       if (value.value === 0) {
         // If already pressed, release first
         if (this.mapPressed.has(key)) {
-          noteRelease(parseInt(key) + 12);
+          noteRelease(parseInt(key) + 12, true);
         }
         notePress(parseInt(key) + 12, 60);
       }

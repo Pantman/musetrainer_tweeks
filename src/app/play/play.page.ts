@@ -23,6 +23,8 @@ declare const Ionic: any;
 
 type TempoPreset = 'normal' | 'slow' | 'verySlow' | 'custom';
 type RangeHandle = 'start' | 'end';
+type TransportMode = 'listen' | 'wait' | 'realtime';
+type PlaybackStartReason = 'fresh' | 'loop-restart';
 
 interface MeasureOverlay {
   measureNumber: number;
@@ -50,11 +52,29 @@ interface PlayCursorLoopWrapAnimation {
   finalNoteBaseLeft: number;
   finalNoteX: number;
   endBarlineX: number;
+  boundaryTriggered: boolean;
   restarted: boolean;
   restartBaseLeft: number | null;
   restartDurationMs: number;
   startBarlineX: number;
   firstNoteX: number;
+}
+
+interface PlaybackClockState {
+  scheduledAudioTimeSec: number | null;
+  pendingLoopRestartAudioTimeSec: number | null;
+}
+
+interface PlaybackLoopCheckpoint {
+  range: MeasureRange;
+  enrolledTimestamp: any;
+  cursorTargetX: number | null;
+  measureLeftX: number | null;
+}
+
+interface PlaybackStartContext {
+  reason: PlaybackStartReason;
+  audioSeedTimeSec: number | null;
 }
 
 interface CursorDebugMarker {
@@ -152,6 +172,11 @@ export class PlayPageComponent implements OnInit {
   // Play
   timePlayStart: number = 0;
   playbackStartScoreTimestamp: number = 0;
+  private transportMode: TransportMode | null = null;
+  private playbackClock: PlaybackClockState = {
+    scheduledAudioTimeSec: null,
+    pendingLoopRestartAudioTimeSec: null,
+  };
   skipPlayNotes: number = 0;
   tempoInBPM: number = 120;
   speedValue: number = 100;
@@ -173,13 +198,14 @@ export class PlayPageComponent implements OnInit {
   };
   suppressPlayCursorAnimation: boolean = false;
   playCursorAlignmentFrame: number | null = null;
-  loopStartCursorTargetX: number | null = null;
-  loopStartMeasureLeftX: number | null = null;
+  private loopStartCheckpoint: PlaybackLoopCheckpoint | null = null;
   playCursorLoopWrapAnimation: PlayCursorLoopWrapAnimation | null = null;
+  private playCursorLoopBoundaryTimeout: NodeJS.Timeout | null = null;
   pendingLoopRestartCursorTeleport: boolean = false;
   suppressPlayCursorAlignmentForStep: boolean = false;
   private lastPlayCursorTransitionDurationMs: number = 0;
   private pendingDeferredTieStepAdvance: boolean = false;
+  private pendingTimedStartBootstrapAdvance: boolean = false;
   private activeRangeHandle: RangeHandle | null = null;
   private activeRangeSelectionStart: number | null = null;
 
@@ -695,21 +721,81 @@ export class PlayPageComponent implements OnInit {
     this.refreshMeasureOverlaysDeferred();
   }
 
+  private setTransportMode(mode: TransportMode | null): void {
+    this.transportMode = mode;
+    this.listenMode = mode === 'listen';
+    this.realtimeMode = mode === 'realtime';
+  }
+
+  private isTimedTransportMode(): boolean {
+    return (
+      this.transportMode === 'listen' || this.transportMode === 'realtime'
+    );
+  }
+
+  private clearLoopStartCheckpoint(): void {
+    this.loopStartCheckpoint = null;
+  }
+
+  private getLoopStartCursorTargetX(): number | null {
+    return this.loopStartCheckpoint?.cursorTargetX ?? null;
+  }
+
+  private getLoopStartMeasureLeftX(): number | null {
+    return this.loopStartCheckpoint?.measureLeftX ?? null;
+  }
+
+  private seedPendingLoopRestartAudioTime(): void {
+    const scheduledAudioTimeSec = this.playbackClock.scheduledAudioTimeSec;
+    this.playbackClock.pendingLoopRestartAudioTimeSec =
+      typeof scheduledAudioTimeSec === 'number' &&
+      Number.isFinite(scheduledAudioTimeSec)
+        ? scheduledAudioTimeSec
+        : null;
+  }
+
+  private takePendingLoopRestartAudioTime(): number | null {
+    const audioTime = this.playbackClock.pendingLoopRestartAudioTimeSec;
+    this.playbackClock.pendingLoopRestartAudioTimeSec = null;
+    return typeof audioTime === 'number' && Number.isFinite(audioTime)
+      ? audioTime
+      : null;
+  }
+
+  private clearPlaybackClock(): void {
+    this.playbackClock.scheduledAudioTimeSec = null;
+    this.playbackClock.pendingLoopRestartAudioTimeSec = null;
+  }
+
+  private buildPlaybackStartContext(): PlaybackStartContext {
+    const audioSeedTimeSec = this.takePendingLoopRestartAudioTime();
+    return {
+      reason: this.loopPass > 0 ? 'loop-restart' : 'fresh',
+      audioSeedTimeSec,
+    };
+  }
+
+  private isLoopRestartStart(context: PlaybackStartContext): boolean {
+    return context.reason === 'loop-restart';
+  }
+
   osmdStop(): void {
     this.running = false;
-    this.realtimeMode = false;
+    this.setTransportMode(null);
+    this.loopPass = 0;
     this.currentStepSatisfied = false;
     this.resetPlayCursorTransition();
     this.osmdCursorStop();
     this.timeouts.map((to) => clearTimeout(to));
     this.timeouts = [];
     this.releaseComputerPressedNotes();
-    this.loopStartCursorTargetX = null;
-    this.loopStartMeasureLeftX = null;
+    this.clearLoopStartCheckpoint();
+    this.clearPlaybackClock();
     this.playCursorLoopWrapAnimation = null;
     this.pendingLoopRestartCursorTeleport = false;
     this.lastPlayCursorTransitionDurationMs = 0;
     this.pendingDeferredTieStepAdvance = false;
+    this.pendingTimedStartBootstrapAdvance = false;
     this.refreshCursorDebugMarkersDeferred();
   }
 
@@ -720,8 +806,7 @@ export class PlayPageComponent implements OnInit {
     this.osmdResetFeedback();
     this.clearCursorTraceEvents();
     this.markCursorTraceLoopBoundary('listen start');
-    this.listenMode = true;
-    this.realtimeMode = false;
+    this.setTransportMode('listen');
     this.startFlashCount = 0;
     this.osmdCursorStart();
   }
@@ -733,8 +818,7 @@ export class PlayPageComponent implements OnInit {
     this.osmdResetFeedback();
     this.clearCursorTraceEvents();
     this.markCursorTraceLoopBoundary('practice start');
-    this.listenMode = false;
-    this.realtimeMode = false;
+    this.setTransportMode('wait');
     this.startFlashCount = 4;
     this.osmdCursorStart();
   }
@@ -746,8 +830,7 @@ export class PlayPageComponent implements OnInit {
     this.clearCursorTraceEvents();
     this.resetRealtimeDebugStats();
     this.markCursorTraceLoopBoundary('realtime start');
-    this.listenMode = false;
-    this.realtimeMode = true;
+    this.setTransportMode('realtime');
     this.currentStepSatisfied = false;
     this.startFlashCount = 4;
     this.osmdCursorStart();
@@ -833,10 +916,15 @@ export class PlayPageComponent implements OnInit {
         index === 0
           ? this.openSheetMusicDisplay.cursors[index].iterator.CurrentMeasureIndex + 1
           : null;
+      const sameMeasureStep =
+        previousMeasureNumber !== null &&
+        nextMeasureNumber !== null &&
+        previousMeasureNumber === nextMeasureNumber;
       if (
         !previousPosition ||
         !nextPosition ||
-        Math.abs(nextPosition.top - previousPosition.top) > 4
+        (!sameMeasureStep &&
+          Math.abs(nextPosition.top - previousPosition.top) > 4)
       ) {
         const shouldTreatAsSystemWrap =
           previousMeasureNumber !== null &&
@@ -904,13 +992,14 @@ export class PlayPageComponent implements OnInit {
     const currentTimestamp =
       this.openSheetMusicDisplay.cursors[1].iterator.CurrentSourceTimestamp
         .RealValue;
-    const audioTime = this.getScheduledAudioTime();
+    const audioTime = this.getCurrentScheduledPlaybackAudioTime();
 
     if (this.realtimeMode) {
       this.advanceRealtimePractice(audioTime);
     }
 
     let nextTimestamp = currentTimestamp;
+    let timeout = 0;
 
     // if ended reached check repeat and start or stop
     if (this.osmdEndReached(1)) {
@@ -919,7 +1008,7 @@ export class PlayPageComponent implements OnInit {
       nextTimestamp =
         iter.CurrentMeasure.AbsoluteTimestamp.RealValue +
         iter.CurrentMeasure.Duration.RealValue;
-      const timeout = this.getPlaybackDelayMs(
+      timeout = this.getPlaybackDelayMs(
         nextTimestamp - iter.CurrentSourceTimestamp.RealValue
       );
       this.timeouts.push(
@@ -933,7 +1022,7 @@ export class PlayPageComponent implements OnInit {
       const it2 = this.openSheetMusicDisplay.cursors[1].iterator.clone();
       it2.moveToNext();
       nextTimestamp = it2.CurrentSourceTimestamp.RealValue;
-      let timeout = this.getPlaybackDelayMs(
+      timeout = this.getPlaybackDelayMs(
         nextTimestamp - iter.CurrentSourceTimestamp.RealValue
       );
 
@@ -957,9 +1046,11 @@ export class PlayPageComponent implements OnInit {
     }
 
     this.scheduleMetronomeWindow(currentTimestamp, nextTimestamp, audioTime);
+    this.advanceScheduledPlaybackAudioTime(timeout);
 
     // Play note in listen mode, so the play cursor can advance forward
     if (this.listenMode) {
+      this.advanceTimedStartBootstrapCursorIfNeeded();
       this.playNote(audioTime);
     }
   }
@@ -982,6 +1073,242 @@ export class PlayPageComponent implements OnInit {
     return endReached;
   }
 
+  private restartLoopPlayback(): void {
+    this.seedPendingLoopRestartAudioTime();
+    this.loopPass++;
+    this.markCursorTraceLoopBoundary('loop wrap');
+    this.osmdCursorStart();
+  }
+
+  private handlePlayCursorLoopEnd(): void {
+    const iter = this.openSheetMusicDisplay.cursors[0].iterator;
+    const timeout = this.getPlaybackDelayMs(
+      iter.CurrentMeasure.AbsoluteTimestamp.RealValue +
+        iter.CurrentMeasure.Duration.RealValue -
+        iter.CurrentSourceTimestamp.RealValue
+    );
+
+    if (this.checkboxRepeat) {
+      const startedLoopWrapAnimation = this.startPlayCursorLoopWrapAnimation(
+        timeout,
+        () => this.restartLoopPlayback()
+      );
+      if (!startedLoopWrapAnimation) {
+        this.timeouts.push(
+          setTimeout(() => {
+            this.restartLoopPlayback();
+          }, timeout)
+        );
+      }
+      return;
+    }
+
+    this.openSheetMusicDisplay.cursors[0].hide();
+    this.timeouts.push(
+      setTimeout(() => {
+        this.osmdCursorStop();
+      }, timeout)
+    );
+  }
+
+  private moveToNextPlayCursorStep(allowLoopRestart: boolean): boolean {
+    if (this.osmdEndReached(0)) {
+      if (allowLoopRestart) {
+        this.handlePlayCursorLoopEnd();
+      }
+      return false;
+    }
+
+    return this.osmdCursorMoveNext(0);
+  }
+
+  // Single writer for cursor-derived note state. Any cursor0 repositioning
+  // should rebuild required notes, practice targets, tempo, and realtime state here.
+  private rebuildCurrentPlaybackStepState(back = false): void {
+    this.notesService.calculateRequired(
+      this.openSheetMusicDisplay.cursors[0],
+      this.getPracticeStaffSelection(),
+      back
+    );
+
+    if (this.realtimeMode) {
+      this.clearRealtimeCurrentStepMatches();
+    }
+
+    this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
+    this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
+
+    if (this.realtimeMode) {
+      this.computerNotesService.calculateRequired(
+        this.openSheetMusicDisplay.cursors[0],
+        this.getComputerStaffSelection(),
+        back
+      );
+      this.tempoInBPM = this.resolveRealtimeTempo();
+      const hasCurrentRequiredPressKeys = this.hasCurrentRequiredPressKeys();
+      this.currentStepSatisfied =
+        !hasCurrentRequiredPressKeys || this.notesService.isRequiredNotesPressed();
+      this.refreshRealtimeNextStepKeys();
+    } else {
+      this.tempoInBPM = this.notesService.tempoInBPM;
+    }
+
+    if (this.pianoKeyboard) {
+      this.pianoKeyboard.updateNotesStatus();
+    }
+  }
+
+  private resetPlaybackNoteStateForStart(): void {
+    this.releaseComputerPressedNotes();
+    this.computerNotesService.clear();
+    this.notesService.clear();
+
+    Array.from(this.mapNotesAutoPressed.keys()).forEach((key) => {
+      this.keyReleaseNoteInternal(parseInt(key) + 12, undefined, false);
+    });
+    this.mapNotesAutoPressed.clear();
+  }
+
+  private syncTempoCursorToPlayCursor(): void {
+    const cursor0 = this.openSheetMusicDisplay?.cursors?.[0];
+    const cursor1 = this.openSheetMusicDisplay?.cursors?.[1];
+    const cursor0Iterator = cursor0?.iterator?.clone?.();
+
+    if (!cursor0 || !cursor1 || !cursor0Iterator) {
+      return;
+    }
+
+    cursor1.iterator = cursor0Iterator;
+    cursor1.update();
+    if (this.listenMode) {
+      cursor1.hide();
+    }
+  }
+
+  private positionCursorsForPlaybackStart(
+    startContext: PlaybackStartContext
+  ): boolean {
+    const shouldRestoreLoopStart = this.canRestoreLoopStartCursorState(startContext);
+    this.openSheetMusicDisplay.cursors.forEach((cursor, index) => {
+      cursor.show();
+      if (!shouldRestoreLoopStart) {
+        cursor.reset();
+        cursor.update();
+      }
+      if (this.listenMode && index == 1) {
+        // Comment out this to enable debug mode
+        cursor.hide();
+      }
+    });
+
+    this.resetPlaybackNoteStateForStart();
+    this.osmdHideFeedback();
+
+    const restoredLoopStart = this.restoreLoopStartCursorState(startContext);
+    if (this.isLoopRestartStart(startContext)) {
+      this.appendCursorWrapDebugEvent(
+        restoredLoopStart
+          ? `loop restore hit m${this.inputMeasure.lower}-${this.inputMeasure.upper}`
+          : `loop restore miss m${this.inputMeasure.lower}-${this.inputMeasure.upper}`
+      );
+    }
+
+    if (
+      !restoredLoopStart &&
+      this.inputMeasure.lower >
+        this.openSheetMusicDisplay.cursors[0].iterator.CurrentMeasureIndex + 1
+    ) {
+      if (!this.osmdCursorMoveNext(0)) {
+        return false;
+      }
+      this.osmdCursorMoveNext(1);
+    }
+
+    this.openSheetMusicDisplay.cursors.forEach((cursor) => cursor.update());
+    this.snapPlayCursorForJump();
+    if (this.pendingLoopRestartCursorTeleport) {
+      this.positionPlayCursorAtLoopStartBoundary();
+    }
+    this.suppressPlayCursorAlignmentForStep =
+      this.isLoopRestartStart(startContext);
+    this.tracePlayCursor(
+      'start positioned',
+      this.isLoopRestartStart(startContext) ? 'loop restart' : 'fresh'
+    );
+
+    return true;
+  }
+
+  private normalizePlaybackStartStep(
+    startContext: PlaybackStartContext
+  ): boolean {
+    if (this.isTimedTransportMode()) {
+      this.syncTempoCursorToPlayCursor();
+      return true;
+    }
+
+    while (this.shouldAutoAdvanceWaitModeStartStep()) {
+      this.appendCursorWrapDebugEvent(
+        `${
+          this.isLoopRestartStart(startContext) ? 'restart' : 'start'
+        } wait bootstrap req[${
+          this.formatRequiredNoteSummary()
+        }]`
+      );
+      if (!this.moveToNextPlayCursorStep(false)) {
+        return false;
+      }
+      this.rebuildCurrentPlaybackStepState();
+    }
+
+    this.syncTempoCursorToPlayCursor();
+    return true;
+  }
+
+  private shouldAutoAdvanceWaitModeStartStep(): boolean {
+    if (this.isTimedTransportMode()) {
+      return false;
+    }
+
+    return !this.hasCurrentRequiredPressKeys();
+  }
+
+  private refreshTimedStartBootstrapState(): void {
+    this.pendingTimedStartBootstrapAdvance =
+      this.listenMode && !this.hasCurrentRequiredPressKeys();
+  }
+
+  private advanceTimedStartBootstrapCursorIfNeeded(): void {
+    if (!this.pendingTimedStartBootstrapAdvance || !this.listenMode) {
+      return;
+    }
+
+    if (this.hasCurrentRequiredPressKeys()) {
+      this.pendingTimedStartBootstrapAdvance = false;
+      return;
+    }
+
+    if (this.osmdEndReached(0)) {
+      this.pendingTimedStartBootstrapAdvance = false;
+      return;
+    }
+
+    this.appendCursorWrapDebugEvent(
+      `timed bootstrap ${this.formatScoreTimestamp(
+        this.getCurrentPracticeTimestamp()
+      )}`
+    );
+
+    if (!this.osmdCursorMoveNext(0)) {
+      this.pendingTimedStartBootstrapAdvance = false;
+      return;
+    }
+
+    this.rebuildCurrentPlaybackStepState();
+    this.updatePlayCursorVisualAlignment();
+    this.pendingTimedStartBootstrapAdvance = !this.hasCurrentRequiredPressKeys();
+  }
+
   // Move cursor to next note
   osmdCursorPlayMoveNext(): void {
     // Required to stop next calls if stop is pressed during play
@@ -991,59 +1318,13 @@ export class PlayPageComponent implements OnInit {
       this.markCurrentNotesCorrect();
     }
 
-    // if ended reached check repeat and start or stop
-    if (this.osmdEndReached(0)) {
-      const iter = this.openSheetMusicDisplay.cursors[0].iterator;
-      const timeout = this.getPlaybackDelayMs(
-        iter.CurrentMeasure.AbsoluteTimestamp.RealValue +
-          iter.CurrentMeasure.Duration.RealValue -
-          iter.CurrentSourceTimestamp.RealValue
-      );
-      if (this.checkboxRepeat) {
-        const startedLoopWrapAnimation = this.startPlayCursorLoopWrapAnimation(
-          timeout,
-          () => {
-            this.loopPass++;
-            this.markCursorTraceLoopBoundary('loop wrap');
-            this.osmdCursorStart();
-          }
-        );
-        if (!startedLoopWrapAnimation) {
-          this.timeouts.push(
-            setTimeout(() => {
-              this.loopPass++;
-              this.markCursorTraceLoopBoundary('loop wrap');
-              this.osmdCursorStart();
-            }, timeout)
-          );
-        }
-      } else {
-        this.openSheetMusicDisplay.cursors[0].hide();
-        this.timeouts.push(
-          setTimeout(() => {
-            this.osmdCursorStop();
-          }, timeout)
-        );
-      }
+    if (!this.moveToNextPlayCursorStep(true)) {
       return;
     }
 
-    // Move to next
-    if (!this.osmdCursorMoveNext(0)) return;
-
-    // Calculate notes
-    this.notesService.calculateRequired(
-      this.openSheetMusicDisplay.cursors[0],
-      this.getPracticeStaffSelection()
-    );
-    this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
-    this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
+    this.rebuildCurrentPlaybackStepState();
     this.updatePlayCursorVisualAlignment();
-
-    this.tempoInBPM = this.notesService.tempoInBPM;
-
-    // Update keyboard
-    if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
+    this.pendingTimedStartBootstrapAdvance = false;
 
     // If ties occured, move to next and skip one additional note
     if (this.notesService.isRequiredNotesPressed()) {
@@ -1058,13 +1339,16 @@ export class PlayPageComponent implements OnInit {
 
   // Stop cursor
   osmdCursorStop(): void {
-    this.listenMode = false;
-    this.realtimeMode = false;
+    this.setTransportMode(null);
     this.running = false;
+    this.loopPass = 0;
+    this.currentStepSatisfied = false;
 
-    this.openSheetMusicDisplay.cursors.forEach((cursor) => {
-      cursor.reset();
-      cursor.hide();
+    this.withCursorFollowSuppressed(() => {
+      this.openSheetMusicDisplay.cursors.forEach((cursor) => {
+        cursor.reset();
+        cursor.hide();
+      });
     });
     for (const [key] of this.mapNotesAutoPressed) {
       this.keyReleaseNote(parseInt(key) + 12);
@@ -1075,11 +1359,17 @@ export class PlayPageComponent implements OnInit {
     this.computerNotesService.clear();
     this.activePracticeNoteElements = [];
     this.activePracticeGraphicalNotes = [];
+    this.clearLoopStartCheckpoint();
+    this.clearPlaybackClock();
     this.cancelScheduledPlayCursorAlignment();
     const cursorElement = this.getPlayCursorElement();
     if (cursorElement) {
       cursorElement.style.transform = '';
     }
+    this.pendingLoopRestartCursorTeleport = false;
+    this.lastPlayCursorTransitionDurationMs = 0;
+    this.pendingDeferredTieStepAdvance = false;
+    this.pendingTimedStartBootstrapAdvance = false;
     this.clearRealtimeCurrentStepMatches();
     this.clearRealtimeToleranceWindow();
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
@@ -1094,86 +1384,53 @@ export class PlayPageComponent implements OnInit {
 
   // Resets the cursor to the first note
   osmdCursorStart(): void {
+    const startContext = this.buildPlaybackStartContext();
+
     // this.content.scrollToTop();
     this.resetPlayCursorTransition();
     this.tracePlayCursor('start reset');
     this.clearRealtimeToleranceWindow();
     this.lastPlayCursorTransitionDurationMs = 0;
     this.pendingDeferredTieStepAdvance = false;
+    this.pendingTimedStartBootstrapAdvance = false;
     this.suppressPlayCursorAnimation = true;
-    this.openSheetMusicDisplay.cursors.forEach((cursor, index) => {
-      cursor.show();
-      cursor.reset();
-      cursor.update();
-      if (this.listenMode && index == 1) {
-        // Comment out this to enable debug mode
-        cursor.hide();
+    const prepared = this.withCursorFollowSuppressed(() => {
+      if (!this.positionCursorsForPlaybackStart(startContext)) {
+        return false;
       }
+
+      this.rebuildCurrentPlaybackStepState(true);
+      if (!this.normalizePlaybackStartStep(startContext)) {
+        return false;
+      }
+
+      this.captureLoopStartCheckpoint();
+      if (this.pendingLoopRestartCursorTeleport) {
+        this.tracePlayCursor('start aligned', 'loop boundary');
+      } else {
+        this.updatePlayCursorVisualAlignment();
+        this.tracePlayCursor('start aligned');
+      }
+      this.appendLoopRestartStateDebugEvent(
+        this.isLoopRestartStart(startContext)
+          ? 'restart prepared'
+          : 'start prepared'
+      );
+      this.refreshTimedStartBootstrapState();
+      return true;
     });
 
-    // Additional tasks in case of new start, not required in repetition
-    if (this.loopPass === 0) {
-      this.notesService.clear();
-      this.computerNotesService.clear();
-      this.releaseComputerPressedNotes();
-      // free auto pressed notes
-      for (const [key] of this.mapNotesAutoPressed) {
-        this.keyReleaseNote(parseInt(key) + 12);
-      }
-    }
-
-    this.osmdHideFeedback();
-
-    if (
-      this.inputMeasure.lower >
-      this.openSheetMusicDisplay.cursors[0].iterator.CurrentMeasureIndex + 1
-    ) {
-      if (!this.osmdCursorMoveNext(0)) return;
-      this.osmdCursorMoveNext(1);
-    }
-
-    this.openSheetMusicDisplay.cursors.forEach((cursor) => cursor.update());
-    this.snapPlayCursorForJump();
-    if (this.pendingLoopRestartCursorTeleport) {
-      this.positionPlayCursorAtLoopStartBoundary();
-    }
-    this.suppressPlayCursorAlignmentForStep = this.loopPass > 0;
-    this.tracePlayCursor(
-      'start positioned',
-      this.loopPass > 0 ? 'loop restart' : 'fresh'
-    );
-
     this.suppressPlayCursorAnimation = false;
-
-    // Calculate first notes
-    this.notesService.calculateRequired(
-      this.openSheetMusicDisplay.cursors[0],
-      this.getPracticeStaffSelection(),
-      true
-    );
-    this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
-    this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
-    this.cacheLoopStartCursorTargets();
-    if (this.pendingLoopRestartCursorTeleport) {
-      this.tracePlayCursor('start aligned', 'loop boundary');
-    } else {
-      this.updatePlayCursorVisualAlignment();
-      this.tracePlayCursor('start aligned');
+    if (!prepared) {
+      this.osmdCursorStop();
+      return;
     }
 
-    this.tempoInBPM = this.notesService.tempoInBPM;
-
-    if (this.realtimeMode) {
-      this.syncRealtimeStepState(true);
-    }
-
-    // Update keyboard
-    if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
     this.refreshCursorWrapDebugSnapshot();
-    this.osmdCursorStart2();
+    this.osmdCursorStart2(startContext);
   }
 
-  osmdCursorStart2(): void {
+  osmdCursorStart2(startContext: PlaybackStartContext): void {
     if (this.startFlashCount > 0) {
       this.playCountInClick();
       if (this.openSheetMusicDisplay.cursors[0].hidden)
@@ -1183,7 +1440,7 @@ export class PlayPageComponent implements OnInit {
       const countInDelay = this.getCountInDelayMs();
       this.timeouts.push(
         setTimeout(() => {
-          this.osmdCursorStart2();
+          this.osmdCursorStart2(startContext);
         }, countInDelay)
       );
       return;
@@ -1191,18 +1448,27 @@ export class PlayPageComponent implements OnInit {
 
     this.startFlashCount = 0;
     this.openSheetMusicDisplay.cursors[0].show();
-
-    // Skip initial rests
-    if (!this.realtimeMode && this.notesService.isRequiredNotesPressed()) {
-      this.skipPlayNotes++;
-      this.osmdCursorPlayMoveNext();
-    }
+    this.appendLoopRestartStateDebugEvent(
+      this.isLoopRestartStart(startContext) ? 'restart start2 enter' : 'start2 enter'
+    );
 
     this.timePlayStart = Date.now();
     this.playbackStartScoreTimestamp =
       this.openSheetMusicDisplay.cursors[0].iterator.CurrentSourceTimestamp
         .RealValue;
-    const audioTime = this.getScheduledAudioTime();
+    let audioTime: number;
+    if (startContext.audioSeedTimeSec !== null) {
+      const seededAudioTime = startContext.audioSeedTimeSec;
+      this.playbackClock.scheduledAudioTimeSec = seededAudioTime;
+      audioTime = this.getCurrentScheduledPlaybackAudioTime();
+      this.appendCursorWrapDebugEvent(
+        audioTime !== seededAudioTime
+          ? `restart audio seed ${seededAudioTime.toFixed(3)}->${audioTime.toFixed(3)}`
+          : `restart audio seed ${audioTime.toFixed(3)}`
+      );
+    } else {
+      audioTime = this.getCurrentScheduledPlaybackAudioTime();
+    }
 
     this.startMetronome();
 
@@ -1216,6 +1482,19 @@ export class PlayPageComponent implements OnInit {
     const it2 = this.openSheetMusicDisplay.cursors[0].iterator.clone();
     it2.moveToNext();
     const nextTimestamp = it2.CurrentSourceTimestamp.RealValue;
+    this.appendCursorWrapDebugEvent(
+      `${
+        this.isLoopRestartStart(startContext) ? 'restart' : 'start'
+      } schedule cur ${this.formatScoreTimestamp(
+        this.playbackStartScoreTimestamp
+      )} next ${this.formatScoreTimestamp(nextTimestamp)} timeout ${Math.round(
+        this.getPlaybackDelayMs(
+          nextTimestamp -
+            this.openSheetMusicDisplay.cursors[0].iterator.CurrentSourceTimestamp
+              .RealValue
+        )
+      )} skip ${this.skipPlayNotes}`
+    );
 
     this.scheduleMetronomeWindow(
       this.playbackStartScoreTimestamp,
@@ -1228,6 +1507,7 @@ export class PlayPageComponent implements OnInit {
         this.openSheetMusicDisplay.cursors[0].iterator.CurrentSourceTimestamp
           .RealValue
     );
+    this.advanceScheduledPlaybackAudioTime(timeout);
     this.timeouts.push(
       setTimeout(() => {
         this.osmdCursorTempoMoveNext();
@@ -1237,11 +1517,32 @@ export class PlayPageComponent implements OnInit {
 
   playNote(audioTime?: number): void {
     if (this.skipPlayNotes > 0) {
+      this.appendCursorWrapDebugEvent(
+        `play skip consume ${this.skipPlayNotes} at ${this.formatScoreTimestamp(
+          this.getCurrentPracticeTimestamp()
+        )}`
+      );
       this.skipPlayNotes--;
     } else {
+      this.appendCursorWrapDebugEvent(
+        `play trigger ${this.formatScoreTimestamp(
+          this.getCurrentPracticeTimestamp()
+        )} req[${this.formatRequiredNoteSummary()}]`
+      );
       this.notesService.playRequiredNotes(
         (note, velocity) => this.keyPressNote(note, velocity, audioTime),
-        (note) => this.keyReleaseNote(note, audioTime)
+        (note, retrigger) => {
+          if (retrigger) {
+            this.keyReleaseNoteInternal(
+              note,
+              this.getRetriggerReleaseAudioTime(audioTime),
+              false
+            );
+            return;
+          }
+
+          this.keyReleaseNote(note, audioTime);
+        }
       );
     }
   }
@@ -1589,11 +1890,17 @@ export class PlayPageComponent implements OnInit {
     );
   }
 
-  private cacheLoopStartCursorTargets(): void {
+  private captureLoopStartCheckpoint(): void {
+    const cursor0 = this.openSheetMusicDisplay?.cursors?.[0];
     const currentMeasureNumber =
-      this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasureIndex + 1;
+      cursor0?.iterator?.CurrentMeasureIndex + 1;
 
-    if (currentMeasureNumber !== this.inputMeasure.lower) {
+    if (
+      !cursor0 ||
+      !Number.isFinite(currentMeasureNumber) ||
+      currentMeasureNumber < this.inputMeasure.lower ||
+      currentMeasureNumber > this.inputMeasure.upper
+    ) {
       return;
     }
 
@@ -1602,25 +1909,82 @@ export class PlayPageComponent implements OnInit {
       ? this.getActivePracticeTargetCenters(container)
       : [];
 
-    if (targetCenters.length > 0) {
-      this.loopStartCursorTargetX = targetCenters[0];
+    const measureOverlay = this.measureOverlays.find(
+      (measure) => measure.measureNumber === this.inputMeasure.lower
+    );
+
+    const enrolledTimestamp = cursor0.iterator?.CurrentEnrolledTimestamp?.clone?.();
+    if (!enrolledTimestamp) {
+      return;
     }
 
-    const measureOverlay = this.measureOverlays.find(
-      (measure) => measure.measureNumber === currentMeasureNumber
-    );
-    if (measureOverlay) {
-      this.loopStartMeasureLeftX = measureOverlay.left;
+    this.loopStartCheckpoint = {
+      range: {
+        lower: this.inputMeasure.lower,
+        upper: this.inputMeasure.upper,
+      },
+      enrolledTimestamp,
+      cursorTargetX: targetCenters[0] ?? null,
+      measureLeftX: measureOverlay?.left ?? null,
+    };
+  }
+
+  private restoreLoopStartCursorState(
+    startContext: PlaybackStartContext
+  ): boolean {
+    if (!this.canRestoreLoopStartCursorState(startContext)) {
+      return false;
     }
+    const checkpoint = this.loopStartCheckpoint;
+
+    const cursor0 = this.openSheetMusicDisplay?.cursors?.[0];
+    const cursor1 = this.openSheetMusicDisplay?.cursors?.[1];
+    const manager = (cursor0 as any)?.manager;
+    if (!checkpoint || !cursor0 || !cursor1 || !manager?.getIterator) {
+      return false;
+    }
+
+    const enrolledTimestamp = checkpoint.enrolledTimestamp?.clone?.();
+    if (!enrolledTimestamp) {
+      return false;
+    }
+
+    cursor0.iterator = manager.getIterator(enrolledTimestamp);
+    cursor1.iterator = manager.getIterator(enrolledTimestamp.clone());
+    cursor0.update();
+    cursor1.update();
+    this.appendCursorWrapDebugEvent(
+      `loop restore m${this.inputMeasure.lower}-${this.inputMeasure.upper}`
+    );
+    return true;
+  }
+
+  private canRestoreLoopStartCursorState(
+    startContext: PlaybackStartContext
+  ): boolean {
+    return (
+      this.isLoopRestartStart(startContext) &&
+      !!this.loopStartCheckpoint &&
+      this.loopStartCheckpoint.range.lower === this.inputMeasure.lower &&
+      this.loopStartCheckpoint.range.upper === this.inputMeasure.upper
+    );
   }
 
   private cancelScheduledPlayCursorAlignment(): void {
     if (this.playCursorAlignmentFrame === null) {
+      if (this.playCursorLoopBoundaryTimeout !== null) {
+        clearTimeout(this.playCursorLoopBoundaryTimeout);
+        this.playCursorLoopBoundaryTimeout = null;
+      }
       return;
     }
 
     window.cancelAnimationFrame(this.playCursorAlignmentFrame);
     this.playCursorAlignmentFrame = null;
+    if (this.playCursorLoopBoundaryTimeout !== null) {
+      clearTimeout(this.playCursorLoopBoundaryTimeout);
+      this.playCursorLoopBoundaryTimeout = null;
+    }
     this.playCursorLoopWrapAnimation = null;
   }
 
@@ -1697,9 +2061,9 @@ export class PlayPageComponent implements OnInit {
       : [];
     const finalNoteX = finalNoteTargets[0] ?? cursorPosition?.left ?? null;
     const startBarlineX =
-      this.loopStartMeasureLeftX ?? loopStartOverlay?.left ?? null;
+      this.getLoopStartMeasureLeftX() ?? loopStartOverlay?.left ?? null;
     const firstNoteX =
-      this.loopStartCursorTargetX ?? startBarlineX ?? null;
+      this.getLoopStartCursorTargetX() ?? startBarlineX ?? null;
 
     if (
       !cursorPosition ||
@@ -1724,12 +2088,44 @@ export class PlayPageComponent implements OnInit {
       finalNoteBaseLeft: cursorPosition.left,
       finalNoteX: resolvedFinalNoteX,
       endBarlineX: currentMeasureOverlay.right,
+      boundaryTriggered: false,
       restarted: false,
       restartBaseLeft: null,
       restartDurationMs: 0,
       startBarlineX: resolvedStartBarlineX,
       firstNoteX: resolvedFirstNoteX,
     };
+
+    const triggerLoopBoundary = () => {
+      const animation = this.playCursorLoopWrapAnimation;
+      if (!this.running || !animation || animation.boundaryTriggered) {
+        return;
+      }
+
+      animation.boundaryTriggered = true;
+      this.playCursorLoopBoundaryTimeout = null;
+      const nowMs = performance.now();
+      this.appendCursorWrapDebugEvent(
+        `loop boundary late ${Math.round(nowMs - animation.boundaryTimeMs)}ms`
+      );
+      this.pendingLoopRestartCursorTeleport = true;
+      onBoundaryReached();
+      this.pendingLoopRestartCursorTeleport = false;
+
+      const restartCursorPosition = this.getPlayCursorPosition();
+      animation.restartBaseLeft = restartCursorPosition?.left ?? null;
+      animation.restartDurationMs = this.getLoopRestartTravelDurationMs();
+      animation.startBarlineX =
+        this.getLoopStartMeasureLeftX() ?? animation.startBarlineX;
+      animation.firstNoteX =
+        this.getLoopStartCursorTargetX() ?? animation.firstNoteX;
+      animation.restarted = true;
+    };
+
+    this.playCursorLoopBoundaryTimeout = setTimeout(
+      triggerLoopBoundary,
+      boundaryDurationMs
+    );
 
     const tick = () => {
       const animation = this.playCursorLoopWrapAnimation;
@@ -1753,24 +2149,6 @@ export class PlayPageComponent implements OnInit {
           animation.finalNoteX +
           (animation.endBarlineX - animation.finalNoteX) * progress;
         this.positionPlayCursorAtX(interpolatedX, animation.finalNoteBaseLeft);
-
-        if (nowMs >= animation.boundaryTimeMs) {
-          this.appendCursorWrapDebugEvent(
-            `loop boundary late ${Math.round(nowMs - animation.boundaryTimeMs)}ms`
-          );
-          this.pendingLoopRestartCursorTeleport = true;
-          onBoundaryReached();
-          this.pendingLoopRestartCursorTeleport = false;
-
-          const restartCursorPosition = this.getPlayCursorPosition();
-          animation.restartBaseLeft = restartCursorPosition?.left ?? null;
-          animation.restartDurationMs = this.getLoopRestartTravelDurationMs();
-          animation.startBarlineX =
-            this.loopStartMeasureLeftX ?? animation.startBarlineX;
-          animation.firstNoteX =
-            this.loopStartCursorTargetX ?? animation.firstNoteX;
-          animation.restarted = true;
-        }
       }
 
       if (animation.restarted) {
@@ -1829,7 +2207,7 @@ export class PlayPageComponent implements OnInit {
   private positionPlayCursorAtLoopStartBoundary(): void {
     const cursorPosition = this.getPlayCursorPosition();
     const targetX =
-      this.loopStartMeasureLeftX ??
+      this.getLoopStartMeasureLeftX() ??
       this.measureOverlays.find(
         (measure) => measure.measureNumber === this.inputMeasure.lower
       )?.left;
@@ -2105,8 +2483,6 @@ export class PlayPageComponent implements OnInit {
     if (!cursor?.GNotesUnderCursor) {
       return [];
     }
-
-    cursor.update?.();
 
     const practiceSelection = this.getPracticeStaffSelection();
     const graphicalNotes = (cursor.GNotesUnderCursor() ?? []).filter((note: any) => {
@@ -2559,7 +2935,126 @@ export class PlayPageComponent implements OnInit {
 
   private appendCursorWrapDebugEvent(message: string): void {
     this.cursorWrapDebugEvents.unshift(message);
-    this.cursorWrapDebugEvents = this.cursorWrapDebugEvents.slice(0, 40);
+  }
+
+  private formatRequiredNoteSummary(): string {
+    const notes = Array.from(this.notesService.getMapRequired().values())
+      .map((note) => {
+        const pitchLabel = this.noteKeyToLabel(note.key);
+        const freshness = note.value === 0 ? 'new' : `hold${note.value}`;
+        return `${pitchLabel}:${freshness}@${this.formatScoreTimestamp(
+          note.timestamp
+        )}`;
+      })
+      .sort();
+
+    return notes.join(' ') || 'none';
+  }
+
+  private appendLoopRestartStateDebugEvent(label: string): void {
+    if (!this.showCursorWrapDebugOverlay) {
+      return;
+    }
+
+    const cursor = this.openSheetMusicDisplay?.cursors?.[0];
+    const currentTimestamp =
+      cursor?.iterator?.CurrentSourceTimestamp?.RealValue ?? NaN;
+    const currentMeasureNumber =
+      (cursor?.iterator?.CurrentMeasureIndex ?? -1) + 1;
+    const nextIter = cursor?.iterator?.clone?.();
+    let nextTimestamp = NaN;
+    let nextMeasureNumber = NaN;
+    if (nextIter) {
+      nextIter.moveToNext();
+      if (!nextIter.EndReached) {
+        nextTimestamp = nextIter.CurrentSourceTimestamp?.RealValue ?? NaN;
+        nextMeasureNumber = (nextIter.CurrentMeasureIndex ?? -1) + 1;
+      }
+    }
+
+    const container = document.getElementById('scoreOverlayHost');
+    const preferredTargets = container
+      ? this.getPreferredActivePracticeTargetCenters(container)
+      : [];
+
+    this.appendCursorWrapDebugEvent(
+      `${label} cur ${this.formatScoreTimestamp(currentTimestamp)} next ${
+        Number.isFinite(nextTimestamp)
+          ? this.formatScoreTimestamp(nextTimestamp)
+          : 'end'
+      } skip ${this.skipPlayNotes} req[${
+        this.formatRequiredNoteSummary()
+      }] vis[${this.formatCursorDebugTargets(preferredTargets)}] m${
+        Number.isFinite(currentMeasureNumber) ? currentMeasureNumber : '?'
+      }->${
+        Number.isFinite(nextMeasureNumber) ? nextMeasureNumber : 'end'
+      }`
+    );
+  }
+
+  private withCursorFollowSuppressed<T>(work: () => T): T {
+    const cursor0: any = this.openSheetMusicDisplay?.cursors?.[0];
+    const cursor1: any = this.openSheetMusicDisplay?.cursors?.[1];
+    const previousFollowCursor = this.openSheetMusicDisplay?.FollowCursor;
+    const previousCursor0Follow = cursor0?.cursorOptions?.follow;
+    const previousCursor1Follow = cursor1?.cursorOptions?.follow;
+
+    if (typeof previousFollowCursor === 'boolean') {
+      this.openSheetMusicDisplay.FollowCursor = false;
+    }
+    if (cursor0?.cursorOptions) {
+      cursor0.cursorOptions.follow = false;
+    }
+    if (cursor1?.cursorOptions) {
+      cursor1.cursorOptions.follow = false;
+    }
+
+    try {
+      return work();
+    } finally {
+      if (typeof previousFollowCursor === 'boolean') {
+        this.openSheetMusicDisplay.FollowCursor = previousFollowCursor;
+      }
+      if (cursor0?.cursorOptions) {
+        cursor0.cursorOptions.follow = previousCursor0Follow;
+      }
+      if (cursor1?.cursorOptions) {
+        cursor1.cursorOptions.follow = previousCursor1Follow;
+      }
+    }
+  }
+
+  private appendScheduledAudioDebugEvent(
+    kind: 'on' | 'off',
+    pitch: number,
+    audioTime?: number
+  ): void {
+    if (!this.showCursorWrapDebugOverlay) {
+      return;
+    }
+
+    const halfTone = pitch - 12;
+    const pitchLabel = this.noteKeyToLabel(halfTone.toFixed());
+    const audioLabel =
+      typeof audioTime === 'number' && Number.isFinite(audioTime)
+        ? audioTime.toFixed(3)
+        : 'na';
+    const scoreLabel = this.formatScoreTimestamp(this.getCurrentPracticeTimestamp());
+    this.appendCursorWrapDebugEvent(
+      `audio ${kind} ${pitchLabel} at ${audioLabel} ${scoreLabel}`
+    );
+  }
+
+  private getRetriggerReleaseAudioTime(audioTime?: number): number | undefined {
+    if (typeof audioTime !== 'number' || !Number.isFinite(audioTime)) {
+      return audioTime;
+    }
+
+    const retriggerGapSec = Math.min(
+      0.02,
+      Math.max(0.012, PlayPageComponent.AUDIO_SCHEDULE_AHEAD_SEC * 0.3)
+    );
+    return Math.max(toneNow(), audioTime - retriggerGapSec);
   }
 
   private formatScoreTimestamp(timestamp: number | null): string {
@@ -2680,6 +3175,7 @@ export class PlayPageComponent implements OnInit {
       this.lastPlayCursorTransitionDurationMs > 0
     );
   }
+
 
   private scheduleDeferredTieStepAdvance(): void {
     const delayMs = this.lastPlayCursorTransitionDurationMs;
@@ -3717,7 +4213,7 @@ export class PlayPageComponent implements OnInit {
   }
 
   private shouldAnimatePlayCursor(): boolean {
-    return this.listenMode || this.realtimeMode;
+    return this.isTimedTransportMode();
   }
 
   private getPlayCursorElement(): HTMLElement | null {
@@ -3907,6 +4403,42 @@ export class PlayPageComponent implements OnInit {
     return toneNow() + PlayPageComponent.AUDIO_SCHEDULE_AHEAD_SEC;
   }
 
+  private getCurrentScheduledPlaybackAudioTime(): number {
+    const minimumScheduledAudioTime = toneNow() + 0.001;
+    const scheduledAudioTimeSec = this.playbackClock.scheduledAudioTimeSec;
+
+    if (
+      typeof scheduledAudioTimeSec === 'number' &&
+      Number.isFinite(scheduledAudioTimeSec)
+    ) {
+      if (
+        scheduledAudioTimeSec < minimumScheduledAudioTime
+      ) {
+        const catchupSec =
+          minimumScheduledAudioTime - scheduledAudioTimeSec;
+        if (catchupSec >= 0.002) {
+          this.appendCursorWrapDebugEvent(
+            `audio catchup ${Math.round(catchupSec * 1000)}ms`
+          );
+        }
+        this.playbackClock.scheduledAudioTimeSec = minimumScheduledAudioTime;
+        return minimumScheduledAudioTime;
+      }
+
+      return scheduledAudioTimeSec;
+    }
+
+    this.playbackClock.scheduledAudioTimeSec = minimumScheduledAudioTime;
+    return minimumScheduledAudioTime;
+  }
+
+  private advanceScheduledPlaybackAudioTime(durationMs: number): void {
+    const currentAudioTime = this.getCurrentScheduledPlaybackAudioTime();
+    const durationSec =
+      Number.isFinite(durationMs) && durationMs > 0 ? durationMs / 1000 : 0;
+    this.playbackClock.scheduledAudioTimeSec = currentAudioTime + durationSec;
+  }
+
   async notifyMidiConnect() {
     const toast = await this.toastCtrl.create({
       message: `MIDI device connected: ${this.midiDevice}. Practice mode enabled.`,
@@ -3990,6 +4522,7 @@ export class PlayPageComponent implements OnInit {
     audioTime?: number,
     reflectInput: boolean = true
   ): void {
+    this.appendScheduledAudioDebugEvent('on', pitch, audioTime);
     this.mapNotesAutoPressed.set((pitch - 12).toFixed(), 1);
     if (reflectInput) {
       this.timeouts.push(
@@ -4019,6 +4552,7 @@ export class PlayPageComponent implements OnInit {
     audioTime?: number,
     reflectInput: boolean = true
   ): void {
+    this.appendScheduledAudioDebugEvent('off', pitch, audioTime);
     this.mapNotesAutoPressed.delete((pitch - 12).toFixed());
     if (reflectInput) {
       this.timeouts.push(
@@ -4155,29 +4689,6 @@ export class PlayPageComponent implements OnInit {
     );
   }
 
-  private syncRealtimeStepState(back = false): void {
-    this.notesService.calculateRequired(
-      this.openSheetMusicDisplay.cursors[0],
-      this.getPracticeStaffSelection(),
-      back
-    );
-    this.clearRealtimeCurrentStepMatches();
-    this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
-    this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
-    this.updatePlayCursorVisualAlignment();
-    this.computerNotesService.calculateRequired(
-      this.openSheetMusicDisplay.cursors[0],
-      this.getComputerStaffSelection(),
-      back
-    );
-    this.tempoInBPM = this.resolveRealtimeTempo();
-    const hasCurrentRequiredPressKeys = this.hasCurrentRequiredPressKeys();
-    this.currentStepSatisfied =
-      !hasCurrentRequiredPressKeys ||
-      this.notesService.isRequiredNotesPressed();
-    this.refreshRealtimeNextStepKeys();
-  }
-
   private refreshRealtimeNextStepKeys(): void {
     if (!this.realtimeMode) {
       this.clearRealtimeDebugPrediction();
@@ -4218,16 +4729,10 @@ export class PlayPageComponent implements OnInit {
       if (this.checkboxRepeat) {
         const startedLoopWrapAnimation = this.startPlayCursorLoopWrapAnimation(
           this.getCursorStepDelayMs(0),
-          () => {
-            this.loopPass++;
-            this.markCursorTraceLoopBoundary('loop wrap');
-            this.osmdCursorStart();
-          }
+          () => this.restartLoopPlayback()
         );
         if (!startedLoopWrapAnimation) {
-          this.loopPass++;
-          this.markCursorTraceLoopBoundary('loop wrap');
-          this.osmdCursorStart();
+          this.restartLoopPlayback();
         }
       } else {
         this.openSheetMusicDisplay.cursors[0].hide();
@@ -4260,26 +4765,8 @@ export class PlayPageComponent implements OnInit {
       return;
     }
 
-    this.notesService.calculateRequired(
-      this.openSheetMusicDisplay.cursors[0],
-      this.getPracticeStaffSelection()
-    );
-    this.clearRealtimeCurrentStepMatches();
-    this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
-    this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
+    this.rebuildCurrentPlaybackStepState();
     this.updatePlayCursorVisualAlignment();
-    this.computerNotesService.calculateRequired(
-      this.openSheetMusicDisplay.cursors[0],
-      this.getComputerStaffSelection()
-    );
-    this.tempoInBPM = this.resolveRealtimeTempo();
-    const hasCurrentRequiredPressKeys = this.hasCurrentRequiredPressKeys();
-    this.currentStepSatisfied =
-      !hasCurrentRequiredPressKeys ||
-      this.notesService.isRequiredNotesPressed();
-    if (this.pianoKeyboard) {
-      this.pianoKeyboard.updateNotesStatus();
-    }
     this.playComputerNotes(audioTime);
   }
 
@@ -4295,11 +4782,15 @@ export class PlayPageComponent implements OnInit {
         this.computerNotesService.press(key);
         this.keyPressNoteInternal(note, velocity, audioTime, false);
       },
-      (note) => {
+      (note, retrigger) => {
         const key = (note - 12).toFixed();
         this.computerPressedNotes.delete(key);
         this.computerNotesService.release(key);
-        this.keyReleaseNoteInternal(note, audioTime, false);
+        this.keyReleaseNoteInternal(
+          note,
+          retrigger ? this.getRetriggerReleaseAudioTime(audioTime) : audioTime,
+          false
+        );
       }
     );
   }
