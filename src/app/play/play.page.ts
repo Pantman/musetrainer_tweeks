@@ -203,7 +203,7 @@ export class PlayPageComponent implements OnInit {
   realtimeDebugEvents: string[] = [];
   cursorTraceEvents: string[] = [];
   cursorDebugMarkers: CursorDebugMarker[] = [];
-  showCursorDebugOverlay: boolean = true;
+  showCursorDebugOverlay: boolean = false;
   showDebugConsoleOverlay: boolean = false;
   showCursorWrapDebugOverlay: boolean = false;
   cursorWrapDebugEvents: string[] = [];
@@ -784,19 +784,16 @@ export class PlayPageComponent implements OnInit {
       ? this.getCursorStepDelayMs(index)
       : 0;
 
-    if (index === 0) {
+    if (index === 0 && shouldAnimate && previousTimestamp !== null) {
       this.lastPlayCursorTransitionDurationMs = transitionDuration;
-    }
-
-    if (index === 0) {
       const container = document.getElementById('scoreOverlayHost');
       const visualDebug = container
         ? this.getCurrentPlayCursorVisualDebug(container)
         : null;
       this.tracePlayCursor('move start', `dur ${Math.round(transitionDuration)}`);
       this.appendCursorWrapDebugEvent(
-        `step m${previousMeasureNumber ?? '?'} t${
-          previousTimestamp !== null ? previousTimestamp.toFixed(3) : '?'
+        `step m${previousMeasureNumber ?? '?'} ${
+          this.formatScoreTimestamp(previousTimestamp)
         } dur ${Math.round(transitionDuration)}`
       );
       if (visualDebug) {
@@ -873,19 +870,17 @@ export class PlayPageComponent implements OnInit {
               previousPosition ? Math.round(previousPosition.left) : '?'
             }->${
               nextPosition ? Math.round(nextPosition.left) : '?'
-            } t${
-              previousTimestamp !== null ? previousTimestamp.toFixed(3) : '?'
-            }->${
-              nextTimestamp !== null ? nextTimestamp.toFixed(3) : '?'
+            } ${this.formatScoreTimestamp(previousTimestamp)}->${
+              this.formatScoreTimestamp(nextTimestamp)
             }`
           );
         } else {
           this.tracePlayCursor('move wrap', 'system teleport');
           this.appendCursorWrapDebugEvent(
-            `wrap system m${previousMeasureNumber}->${nextMeasureNumber} t${
-              previousTimestamp !== null ? previousTimestamp.toFixed(3) : '?'
+            `wrap system m${previousMeasureNumber}->${nextMeasureNumber} ${
+              this.formatScoreTimestamp(previousTimestamp)
             }->${
-              nextTimestamp !== null ? nextTimestamp.toFixed(3) : '?'
+              this.formatScoreTimestamp(nextTimestamp)
             }`
           );
         }
@@ -1760,6 +1755,9 @@ export class PlayPageComponent implements OnInit {
         this.positionPlayCursorAtX(interpolatedX, animation.finalNoteBaseLeft);
 
         if (nowMs >= animation.boundaryTimeMs) {
+          this.appendCursorWrapDebugEvent(
+            `loop boundary late ${Math.round(nowMs - animation.boundaryTimeMs)}ms`
+          );
           this.pendingLoopRestartCursorTeleport = true;
           onBoundaryReached();
           this.pendingLoopRestartCursorTeleport = false;
@@ -1948,7 +1946,9 @@ export class PlayPageComponent implements OnInit {
     this.appendCursorWrapDebugEvent(
       `wrap accept prev m${previousMeasureNumber} next m${nextMeasureNumber} prevX ${Math.round(
         Number(previousTargetX)
-      )} nextX ${Math.round(Number(nextTargetX))} rawNext ${nextTimestamp.toFixed(3)}`
+      )} nextX ${Math.round(Number(nextTargetX))} next ${this.formatScoreTimestamp(
+        nextTimestamp
+      )}`
     );
 
     const firstPhaseDurationMs = this.getPlaybackDelayMs(
@@ -2543,7 +2543,7 @@ export class PlayPageComponent implements OnInit {
     }
 
     return [
-      `m${snapshot.measureNumber} t${snapshot.timestamp.toFixed(3)}`,
+      `m${snapshot.measureNumber} ${this.formatScoreTimestamp(snapshot.timestamp)}`,
       `actionable ${snapshot.actionable ? 'yes' : 'no'}`,
       `target ${snapshot.targetX !== null ? Math.round(snapshot.targetX) : 'na'}`,
       `a[${this.formatCursorDebugTargets(snapshot.actionableTargets)}] all[${this.formatCursorDebugTargets(snapshot.allTargets)}]`,
@@ -2559,7 +2559,32 @@ export class PlayPageComponent implements OnInit {
 
   private appendCursorWrapDebugEvent(message: string): void {
     this.cursorWrapDebugEvents.unshift(message);
-    this.cursorWrapDebugEvents = this.cursorWrapDebugEvents.slice(0, 16);
+    this.cursorWrapDebugEvents = this.cursorWrapDebugEvents.slice(0, 40);
+  }
+
+  private formatScoreTimestamp(timestamp: number | null): string {
+    if (!Number.isFinite(timestamp)) {
+      return 't?';
+    }
+
+    const measure = this.getMeasureAtTimestamp(Number(timestamp));
+    if (!measure) {
+      return `t${Number(timestamp).toFixed(3)}`;
+    }
+
+    const measureNumber = measure.MeasureNumber ?? measure.measureListIndex + 1 ?? null;
+    const measureStart = measure.AbsoluteTimestamp?.RealValue;
+    const beatLength = this.getBeatLengthInWholeNotes(measure);
+    if (
+      !Number.isFinite(measureStart) ||
+      !Number.isFinite(beatLength) ||
+      beatLength <= 0
+    ) {
+      return `t${Number(timestamp).toFixed(3)}`;
+    }
+
+    const beatOffset = (Number(timestamp) - measureStart) / beatLength;
+    return `t${Number(timestamp).toFixed(3)} b${beatOffset.toFixed(2)}${Number.isFinite(measureNumber) ? ` m${measureNumber}` : ''}`;
   }
 
   private refreshCursorWrapDebugSnapshot(): void {
