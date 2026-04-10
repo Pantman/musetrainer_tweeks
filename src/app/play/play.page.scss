@@ -103,6 +103,11 @@ ion-input{
   z-index: 4;
 }
 
+.realtime-debug-panel--right {
+  left: auto;
+  right: 0.75rem;
+}
+
 .realtime-debug-panel__events {
   border-top: 1px solid rgb(148 163 184 / 0.35);
   margin-top: 0.45rem;
@@ -138,6 +143,35 @@ ion-input{
   pointer-events: none;
   position: absolute;
   z-index: 2;
+}
+
+.score-cursor-debug-overlay {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 3;
+}
+
+.score-cursor-debug-overlay__marker {
+  position: absolute;
+  transform: translateX(-50%);
+}
+
+.score-cursor-debug-overlay__line {
+  background: rgb(37 99 235 / 0.85);
+  border-radius: 999px;
+  height: 100%;
+  margin: 0 auto;
+  width: 2px;
+}
+
+.score-cursor-debug-overlay__marker--tie .score-cursor-debug-overlay__line {
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      rgb(245 158 11 / 0.95) 0 6px,
+      rgb(245 158 11 / 0.2) 6px 11px
+    );
 }
 
 .score-range-overlay__shade {

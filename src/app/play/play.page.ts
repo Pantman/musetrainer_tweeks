@@ -57,6 +57,27 @@ interface PlayCursorLoopWrapAnimation {
   firstNoteX: number;
 }
 
+interface CursorDebugMarker {
+  id: string;
+  left: number;
+  top: number;
+  height: number;
+  timestamp: number;
+  durationToNext: number;
+  measureNumber: number;
+  actionable: boolean;
+}
+
+interface CursorWrapDebugSnapshot {
+  measureNumber: number;
+  timestamp: number;
+  actionable: boolean;
+  targetX: number | null;
+  baseLeft: number | null;
+  renderedLeft: number | null;
+  renderedTop: number | null;
+}
+
 interface RealtimeDebugStats {
   playedTotal: number;
   acceptedOnTime: number;
@@ -176,6 +197,13 @@ export class PlayPageComponent implements OnInit {
   private realtimeCurrentStepMatchedKeys = new Set<string>();
   realtimeDebugEvents: string[] = [];
   cursorTraceEvents: string[] = [];
+  cursorDebugMarkers: CursorDebugMarker[] = [];
+  showCursorDebugOverlay: boolean = true;
+  showDebugConsoleOverlay: boolean = false;
+  showCursorWrapDebugOverlay: boolean = false;
+  cursorWrapDebugEvents: string[] = [];
+  cursorWrapDebugSnapshot: CursorWrapDebugSnapshot | null = null;
+  private cursorDebugRefreshTimeout: number | null = null;
   // Midi handlers
   midiHandlers: PluginListenerHandle[] = [];
 
@@ -301,6 +329,7 @@ export class PlayPageComponent implements OnInit {
     this.openSheetMusicDisplay.Zoom = this.zoomValue;
     this.openSheetMusicDisplay.render();
     this.refreshMeasureOverlaysDeferred();
+    this.refreshCursorDebugMarkersDeferred();
   }
 
   updateTempoPreset(preset: TempoPreset): void {
@@ -365,6 +394,7 @@ export class PlayPageComponent implements OnInit {
 
   closeRangePicker(): void {
     this.showRangePicker = false;
+    this.refreshCursorDebugMarkersDeferred();
   }
 
   getRangeSummary(): string {
@@ -631,6 +661,11 @@ export class PlayPageComponent implements OnInit {
     this.osmdResetFeedback();
   }
 
+  toggleCursorDebugOverlay(): void {
+    this.showCursorDebugOverlay = !this.showCursorDebugOverlay;
+    this.refreshCursorDebugMarkersDeferred();
+  }
+
   // Reset selection on measures and set the cursor to the origin
   osmdReset(): void {
     this.osmdStop();
@@ -668,6 +703,7 @@ export class PlayPageComponent implements OnInit {
     this.loopStartMeasureLeftX = null;
     this.playCursorLoopWrapAnimation = null;
     this.pendingLoopRestartCursorTeleport = false;
+    this.refreshCursorDebugMarkersDeferred();
   }
 
   // Play
@@ -743,6 +779,11 @@ export class PlayPageComponent implements OnInit {
 
     if (index === 0) {
       this.tracePlayCursor('move start', `dur ${Math.round(transitionDuration)}`);
+      this.appendCursorWrapDebugEvent(
+        `step m${previousMeasureNumber ?? '?'} t${
+          previousTimestamp !== null ? previousTimestamp.toFixed(3) : '?'
+        } dur ${Math.round(transitionDuration)}`
+      );
     }
 
     if (shouldAnimate && transitionDuration > 0) {
@@ -774,7 +815,12 @@ export class PlayPageComponent implements OnInit {
         !nextPosition ||
         Math.abs(nextPosition.top - previousPosition.top) > 4
       ) {
+        const shouldTreatAsSystemWrap =
+          previousMeasureNumber !== null &&
+          nextMeasureNumber !== null &&
+          this.isPlayCursorSystemWrap(previousMeasureNumber, nextMeasureNumber);
         const startedSystemWrapAnimation =
+          shouldTreatAsSystemWrap &&
           index === 0 &&
           previousMeasureNumber !== null &&
           previousTimestamp !== null &&
@@ -796,14 +842,33 @@ export class PlayPageComponent implements OnInit {
           this.suppressPlayCursorAlignmentForStep = true;
           this.resetPlayCursorTransition();
           this.tracePlayCursor('move wrap', 'snap');
+          this.appendCursorWrapDebugEvent(
+            `wrap fallback m${previousMeasureNumber}->${nextMeasureNumber} x${
+              previousPosition ? Math.round(previousPosition.left) : '?'
+            }->${
+              nextPosition ? Math.round(nextPosition.left) : '?'
+            } t${
+              previousTimestamp !== null ? previousTimestamp.toFixed(3) : '?'
+            }->${
+              nextTimestamp !== null ? nextTimestamp.toFixed(3) : '?'
+            }`
+          );
         } else {
           this.tracePlayCursor('move wrap', 'system teleport');
+          this.appendCursorWrapDebugEvent(
+            `wrap system m${previousMeasureNumber}->${nextMeasureNumber} t${
+              previousTimestamp !== null ? previousTimestamp.toFixed(3) : '?'
+            }->${
+              nextTimestamp !== null ? nextTimestamp.toFixed(3) : '?'
+            }`
+          );
         }
       }
     }
 
     if (index === 0) {
       this.tracePlayCursor('move end');
+      this.refreshCursorWrapDebugSnapshot();
     }
 
     return true;
@@ -999,6 +1064,7 @@ export class PlayPageComponent implements OnInit {
     window.removeEventListener('pointerup', this.onRangeHandlePointerUp);
     window.removeEventListener('pointermove', this.onRangeSelectionPointerMove);
     window.removeEventListener('pointerup', this.onRangeSelectionPointerUp);
+    this.refreshCursorDebugMarkersDeferred();
   }
 
   // Resets the cursor to the first note
@@ -1076,6 +1142,7 @@ export class PlayPageComponent implements OnInit {
 
     // Update keyboard
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
+    this.refreshCursorWrapDebugSnapshot();
     this.osmdCursorStart2();
   }
 
@@ -1530,8 +1597,17 @@ export class PlayPageComponent implements OnInit {
     this.playCursorLoopWrapAnimation = null;
   }
 
-  private getActivePracticeTargetCenters(container: HTMLElement): number[] {
-    return this.activePracticeGraphicalNotes
+  private getActivePracticeTargetCenters(
+    container: HTMLElement,
+    actionableOnly = false
+  ): number[] {
+    const graphicalNotes = actionableOnly
+      ? this.activePracticeGraphicalNotes.filter((note) =>
+          this.isActionableGraphicalPracticeNote(note.graphicalNote)
+        )
+      : this.activePracticeGraphicalNotes;
+
+    return graphicalNotes
       .map((note) =>
         this.getAnchorDomRect(note.anchorElement, note.groupElement, container)
       )
@@ -1549,6 +1625,14 @@ export class PlayPageComponent implements OnInit {
     const container = document.getElementById('scoreOverlayHost');
     if (!container) {
       return null;
+    }
+
+    const actionableTargetCenters = this.getActivePracticeTargetCenters(
+      container,
+      true
+    );
+    if (actionableTargetCenters.length > 0) {
+      return actionableTargetCenters[0];
     }
 
     const targetCenters = this.getActivePracticeTargetCenters(container);
@@ -1578,7 +1662,7 @@ export class PlayPageComponent implements OnInit {
     );
     const container = document.getElementById('scoreOverlayHost');
     const finalNoteTargets = container
-      ? this.getActivePracticeTargetCenters(container)
+      ? this.getActivePracticeTargetCenters(container, true)
       : [];
     const finalNoteX = finalNoteTargets[0] ?? cursorPosition?.left ?? null;
     const startBarlineX =
@@ -1792,33 +1876,23 @@ export class PlayPageComponent implements OnInit {
     const nextMeasureStartTimestamp =
       this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasure
         ?.AbsoluteTimestamp?.RealValue ?? null;
-    const nextTargetX = this.getCurrentPracticeGraphicalNotes()
-      .map((note) => note)
-      .length
-      ? (() => {
-          const container = document.getElementById('scoreOverlayHost');
-          if (!container) {
-            return null;
-          }
-          const nextTargets = this.getCurrentPracticeGraphicalNotes()
-            .map((note) =>
-              this.getAnchorDomRect(note.anchorElement, note.groupElement, container)
-            )
-            .filter(
-              (
-                rect
-              ): rect is {
-                left: number;
-                top: number;
-                width: number;
-                height: number;
-              } => !!rect
-            )
-            .map((rect) => rect.left + rect.width / 2)
-            .sort((a, b) => a - b);
-          return nextTargets[0] ?? null;
-        })()
-      : null;
+    const container = document.getElementById('scoreOverlayHost');
+    const currentPracticeNotes = this.getCurrentPracticeGraphicalNotes();
+    const nextActionableTargets = container
+      ? this.getGraphicalPracticeTargetCenters(
+          currentPracticeNotes,
+          container,
+          true
+        )
+      : [];
+    const nextTargets = container
+      ? this.getGraphicalPracticeTargetCenters(
+          currentPracticeNotes,
+          container,
+          false
+        )
+      : [];
+    const nextTargetX = nextActionableTargets[0] ?? nextTargets[0] ?? null;
 
     if (
       !previousMeasureOverlay ||
@@ -1827,8 +1901,19 @@ export class PlayPageComponent implements OnInit {
       !Number.isFinite(nextMeasureStartTimestamp) ||
       !Number.isFinite(nextTargetX)
     ) {
+      this.appendCursorWrapDebugEvent(
+        `wrap reject prev m${previousMeasureNumber} next m${nextMeasureNumber} prevX ${
+          Number.isFinite(previousTargetX) ? Math.round(Number(previousTargetX)) : 'na'
+        } nextX ${Number.isFinite(nextTargetX) ? Math.round(Number(nextTargetX)) : 'na'}`
+      );
       return false;
     }
+
+    this.appendCursorWrapDebugEvent(
+      `wrap accept prev m${previousMeasureNumber} next m${nextMeasureNumber} prevX ${Math.round(
+        Number(previousTargetX)
+      )} nextX ${Math.round(Number(nextTargetX))} rawNext ${nextTimestamp.toFixed(3)}`
+    );
 
     const firstPhaseDurationMs = this.getPlaybackDelayMs(
       previousMeasureEndTimestamp - previousTimestamp
@@ -1893,6 +1978,7 @@ export class PlayPageComponent implements OnInit {
       if (progress >= 1) {
         this.cancelScheduledPlayCursorAlignment();
         this.updatePlayCursorVisualAlignment();
+        this.refreshCursorWrapDebugSnapshot();
         return;
       }
 
@@ -1901,6 +1987,54 @@ export class PlayPageComponent implements OnInit {
 
     this.playCursorAlignmentFrame = window.requestAnimationFrame(tick);
     return true;
+  }
+
+  private isPlayCursorSystemWrap(
+    previousMeasureNumber: number,
+    nextMeasureNumber: number
+  ): boolean {
+    if (previousMeasureNumber === nextMeasureNumber) {
+      return false;
+    }
+
+    const previousSystemId = this.getRenderedSystemIdForMeasure(previousMeasureNumber);
+    const nextSystemId = this.getRenderedSystemIdForMeasure(nextMeasureNumber);
+
+    if (previousSystemId === null || nextSystemId === null) {
+      return false;
+    }
+
+    return previousSystemId !== nextSystemId;
+  }
+
+  private getRenderedSystemIdForMeasure(measureNumber: number): number | null {
+    if (this.measureOverlays.length === 0) {
+      return null;
+    }
+
+    const tolerance = 12;
+    let currentSystemId = -1;
+    let previousBandTop = Number.NEGATIVE_INFINITY;
+    let previousBandBottom = Number.NEGATIVE_INFINITY;
+
+    for (const overlay of this.measureOverlays) {
+      const startsNewSystem =
+        currentSystemId < 0 ||
+        Math.abs(overlay.top - previousBandTop) > tolerance ||
+        Math.abs(overlay.bottom - previousBandBottom) > tolerance;
+
+      if (startsNewSystem) {
+        currentSystemId++;
+        previousBandTop = overlay.top;
+        previousBandBottom = overlay.bottom;
+      }
+
+      if (overlay.measureNumber === measureNumber) {
+        return currentSystemId;
+      }
+    }
+
+    return null;
   }
 
   private markIncorrectInputNote(halfTone: number): void {
@@ -2359,16 +2493,64 @@ export class PlayPageComponent implements OnInit {
   }
 
   showRealtimeDebugPanel(): boolean {
-    return (
-      this.realtimeMode ||
-      this.listenMode ||
-      this.running ||
-      (PlayPageComponent.ENABLE_CURSOR_TRACE && this.cursorTraceEvents.length > 0) ||
-      this.debugRealtimeStats.acceptedOnTime > 0 ||
-      this.debugRealtimeStats.acceptedLate > 0 ||
-      this.debugRealtimeStats.rejected > 0 ||
-      this.debugRealtimeStats.lastResult !== 'none'
+    return this.showDebugConsoleOverlay;
+  }
+
+  showCursorWrapDebugPanel(): boolean {
+    return this.showCursorWrapDebugOverlay;
+  }
+
+  getCursorWrapDebugSummaryLines(): string[] {
+    const snapshot = this.cursorWrapDebugSnapshot;
+    if (!snapshot) {
+      return ['cursor snapshot unavailable'];
+    }
+
+    return [
+      `m${snapshot.measureNumber} t${snapshot.timestamp.toFixed(3)}`,
+      `actionable ${snapshot.actionable ? 'yes' : 'no'}`,
+      `target ${snapshot.targetX !== null ? Math.round(snapshot.targetX) : 'na'}`,
+      `base ${snapshot.baseLeft !== null ? Math.round(snapshot.baseLeft) : 'na'}`,
+      `render ${
+        snapshot.renderedLeft !== null && snapshot.renderedTop !== null
+          ? `${Math.round(snapshot.renderedLeft)},${Math.round(snapshot.renderedTop)}`
+          : 'na'
+      }`,
+    ];
+  }
+
+  private appendCursorWrapDebugEvent(message: string): void {
+    this.cursorWrapDebugEvents.unshift(message);
+    this.cursorWrapDebugEvents = this.cursorWrapDebugEvents.slice(0, 16);
+  }
+
+  private refreshCursorWrapDebugSnapshot(): void {
+    const measureNumber =
+      (this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasureIndex ?? -1) + 1;
+    const timestamp =
+      this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentSourceTimestamp
+        ?.RealValue ?? NaN;
+    const targetX = this.getCurrentPlayCursorTargetX();
+    const base = this.getPlayCursorPosition();
+    const rendered = this.getTraceRenderedPlayCursorPosition();
+    const actionable = this.activePracticeGraphicalNotes.some((note) =>
+      this.isActionableGraphicalPracticeNote(note.graphicalNote)
     );
+
+    if (!Number.isFinite(measureNumber) || !Number.isFinite(timestamp)) {
+      this.cursorWrapDebugSnapshot = null;
+      return;
+    }
+
+    this.cursorWrapDebugSnapshot = {
+      measureNumber,
+      timestamp,
+      actionable,
+      targetX,
+      baseLeft: base?.left ?? null,
+      renderedLeft: rendered?.left ?? null,
+      renderedTop: rendered?.top ?? null,
+    };
   }
 
   // Hide all feedback elements
@@ -2749,6 +2931,17 @@ export class PlayPageComponent implements OnInit {
     window.setTimeout(() => this.refreshMeasureOverlays(), 0);
   }
 
+  refreshCursorDebugMarkersDeferred(): void {
+    if (this.cursorDebugRefreshTimeout !== null) {
+      window.clearTimeout(this.cursorDebugRefreshTimeout);
+    }
+
+    this.cursorDebugRefreshTimeout = window.setTimeout(() => {
+      this.cursorDebugRefreshTimeout = null;
+      this.refreshCursorDebugMarkers();
+    }, 0);
+  }
+
   private refreshMeasureOverlays(): void {
     if (!this.fileLoaded) {
       this.measureOverlays = [];
@@ -2815,6 +3008,294 @@ export class PlayPageComponent implements OnInit {
     });
 
     this.measureOverlays = overlays;
+    this.refreshCursorDebugMarkersDeferred();
+  }
+
+  private refreshCursorDebugMarkers(): void {
+    if (!this.fileLoaded || !this.showCursorDebugOverlay) {
+      this.cursorDebugMarkers = [];
+      return;
+    }
+
+    // Freeze the debug snapshot while transport is running so we never disturb
+    // the live OSMD cursor or trigger follow-cursor scrolling during playback.
+    if (this.running) {
+      return;
+    }
+
+    const cursor: any = this.openSheetMusicDisplay?.cursors?.[0];
+    const container = document.getElementById('scoreOverlayHost');
+    if (!cursor || !container) {
+      this.cursorDebugMarkers = [];
+      return;
+    }
+
+    const markers: CursorDebugMarker[] = [];
+    const previousFollowCursor = this.openSheetMusicDisplay.FollowCursor;
+    const previousCursorFollow = cursor.cursorOptions?.follow;
+    const wasHidden = !!cursor.hidden;
+
+    this.openSheetMusicDisplay.FollowCursor = false;
+    if (cursor.cursorOptions) {
+      cursor.cursorOptions.follow = false;
+    }
+
+    try {
+      cursor.show?.();
+      cursor.reset?.();
+      cursor.update?.();
+
+      while (true) {
+        const measureNumber = cursor.iterator?.CurrentMeasureIndex + 1;
+        if (!Number.isFinite(measureNumber) || measureNumber > this.inputMeasure.upper) {
+          break;
+        }
+
+        if (measureNumber >= this.inputMeasure.lower) {
+          const marker = this.buildCursorDebugMarker(cursor, container, markers.length);
+          if (marker) {
+            markers.push(marker);
+          }
+        }
+
+        const it2 = cursor.iterator?.clone?.();
+        if (!it2) {
+          break;
+        }
+        it2.moveToNext();
+        if (it2.EndReached || this.inputMeasure.upper < it2.CurrentMeasureIndex + 1) {
+          break;
+        }
+
+        cursor.next?.();
+        cursor.update?.();
+      }
+
+      cursor.reset?.();
+      cursor.update?.();
+    } finally {
+      this.openSheetMusicDisplay.FollowCursor = previousFollowCursor;
+      if (cursor.cursorOptions) {
+        cursor.cursorOptions.follow = previousCursorFollow;
+      }
+      if (wasHidden) {
+        cursor.hide?.();
+      }
+    }
+    this.cursorDebugMarkers = markers;
+  }
+
+  private buildCursorDebugMarker(
+    cursor: any,
+    container: HTMLElement,
+    index: number
+  ): CursorDebugMarker | null {
+    const timestamp = cursor.iterator?.CurrentSourceTimestamp?.RealValue;
+    const measureNumber = cursor.iterator?.CurrentMeasureIndex + 1;
+    const currentMeasure = cursor.iterator?.CurrentMeasure;
+
+    if (
+      !Number.isFinite(timestamp) ||
+      !Number.isFinite(measureNumber) ||
+      !currentMeasure
+    ) {
+      return null;
+    }
+
+    const targetCenters = this.getCursorTargetCenters(cursor, container);
+    const measureOverlay = this.measureOverlays.find(
+      (measure) => measure.measureNumber === measureNumber
+    );
+
+    if (!measureOverlay) {
+      return null;
+    }
+
+    const left =
+      targetCenters[0] ?? this.getMeasureTimestampX(currentMeasure, timestamp, measureOverlay);
+    if (!Number.isFinite(left)) {
+      return null;
+    }
+
+    const actionable = this.cursorStepHasActionablePracticeNote(
+      cursor,
+      this.getPracticeStaffSelection()
+    );
+    const nextTimestamp = this.getNextRawCursorTimestamp(cursor);
+    const durationToNext =
+      nextTimestamp !== null ? Math.max(nextTimestamp - timestamp, 0) : 0;
+
+    return {
+      id: `cursor-debug-${measureNumber}-${timestamp}-${index}`,
+      left,
+      top: measureOverlay.top,
+      height: Math.max(measureOverlay.bottom - measureOverlay.top, 12),
+      timestamp,
+      durationToNext,
+      measureNumber,
+      actionable,
+    };
+  }
+
+  private getCursorTargetCenters(cursor: any, container: HTMLElement): number[] {
+    return this.getCursorTargetCentersByActionability(cursor, container, false);
+  }
+
+  private getCursorActionableTargetCenters(
+    cursor: any,
+    container: HTMLElement
+  ): number[] {
+    return this.getCursorTargetCentersByActionability(cursor, container, true);
+  }
+
+  private getCursorTargetCentersByActionability(
+    cursor: any,
+    container: HTMLElement,
+    actionableOnly: boolean
+  ): number[] {
+    const practiceSelection = this.getPracticeStaffSelection();
+    const graphicalNotes = (cursor?.GNotesUnderCursor?.() ?? []).filter((note: any) => {
+      const staffId = note?.sourceNote?.ParentStaff?.idInMusicSheet;
+      const staffSelected = staffId === undefined || practiceSelection[staffId];
+      return (
+        staffSelected &&
+        (!actionableOnly || this.isActionableGraphicalPracticeNote(note))
+      );
+    });
+
+    return graphicalNotes
+      .map((graphicalNote: any) => {
+        const groupElement = graphicalNote?.getSVGGElement?.() as SVGElement | null;
+        const anchorElement = this.getGraphicalNoteAnchorElement(graphicalNote);
+        if (!groupElement || !anchorElement) {
+          return null;
+        }
+
+        const rect = this.getAnchorDomRect(anchorElement, groupElement, container);
+        return rect ? rect.left + rect.width / 2 : null;
+      })
+      .filter((center: number | null): center is number => Number.isFinite(center))
+      .sort((a: number, b: number) => a - b);
+  }
+
+  private getGraphicalPracticeTargetCenters(
+    notes: PracticeGraphicalNote[],
+    container: HTMLElement,
+    actionableOnly: boolean
+  ): number[] {
+    const filteredNotes = actionableOnly
+      ? notes.filter((note) => this.isActionableGraphicalPracticeNote(note.graphicalNote))
+      : notes;
+
+    return filteredNotes
+      .map((note) =>
+        this.getAnchorDomRect(note.anchorElement, note.groupElement, container)
+      )
+      .filter(
+        (
+          rect
+        ): rect is { left: number; top: number; width: number; height: number } =>
+          !!rect
+      )
+      .map((rect) => rect.left + rect.width / 2)
+      .sort((a, b) => a - b);
+  }
+
+  private isActionableGraphicalPracticeNote(graphicalNote: any): boolean {
+    const sourceNote = graphicalNote?.sourceNote;
+    if (!sourceNote || sourceNote.isRest?.() === true) {
+      return false;
+    }
+
+    return (
+      typeof sourceNote.NoteTie === 'undefined' ||
+      sourceNote === sourceNote.NoteTie?.StartNote
+    );
+  }
+
+  private getMeasureTimestampX(
+    measure: any,
+    timestamp: number,
+    overlay: MeasureOverlay
+  ): number | null {
+    const measureStart = measure?.AbsoluteTimestamp?.RealValue;
+    const measureDuration = measure?.Duration?.RealValue;
+
+    if (
+      !Number.isFinite(measureStart) ||
+      !Number.isFinite(measureDuration) ||
+      measureDuration <= 0
+    ) {
+      return null;
+    }
+
+    const progress = Math.min(
+      Math.max((timestamp - measureStart) / measureDuration, 0),
+      1
+    );
+    return overlay.left + (overlay.right - overlay.left) * progress;
+  }
+
+  private getNextRawCursorTimestamp(cursor: any): number | null {
+    const it2 = cursor?.iterator?.clone?.();
+    if (!it2) {
+      return null;
+    }
+
+    it2.moveToNext();
+    if (it2.EndReached || this.inputMeasure.upper < it2.CurrentMeasureIndex + 1) {
+      const measureStart =
+        cursor.iterator?.CurrentMeasure?.AbsoluteTimestamp?.RealValue;
+      const measureDuration =
+        cursor.iterator?.CurrentMeasure?.Duration?.RealValue;
+      if (!Number.isFinite(measureStart) || !Number.isFinite(measureDuration)) {
+        return null;
+      }
+
+      return measureStart + measureDuration;
+    }
+
+    return it2.CurrentSourceTimestamp?.RealValue ?? null;
+  }
+
+  private cursorStepHasActionablePracticeNote(
+    cursorLike: any,
+    staffIdEnabled: Record<number, boolean>
+  ): boolean {
+    const voices = cursorLike?.VoicesUnderCursor?.() ?? [];
+
+    for (const voice of voices) {
+      for (const note of voice?.Notes ?? []) {
+        const staffId = note?.ParentStaff?.idInMusicSheet;
+        if (
+          staffId !== undefined &&
+          !staffIdEnabled[staffId]
+        ) {
+          continue;
+        }
+
+        if (note?.isRest?.() === true) {
+          continue;
+        }
+
+        if (
+          typeof note.NoteTie === 'undefined' ||
+          note === note.NoteTie?.StartNote
+        ) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  getCursorDebugMarkerStyle(marker: CursorDebugMarker): Record<string, string> {
+    return {
+      left: `${marker.left}px`,
+      top: `${marker.top}px`,
+      height: `${marker.height}px`,
+    };
   }
 
   private getGraphicalMeasuresForSourceMeasure(

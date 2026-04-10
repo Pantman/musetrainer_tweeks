@@ -128,6 +128,18 @@
       </div>
     </div>
 
+    <div
+      class="realtime-debug-panel realtime-debug-panel--right"
+      *ngIf="showCursorWrapDebugPanel()"
+    >
+      <div>cursor wrap</div>
+      <div *ngFor="let line of getCursorWrapDebugSummaryLines()">{{ line }}</div>
+      <div class="realtime-debug-panel__events" *ngIf="cursorWrapDebugEvents.length">
+        <div>events</div>
+        <div *ngFor="let event of cursorWrapDebugEvents">{{ event }}</div>
+      </div>
+    </div>
+
     <div class="score-range-overlay" *ngIf="fileLoaded">
       <div
         *ngFor="let measure of getRangeShadedMeasures()"
@@ -162,6 +174,17 @@
         </div>
       </div>
     </div>
+
+    <div class="score-cursor-debug-overlay" *ngIf="fileLoaded && showCursorDebugOverlay">
+      <div
+        *ngFor="let marker of cursorDebugMarkers"
+        class="score-cursor-debug-overlay__marker"
+        [class.score-cursor-debug-overlay__marker--tie]="!marker.actionable"
+        [ngStyle]="getCursorDebugMarkerStyle(marker)"
+      >
+        <div class="score-cursor-debug-overlay__line"></div>
+      </div>
+    </div>
   </div>
 </ion-content>
 
@@ -188,6 +211,18 @@
     <ion-item>
       <ion-label color="dark">Show feedback</ion-label>
       <ion-toggle [(ngModel)]="checkboxFeedback" color="dark" slot="end" [enableOnOffLabels]="true"></ion-toggle>
+    </ion-item>
+    <ion-item>
+      <ion-label color="dark">Cursor debug</ion-label>
+      <ion-toggle [(ngModel)]="showCursorDebugOverlay" (ngModelChange)="refreshCursorDebugMarkersDeferred()" color="dark" slot="end" [enableOnOffLabels]="true"></ion-toggle>
+    </ion-item>
+    <ion-item>
+      <ion-label color="dark">Debug console</ion-label>
+      <ion-toggle [(ngModel)]="showDebugConsoleOverlay" color="dark" slot="end" [enableOnOffLabels]="true"></ion-toggle>
+    </ion-item>
+    <ion-item>
+      <ion-label color="dark">Wrap diagnostics</ion-label>
+      <ion-toggle [(ngModel)]="showCursorWrapDebugOverlay" color="dark" slot="end" [enableOnOffLabels]="true"></ion-toggle>
     </ion-item>
     <ion-item>
       <ion-label color="dark">Show keyboard</ion-label>
