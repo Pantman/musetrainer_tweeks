@@ -44,6 +44,19 @@ interface PracticeGraphicalNote {
   halfTone: number;
 }
 
+interface PlayCursorLoopWrapAnimation {
+  boundaryTimeMs: number;
+  boundaryDurationMs: number;
+  finalNoteBaseLeft: number;
+  finalNoteX: number;
+  endBarlineX: number;
+  restarted: boolean;
+  restartBaseLeft: number | null;
+  restartDurationMs: number;
+  startBarlineX: number;
+  firstNoteX: number;
+}
+
 interface RealtimeDebugStats {
   playedTotal: number;
   acceptedOnTime: number;
@@ -69,7 +82,6 @@ export class PlayPageComponent implements OnInit {
   private static readonly MAX_SPEED_PERCENT = 180;
   private static readonly TEMPO_STEP_BPM = 5;
   private static readonly AUDIO_SCHEDULE_AHEAD_SEC = 0.05;
-  private static readonly LOOP_WRAP_COMPENSATION_MS = 12;
   private static readonly REALTIME_ACCEPT_TOLERANCE_WHOLE_NOTES = 1 / 4;
   private static readonly FEEDBACK_CORRECT_COLOR = '#16a34a';
   private static readonly FEEDBACK_ERROR_COLOR = '#dc2626';
@@ -139,6 +151,8 @@ export class PlayPageComponent implements OnInit {
   playCursorAlignmentFrame: number | null = null;
   loopStartCursorTargetX: number | null = null;
   loopStartMeasureLeftX: number | null = null;
+  playCursorLoopWrapAnimation: PlayCursorLoopWrapAnimation | null = null;
+  pendingLoopRestartCursorTeleport: boolean = false;
   suppressPlayCursorAlignmentForStep: boolean = false;
   private activeRangeHandle: RangeHandle | null = null;
   private activeRangeSelectionStart: number | null = null;
@@ -652,6 +666,8 @@ export class PlayPageComponent implements OnInit {
     this.releaseComputerPressedNotes();
     this.loopStartCursorTargetX = null;
     this.loopStartMeasureLeftX = null;
+    this.playCursorLoopWrapAnimation = null;
+    this.pendingLoopRestartCursorTeleport = false;
   }
 
   // Play
@@ -846,28 +862,32 @@ export class PlayPageComponent implements OnInit {
           iter.CurrentMeasure.Duration.RealValue -
           iter.CurrentSourceTimestamp.RealValue
       );
-      const compensatedTimeout = this.checkboxRepeat
-        ? Math.max(
-            timeout - PlayPageComponent.LOOP_WRAP_COMPENSATION_MS,
-            1
-          )
-        : timeout;
       if (this.checkboxRepeat) {
-        this.animatePlayCursorToLoopBoundary(compensatedTimeout);
-      } else {
-        this.openSheetMusicDisplay.cursors[0].hide();
-      }
-      this.timeouts.push(
-        setTimeout(() => {
-          if (this.checkboxRepeat) {
+        const startedLoopWrapAnimation = this.startPlayCursorLoopWrapAnimation(
+          timeout,
+          () => {
             this.loopPass++;
             this.markCursorTraceLoopBoundary('loop wrap');
             this.osmdCursorStart();
-          } else {
-            this.osmdCursorStop();
           }
-        }, compensatedTimeout)
-      );
+        );
+        if (!startedLoopWrapAnimation) {
+          this.timeouts.push(
+            setTimeout(() => {
+              this.loopPass++;
+              this.markCursorTraceLoopBoundary('loop wrap');
+              this.osmdCursorStart();
+            }, timeout)
+          );
+        }
+      } else {
+        this.openSheetMusicDisplay.cursors[0].hide();
+        this.timeouts.push(
+          setTimeout(() => {
+            this.osmdCursorStop();
+          }, timeout)
+        );
+      }
       return;
     }
 
@@ -970,6 +990,9 @@ export class PlayPageComponent implements OnInit {
 
     this.openSheetMusicDisplay.cursors.forEach((cursor) => cursor.update());
     this.snapPlayCursorForJump();
+    if (this.pendingLoopRestartCursorTeleport) {
+      this.positionPlayCursorAtLoopStartBoundary();
+    }
     this.suppressPlayCursorAlignmentForStep = this.loopPass > 0;
     this.tracePlayCursor(
       'start positioned',
@@ -987,8 +1010,12 @@ export class PlayPageComponent implements OnInit {
     this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
     this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
     this.cacheLoopStartCursorTargets();
-    this.updatePlayCursorVisualAlignment();
-    this.tracePlayCursor('start aligned');
+    if (this.pendingLoopRestartCursorTeleport) {
+      this.tracePlayCursor('start aligned', 'loop boundary');
+    } else {
+      this.updatePlayCursorVisualAlignment();
+      this.tracePlayCursor('start aligned');
+    }
 
     this.tempoInBPM = this.notesService.tempoInBPM;
 
@@ -1393,25 +1420,13 @@ export class PlayPageComponent implements OnInit {
       return;
     }
 
-    const anchorRects = this.activePracticeGraphicalNotes
-      .map((note) =>
-        this.getAnchorDomRect(note.anchorElement, note.groupElement, container)
-      )
-      .filter(
-        (
-          rect
-        ): rect is { left: number; top: number; width: number; height: number } =>
-          !!rect
-      );
+    const targetCenters = this.getActivePracticeTargetCenters(container);
 
-    if (anchorRects.length === 0) {
+    if (targetCenters.length === 0) {
       cursorElement.style.transform = '';
       return;
     }
 
-    const targetCenters = anchorRects
-      .map((rect) => rect.left + rect.width / 2)
-      .sort((a, b) => a - b);
     const targetCenterX = targetCenters[0];
     const minTargetCenter = targetCenters[0];
     const maxTargetCenter = targetCenters[targetCenters.length - 1];
@@ -1425,28 +1440,20 @@ export class PlayPageComponent implements OnInit {
   }
 
   private cacheLoopStartCursorTargets(): void {
-    const container = document.getElementById('scoreOverlayHost');
     const currentMeasureNumber =
       this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasureIndex + 1;
 
-    if (!container || currentMeasureNumber !== this.inputMeasure.lower) {
+    if (currentMeasureNumber !== this.inputMeasure.lower) {
       return;
     }
 
-    const anchorRects = this.activePracticeGraphicalNotes
-      .map((note) =>
-        this.getAnchorDomRect(note.anchorElement, note.groupElement, container)
-      )
-      .filter(
-        (
-          rect
-        ): rect is { left: number; top: number; width: number; height: number } =>
-          !!rect
-      )
-      .sort((left, right) => left.left - right.left);
+    const container = document.getElementById('scoreOverlayHost');
+    const targetCenters = container
+      ? this.getActivePracticeTargetCenters(container)
+      : [];
 
-    if (anchorRects.length > 0) {
-      this.loopStartCursorTargetX = anchorRects[0].left + anchorRects[0].width / 2;
+    if (targetCenters.length > 0) {
+      this.loopStartCursorTargetX = targetCenters[0];
     }
 
     const measureOverlay = this.measureOverlays.find(
@@ -1464,36 +1471,203 @@ export class PlayPageComponent implements OnInit {
 
     window.cancelAnimationFrame(this.playCursorAlignmentFrame);
     this.playCursorAlignmentFrame = null;
+    this.playCursorLoopWrapAnimation = null;
   }
 
-  private animatePlayCursorToLoopBoundary(durationMs: number): void {
+  private getActivePracticeTargetCenters(container: HTMLElement): number[] {
+    return this.activePracticeGraphicalNotes
+      .map((note) =>
+        this.getAnchorDomRect(note.anchorElement, note.groupElement, container)
+      )
+      .filter(
+        (
+          rect
+        ): rect is { left: number; top: number; width: number; height: number } =>
+          !!rect
+      )
+      .map((rect) => rect.left + rect.width / 2)
+      .sort((a, b) => a - b);
+  }
+
+  private startPlayCursorLoopWrapAnimation(
+    boundaryDurationMs: number,
+    onBoundaryReached: () => void
+  ): boolean {
     if (
       !this.shouldAnimatePlayCursor() ||
-      durationMs <= 0 ||
+      boundaryDurationMs < 0 ||
       this.suppressPlayCursorAnimation
     ) {
-      return;
+      return false;
     }
 
-    const cursorElement = this.getPlayCursorElement();
     const cursorPosition = this.getPlayCursorPosition();
-    const measureNumber =
+    const currentMeasureNumber =
       this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasureIndex + 1;
-    const measureOverlay = this.measureOverlays.find(
-      (measure) => measure.measureNumber === measureNumber
+    const currentMeasureOverlay = this.measureOverlays.find(
+      (measure) => measure.measureNumber === currentMeasureNumber
     );
+    const loopStartOverlay = this.measureOverlays.find(
+      (measure) => measure.measureNumber === this.inputMeasure.lower
+    );
+    const container = document.getElementById('scoreOverlayHost');
+    const finalNoteTargets = container
+      ? this.getActivePracticeTargetCenters(container)
+      : [];
+    const finalNoteX = finalNoteTargets[0] ?? cursorPosition?.left ?? null;
+    const startBarlineX =
+      this.loopStartMeasureLeftX ?? loopStartOverlay?.left ?? null;
+    const firstNoteX =
+      this.loopStartCursorTargetX ?? startBarlineX ?? null;
 
-    if (!cursorElement || !cursorPosition || !measureOverlay) {
-      return;
+    if (
+      !cursorPosition ||
+      !currentMeasureOverlay ||
+      !Number.isFinite(finalNoteX) ||
+      !Number.isFinite(startBarlineX) ||
+      !Number.isFinite(firstNoteX)
+    ) {
+      return false;
     }
 
-    const wrapTargetX = measureOverlay.right;
-    this.applyPlayCursorTransition(durationMs);
-    cursorElement.style.transform = `translateX(${wrapTargetX - cursorPosition.left}px)`;
+    this.cancelScheduledPlayCursorAlignment();
+    this.resetPlayCursorTransition();
+
+    const resolvedFinalNoteX = Number(finalNoteX);
+    const resolvedStartBarlineX = Number(startBarlineX);
+    const resolvedFirstNoteX = Number(firstNoteX);
+    const boundaryTimeMs = performance.now() + boundaryDurationMs;
+    this.playCursorLoopWrapAnimation = {
+      boundaryTimeMs,
+      boundaryDurationMs,
+      finalNoteBaseLeft: cursorPosition.left,
+      finalNoteX: resolvedFinalNoteX,
+      endBarlineX: currentMeasureOverlay.right,
+      restarted: false,
+      restartBaseLeft: null,
+      restartDurationMs: 0,
+      startBarlineX: resolvedStartBarlineX,
+      firstNoteX: resolvedFirstNoteX,
+    };
+
+    const tick = () => {
+      const animation = this.playCursorLoopWrapAnimation;
+      if (!this.running || !animation) {
+        this.cancelScheduledPlayCursorAlignment();
+        return;
+      }
+
+      const nowMs = performance.now();
+
+      if (!animation.restarted) {
+        const phaseStartMs = animation.boundaryTimeMs - animation.boundaryDurationMs;
+        const progress =
+          animation.boundaryDurationMs > 0
+            ? Math.min(
+                Math.max((nowMs - phaseStartMs) / animation.boundaryDurationMs, 0),
+                1
+              )
+            : 1;
+        const interpolatedX =
+          animation.finalNoteX +
+          (animation.endBarlineX - animation.finalNoteX) * progress;
+        this.positionPlayCursorAtX(interpolatedX, animation.finalNoteBaseLeft);
+
+        if (nowMs >= animation.boundaryTimeMs) {
+          this.pendingLoopRestartCursorTeleport = true;
+          onBoundaryReached();
+          this.pendingLoopRestartCursorTeleport = false;
+
+          const restartCursorPosition = this.getPlayCursorPosition();
+          animation.restartBaseLeft = restartCursorPosition?.left ?? null;
+          animation.restartDurationMs = this.getLoopRestartTravelDurationMs();
+          animation.startBarlineX =
+            this.loopStartMeasureLeftX ?? animation.startBarlineX;
+          animation.firstNoteX =
+            this.loopStartCursorTargetX ?? animation.firstNoteX;
+          animation.restarted = true;
+        }
+      }
+
+      if (animation.restarted) {
+        const restartBaseLeft = animation.restartBaseLeft;
+        if (!Number.isFinite(restartBaseLeft)) {
+          this.cancelScheduledPlayCursorAlignment();
+          return;
+        }
+        const resolvedRestartBaseLeft = Number(restartBaseLeft);
+
+        const progress =
+          animation.restartDurationMs > 0
+            ? Math.min(
+                Math.max(
+                  (nowMs - animation.boundaryTimeMs) / animation.restartDurationMs,
+                  0
+                ),
+                1
+              )
+            : 1;
+        const interpolatedX =
+          animation.startBarlineX +
+          (animation.firstNoteX - animation.startBarlineX) * progress;
+        this.positionPlayCursorAtX(interpolatedX, resolvedRestartBaseLeft);
+
+        if (progress >= 1) {
+          this.cancelScheduledPlayCursorAlignment();
+          this.updatePlayCursorVisualAlignment();
+          return;
+        }
+      }
+
+      this.playCursorAlignmentFrame = window.requestAnimationFrame(tick);
+    };
+
+    this.playCursorAlignmentFrame = window.requestAnimationFrame(tick);
     this.tracePlayCursor(
       'loop boundary',
-      `target ${Math.round(wrapTargetX)} dur ${Math.round(durationMs)}`
+      `target ${Math.round(currentMeasureOverlay.right)} dur ${Math.round(boundaryDurationMs)}`
     );
+    return true;
+  }
+
+  private getLoopRestartTravelDurationMs(): number {
+    const iter = this.openSheetMusicDisplay?.cursors?.[0]?.iterator;
+    if (!iter) {
+      return 0;
+    }
+
+    return this.getPlaybackDelayMs(
+      iter.CurrentSourceTimestamp.RealValue -
+        iter.CurrentMeasure.AbsoluteTimestamp.RealValue
+    );
+  }
+
+  private positionPlayCursorAtLoopStartBoundary(): void {
+    const cursorPosition = this.getPlayCursorPosition();
+    const targetX =
+      this.loopStartMeasureLeftX ??
+      this.measureOverlays.find(
+        (measure) => measure.measureNumber === this.inputMeasure.lower
+      )?.left;
+
+    if (!cursorPosition || !Number.isFinite(targetX)) {
+      return;
+    }
+
+    const resolvedTargetX = Number(targetX);
+    this.positionPlayCursorAtX(resolvedTargetX, cursorPosition.left);
+  }
+
+  private positionPlayCursorAtX(targetX: number, baseLeft: number): void {
+    const cursorElement = this.getPlayCursorElement();
+
+    if (!cursorElement || !Number.isFinite(targetX) || !Number.isFinite(baseLeft)) {
+      return;
+    }
+
+    this.enforcePlayCursorThickness(cursorElement);
+    cursorElement.style.transition = 'none';
+    cursorElement.style.transform = `translateX(${targetX - baseLeft}px)`;
   }
 
   private markIncorrectInputNote(halfTone: number): void {
@@ -3131,12 +3305,19 @@ export class PlayPageComponent implements OnInit {
 
     if (this.osmdEndReached(0)) {
       if (this.checkboxRepeat) {
-        this.animatePlayCursorToLoopBoundary(
-          this.getCursorStepDelayMs(0)
+        const startedLoopWrapAnimation = this.startPlayCursorLoopWrapAnimation(
+          this.getCursorStepDelayMs(0),
+          () => {
+            this.loopPass++;
+            this.markCursorTraceLoopBoundary('loop wrap');
+            this.osmdCursorStart();
+          }
         );
-        this.loopPass++;
-        this.markCursorTraceLoopBoundary('loop wrap');
-        this.osmdCursorStart();
+        if (!startedLoopWrapAnimation) {
+          this.loopPass++;
+          this.markCursorTraceLoopBoundary('loop wrap');
+          this.osmdCursorStart();
+        }
       } else {
         this.openSheetMusicDisplay.cursors[0].hide();
         this.osmdCursorStop();
