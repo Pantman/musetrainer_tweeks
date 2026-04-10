@@ -717,6 +717,26 @@ export class PlayPageComponent implements OnInit {
       this.shouldAnimatePlayCursor() &&
       !this.suppressPlayCursorAnimation;
     const previousPosition = shouldAnimate ? this.getPlayCursorPosition() : null;
+    const previousTargetX =
+      shouldAnimate && index === 0
+        ? this.getCurrentPlayCursorTargetX()
+        : null;
+    const previousMeasureNumber =
+      index === 0
+        ? this.openSheetMusicDisplay.cursors[index].iterator.CurrentMeasureIndex + 1
+        : null;
+    const previousTimestamp =
+      shouldAnimate && index === 0
+        ? this.openSheetMusicDisplay.cursors[index].iterator.CurrentSourceTimestamp
+            .RealValue
+        : null;
+    const previousMeasureEndTimestamp =
+      shouldAnimate && index === 0
+        ? this.openSheetMusicDisplay.cursors[index].iterator.CurrentMeasure
+            .AbsoluteTimestamp.RealValue +
+          this.openSheetMusicDisplay.cursors[index].iterator.CurrentMeasure.Duration
+            .RealValue
+        : null;
     const transitionDuration = shouldAnimate
       ? this.getCursorStepDelayMs(index)
       : 0;
@@ -740,14 +760,45 @@ export class PlayPageComponent implements OnInit {
 
     if (shouldAnimate) {
       const nextPosition = this.getPlayCursorPosition();
+      const nextTimestamp =
+        index === 0
+          ? this.openSheetMusicDisplay.cursors[index].iterator.CurrentSourceTimestamp
+              .RealValue
+          : null;
+      const nextMeasureNumber =
+        index === 0
+          ? this.openSheetMusicDisplay.cursors[index].iterator.CurrentMeasureIndex + 1
+          : null;
       if (
         !previousPosition ||
         !nextPosition ||
         Math.abs(nextPosition.top - previousPosition.top) > 4
       ) {
-        this.suppressPlayCursorAlignmentForStep = true;
-        this.resetPlayCursorTransition();
-        this.tracePlayCursor('move wrap', 'snap');
+        const startedSystemWrapAnimation =
+          index === 0 &&
+          previousMeasureNumber !== null &&
+          previousTimestamp !== null &&
+          previousMeasureEndTimestamp !== null &&
+          nextTimestamp !== null &&
+          nextMeasureNumber !== null &&
+          this.startPlayCursorSystemWrapAnimation({
+            previousPosition,
+            nextPosition,
+            previousTargetX,
+            previousMeasureNumber,
+            previousTimestamp,
+            previousMeasureEndTimestamp,
+            nextMeasureNumber,
+            nextTimestamp,
+          });
+
+        if (!startedSystemWrapAnimation) {
+          this.suppressPlayCursorAlignmentForStep = true;
+          this.resetPlayCursorTransition();
+          this.tracePlayCursor('move wrap', 'snap');
+        } else {
+          this.tracePlayCursor('move wrap', 'system teleport');
+        }
       }
     }
 
@@ -1407,6 +1458,11 @@ export class PlayPageComponent implements OnInit {
 
     this.enforcePlayCursorThickness(cursorElement);
 
+    if (this.playCursorAlignmentFrame !== null) {
+      this.tracePlayCursor('align deferred');
+      return;
+    }
+
     if (this.suppressPlayCursorAlignmentForStep) {
       cursorElement.style.transform = '';
       this.suppressPlayCursorAlignmentForStep = false;
@@ -1487,6 +1543,16 @@ export class PlayPageComponent implements OnInit {
       )
       .map((rect) => rect.left + rect.width / 2)
       .sort((a, b) => a - b);
+  }
+
+  private getCurrentPlayCursorTargetX(): number | null {
+    const container = document.getElementById('scoreOverlayHost');
+    if (!container) {
+      return null;
+    }
+
+    const targetCenters = this.getActivePracticeTargetCenters(container);
+    return targetCenters[0] ?? null;
   }
 
   private startPlayCursorLoopWrapAnimation(
@@ -1668,6 +1734,173 @@ export class PlayPageComponent implements OnInit {
     this.enforcePlayCursorThickness(cursorElement);
     cursorElement.style.transition = 'none';
     cursorElement.style.transform = `translateX(${targetX - baseLeft}px)`;
+  }
+
+  private positionPlayCursorAtPoint(
+    targetX: number,
+    baseLeft: number,
+    top: number
+  ): void {
+    const cursorElement = this.getPlayCursorElement();
+
+    if (
+      !cursorElement ||
+      !Number.isFinite(targetX) ||
+      !Number.isFinite(baseLeft) ||
+      !Number.isFinite(top)
+    ) {
+      return;
+    }
+
+    this.enforcePlayCursorThickness(cursorElement);
+    cursorElement.style.transition = 'none';
+    cursorElement.style.top = `${top}px`;
+    cursorElement.style.transform = `translateX(${targetX - baseLeft}px)`;
+  }
+
+  private startPlayCursorSystemWrapAnimation(params: {
+    previousPosition: { left: number; top: number } | null;
+    nextPosition: { left: number; top: number } | null;
+    previousTargetX: number | null;
+    previousMeasureNumber: number;
+    previousTimestamp: number;
+    previousMeasureEndTimestamp: number;
+    nextMeasureNumber: number;
+    nextTimestamp: number;
+  }): boolean {
+    const {
+      previousPosition,
+      nextPosition,
+      previousTargetX,
+      previousMeasureNumber,
+      previousTimestamp,
+      previousMeasureEndTimestamp,
+      nextMeasureNumber,
+      nextTimestamp,
+    } = params;
+
+    if (!previousPosition || !nextPosition) {
+      return false;
+    }
+
+    const previousMeasureOverlay = this.measureOverlays.find(
+      (measure) => measure.measureNumber === previousMeasureNumber
+    );
+    const nextMeasureOverlay = this.measureOverlays.find(
+      (measure) => measure.measureNumber === nextMeasureNumber
+    );
+    const nextMeasureStartTimestamp =
+      this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasure
+        ?.AbsoluteTimestamp?.RealValue ?? null;
+    const nextTargetX = this.getCurrentPracticeGraphicalNotes()
+      .map((note) => note)
+      .length
+      ? (() => {
+          const container = document.getElementById('scoreOverlayHost');
+          if (!container) {
+            return null;
+          }
+          const nextTargets = this.getCurrentPracticeGraphicalNotes()
+            .map((note) =>
+              this.getAnchorDomRect(note.anchorElement, note.groupElement, container)
+            )
+            .filter(
+              (
+                rect
+              ): rect is {
+                left: number;
+                top: number;
+                width: number;
+                height: number;
+              } => !!rect
+            )
+            .map((rect) => rect.left + rect.width / 2)
+            .sort((a, b) => a - b);
+          return nextTargets[0] ?? null;
+        })()
+      : null;
+
+    if (
+      !previousMeasureOverlay ||
+      !nextMeasureOverlay ||
+      !Number.isFinite(previousTargetX) ||
+      !Number.isFinite(nextMeasureStartTimestamp) ||
+      !Number.isFinite(nextTargetX)
+    ) {
+      return false;
+    }
+
+    const firstPhaseDurationMs = this.getPlaybackDelayMs(
+      previousMeasureEndTimestamp - previousTimestamp
+    );
+    const secondPhaseDurationMs = this.getPlaybackDelayMs(
+      nextTimestamp - nextMeasureStartTimestamp
+    );
+    const boundaryTimeMs = performance.now() + firstPhaseDurationMs;
+    const restartBaseLeft = nextPosition.left;
+    const previousTop = previousPosition.top;
+    const nextTop = nextPosition.top;
+    const resolvedPreviousTargetX = Number(previousTargetX);
+    const resolvedNextTargetX = Number(nextTargetX);
+
+    this.cancelScheduledPlayCursorAlignment();
+    this.resetPlayCursorTransition();
+
+    const tick = () => {
+      if (!this.running) {
+        this.cancelScheduledPlayCursorAlignment();
+        return;
+      }
+
+      const nowMs = performance.now();
+
+      if (nowMs < boundaryTimeMs) {
+        const progress =
+          firstPhaseDurationMs > 0
+            ? Math.min(
+                Math.max(
+                  (nowMs - (boundaryTimeMs - firstPhaseDurationMs)) /
+                    firstPhaseDurationMs,
+                  0
+                ),
+                1
+              )
+            : 1;
+        const interpolatedX =
+          resolvedPreviousTargetX +
+          (previousMeasureOverlay.right - resolvedPreviousTargetX) * progress;
+        this.positionPlayCursorAtPoint(
+          interpolatedX,
+          restartBaseLeft,
+          previousTop
+        );
+        this.playCursorAlignmentFrame = window.requestAnimationFrame(tick);
+        return;
+      }
+
+      const progress =
+        secondPhaseDurationMs > 0
+          ? Math.min(
+              Math.max((nowMs - boundaryTimeMs) / secondPhaseDurationMs, 0),
+              1
+            )
+          : 1;
+      const interpolatedX =
+        nextMeasureOverlay.left +
+        (resolvedNextTargetX - nextMeasureOverlay.left) * progress;
+      this.positionPlayCursorAtPoint(interpolatedX, restartBaseLeft, nextTop);
+
+      if (progress >= 1) {
+        this.cancelScheduledPlayCursorAlignment();
+        this.updatePlayCursorVisualAlignment();
+        return;
+      }
+
+      this.playCursorAlignmentFrame = window.requestAnimationFrame(tick);
+    };
+
+    this.playCursorAlignmentFrame = window.requestAnimationFrame(tick);
+    return true;
   }
 
   private markIncorrectInputNote(halfTone: number): void {
