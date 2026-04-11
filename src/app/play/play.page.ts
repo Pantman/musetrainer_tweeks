@@ -62,6 +62,36 @@ type TempoPreset = 'normal' | 'slow' | 'verySlow' | 'custom';
 type RangeHandle = 'start' | 'end';
 type TransportMode = 'listen' | 'wait' | 'realtime';
 type PlaybackStartReason = 'fresh' | 'loop-restart';
+type FeedbackAccidentalKind = 'sharp' | 'flat' | 'natural';
+
+interface FeedbackAccidentalMarker {
+  kind: FeedbackAccidentalKind;
+  symbol: string;
+  fontSize: number;
+}
+
+interface FeedbackNoteheadPlacement {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  accidental?: FeedbackAccidentalMarker | null;
+}
+
+interface SourcePitchInfo {
+  halfTone: number;
+  fundamentalNote: number;
+  octave: number;
+  accidentalHalfTones: number;
+}
+
+interface IncorrectPitchSpelling {
+  fundamentalNote: number;
+  octave: number;
+  accidentalHalfTones: number;
+  diatonicStepIndex: number;
+  displayAccidental: FeedbackAccidentalKind | null;
+}
 
 interface MeasureOverlay {
   measureNumber: number;
@@ -81,6 +111,8 @@ interface PracticeGraphicalNote {
   anchorElement: SVGElement;
   groupElement: SVGElement;
   halfTone: number;
+  staffId: number | null;
+  pitchInfo: SourcePitchInfo | null;
 }
 
 interface PlayCursorLoopWrapAnimation {
@@ -143,6 +175,7 @@ interface TimedLiveCursorNote {
   staffId: number | null;
   actionable: boolean;
   soundingDurationWholeNotes: number;
+  pitchInfo: SourcePitchInfo | null;
   left: number | null;
   top: number | null;
   width: number;
@@ -2073,7 +2106,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     registry: Map<string, HTMLElement>,
     className: string,
     id: string,
-    placement: { left: number; top: number; width: number; height: number }
+    placement: FeedbackNoteheadPlacement
   ): void {
     let element = registry.get(id);
     if (!element) {
@@ -2088,29 +2121,49 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       registry.set(id, element);
     }
 
+    let bulb = element.querySelector<HTMLElement>('.feedback-notehead__bulb');
+    if (!bulb) {
+      bulb = document.createElement('div');
+      bulb.className = 'feedback-notehead__bulb';
+      element.appendChild(bulb);
+    }
+
+    let accidental = element.querySelector<HTMLElement>(
+      '.feedback-notehead__accidental'
+    );
     const isCorrect = className.includes('feedback-notehead--correct');
     const isEarly = className.includes('feedback-notehead--early');
     const isLate = className.includes('feedback-notehead--late');
     element.style.position = 'absolute';
     element.style.pointerEvents = 'none';
-    element.style.borderRadius = '50% 48% 52% 50%';
-    element.style.transform = 'rotate(-24deg)';
+    element.style.borderRadius = '0';
+    element.style.transform = 'none';
     element.style.zIndex = '3';
-    element.style.background = isCorrect
+    element.style.background = 'transparent';
+    element.style.border = 'none';
+    element.style.boxShadow = 'none';
+
+    bulb.style.position = 'absolute';
+    bulb.style.inset = '0';
+    bulb.style.pointerEvents = 'none';
+    bulb.style.borderRadius = '50% 48% 52% 50%';
+    bulb.style.transform = 'rotate(-24deg)';
+    bulb.style.transformOrigin = 'center';
+    bulb.style.background = isCorrect
       ? '#16a34a'
       : isEarly
         ? '#f97316'
         : isLate
           ? '#7c3aed'
           : '#dc2626';
-    element.style.border = isCorrect
+    bulb.style.border = isCorrect
       ? '1px solid #166534'
       : isEarly
         ? '1px solid #c2410c'
         : isLate
           ? '1px solid #5b21b6'
           : '1px solid #991b1b';
-    element.style.boxShadow = isCorrect
+    bulb.style.boxShadow = isCorrect
       ? '0 0 0 1px rgb(255 255 255 / 0.18)'
       : isEarly || isLate
         ? '0 0 0 1px rgb(255 255 255 / 0.22)'
@@ -2120,6 +2173,29 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     element.style.top = `${placement.top}px`;
     element.style.width = `${placement.width}px`;
     element.style.height = `${placement.height}px`;
+
+    if (placement.accidental) {
+      if (!accidental) {
+        accidental = document.createElement('span');
+        accidental.className = 'feedback-notehead__accidental';
+        element.appendChild(accidental);
+      }
+
+      accidental.textContent = placement.accidental.symbol;
+      accidental.style.position = 'absolute';
+      accidental.style.left = `${-Math.max(placement.width * 0.4, 4)}px`;
+      accidental.style.top = '50%';
+      accidental.style.transform = 'translate(-100%, -52%)';
+      accidental.style.color = '#111827';
+      accidental.style.fontFamily = '"Times New Roman", Georgia, serif';
+      accidental.style.fontSize = `${placement.accidental.fontSize}px`;
+      accidental.style.fontWeight = '700';
+      accidental.style.lineHeight = '1';
+      accidental.style.pointerEvents = 'none';
+      accidental.style.textShadow = '0 0 1px rgb(255 255 255 / 0.7)';
+    } else if (accidental) {
+      accidental.remove();
+    }
   }
 
   private getRenderedNoteheadPlacement(note: PracticeGraphicalNote): {
@@ -2900,12 +2976,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    const { id, left, top, width, height } = placement;
+    const { id, left, top, width, height, accidental } = placement;
     this.renderFeedbackNotehead(
       this.incorrectNoteheadElements,
       'feedback-notehead feedback-notehead--incorrect',
       id,
-      { left, top, width, height }
+      { left, top, width, height, accidental }
     );
   }
 
@@ -2954,6 +3030,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         anchorElement,
         groupElement,
         halfTone,
+        staffId:
+          graphicalNote?.sourceNote?.ParentStaff?.idInMusicSheet ?? null,
+        pitchInfo: this.getSourcePitchInfo(graphicalNote?.sourceNote),
       });
     });
 
@@ -3001,56 +3080,45 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.timingFeedbackNoteheadElements.clear();
   }
 
-  private getIncorrectNotePlacement(halfTone: number): {
-    id: string;
-    left: number;
-    top: number;
-    width: number;
-    height: number;
-  } | null {
+  private getIncorrectNotePlacement(
+    halfTone: number
+  ): (FeedbackNoteheadPlacement & { id: string }) | null {
     const container = document.getElementById('scoreOverlayHost');
     if (!container) {
       return null;
     }
 
     const candidates = this.activePracticeGraphicalNotes.length
-      ? this.activePracticeGraphicalNotes.map((note) => ({
-          graphicalNote: note.graphicalNote,
-          element: note.anchorElement,
-          groupElement: note.groupElement,
-          halfTone: note.halfTone,
-        }))
-      : this.getCurrentPracticeGraphicalNotes().map((note) => ({
-          graphicalNote: note.graphicalNote,
-          element: note.anchorElement,
-          groupElement: note.groupElement,
-          halfTone: note.halfTone,
-        }));
+      ? this.activePracticeGraphicalNotes
+      : this.getCurrentPracticeGraphicalNotes();
 
     if (!candidates.length) {
       return null;
     }
 
-    const anchor = candidates.reduce((best: any, current: any) => {
-      if (!best) {
-        return current;
-      }
+    const anchor = candidates.reduce(
+      (best: PracticeGraphicalNote | null, current: PracticeGraphicalNote) => {
+        if (!best) {
+          return current;
+        }
 
-      const bestDistance = Math.abs(best.halfTone - halfTone);
-      const currentDistance = Math.abs(current.halfTone - halfTone);
-      return currentDistance < bestDistance ? current : best;
-    }, null);
-
-    const anchorNoteRect = this.getGraphicalNoteDomRect(
-      anchor?.graphicalNote,
-      container
+        const bestDistance = Math.abs(best.halfTone - halfTone);
+        const currentDistance = Math.abs(current.halfTone - halfTone);
+        return currentDistance < bestDistance ? current : best;
+      },
+      null
     );
+    if (!anchor) {
+      return null;
+    }
+
+    const anchorNoteRect = this.getGraphicalNoteDomRect(anchor.graphicalNote, container);
     const anchorRect =
       anchorNoteRect ??
       (() => {
         const renderableRect = this.getRenderableRect(
-          anchor?.element,
-          anchor?.groupElement
+          anchor.anchorElement,
+          anchor.groupElement
         );
         if (!renderableRect) {
           return null;
@@ -3069,27 +3137,453 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return null;
     }
 
-    const stepDelta =
-      this.getDiatonicStepIndex(halfTone) -
-      this.getDiatonicStepIndex(anchor.halfTone);
-    const stepHeight = this.getRedNoteStepHeight(anchor) ?? Math.max(anchorRect.height * 0.55, 4);
     const width = Math.max(anchorRect.width * 0.9, 10);
     const height = Math.max(anchorRect.height * 0.75, 8);
-    const cursorCenterX = this.getPlayCursorOverlayCenterX(container);
-    const left =
-      cursorCenterX !== null
-        ? cursorCenterX - width / 2
-        : anchorRect.left + (anchorRect.width - width) / 2;
-    const centerY =
-      anchorRect.top + anchorRect.height / 2 -
-      stepDelta * stepHeight;
-    const top = centerY - height / 2;
-    const timestamp =
-      this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentSourceTimestamp
-        ?.RealValue ?? 0;
-    const id = `wrong-${this.loopPass}-${timestamp}-${halfTone}`;
+    const timestamp = this.getCurrentPracticeTimestamp();
+    const measureNumber =
+      (this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasureIndex ?? -1) +
+      1;
+    const placement = this.buildIncorrectFeedbackPlacement({
+      playedHalfTone: halfTone,
+      anchorHalfTone: anchor.halfTone,
+      anchorPitchInfo: anchor.pitchInfo,
+      anchorCenterY: anchorRect.top + anchorRect.height / 2,
+      width,
+      height,
+      centerX:
+        this.getPlayCursorOverlayCenterX(container) ??
+        anchorRect.left + anchorRect.width / 2,
+      stepHeight:
+        this.getRedNoteStepHeight(anchor) ?? Math.max(anchorRect.height * 0.55, 4),
+      measureNumber,
+      scoreTimestamp: timestamp,
+      staffId: anchor.staffId,
+    });
+    if (!placement) {
+      return null;
+    }
 
-    return { id, left, top, width, height };
+    const id = `wrong-${this.loopPass}-${timestamp}-${halfTone}`;
+    return { id, ...placement };
+  }
+
+  private buildIncorrectFeedbackPlacement(params: {
+    playedHalfTone: number;
+    anchorHalfTone: number;
+    anchorPitchInfo: SourcePitchInfo | null;
+    anchorCenterY: number;
+    width: number;
+    height: number;
+    centerX: number;
+    stepHeight: number;
+    measureNumber: number;
+    scoreTimestamp: number;
+    staffId: number | null;
+  }): FeedbackNoteheadPlacement | null {
+    const anchorStepIndex = params.anchorPitchInfo
+      ? this.getPitchDiatonicStepIndex(
+          params.anchorPitchInfo.fundamentalNote,
+          params.anchorPitchInfo.octave
+        )
+      : this.getDiatonicStepIndex(params.anchorHalfTone);
+    const spelling = this.resolveIncorrectPitchSpelling(
+      params.playedHalfTone,
+      params.measureNumber,
+      params.scoreTimestamp,
+      params.staffId,
+      anchorStepIndex
+    );
+    const targetStepIndex =
+      spelling?.diatonicStepIndex ?? this.getDiatonicStepIndex(params.playedHalfTone);
+    const centerY =
+      params.anchorCenterY -
+      (targetStepIndex - anchorStepIndex) * params.stepHeight;
+
+    return {
+      left: params.centerX - params.width / 2,
+      top: centerY - params.height / 2,
+      width: params.width,
+      height: params.height,
+      accidental: this.getFeedbackAccidentalMarker(
+        spelling?.displayAccidental ?? null,
+        params.height
+      ),
+    };
+  }
+
+  private resolveIncorrectPitchSpelling(
+    halfTone: number,
+    measureNumber: number,
+    scoreTimestamp: number,
+    staffId: number | null,
+    anchorStepIndex: number | null
+  ): IncorrectPitchSpelling | null {
+    const candidates = this.buildIncorrectPitchCandidates(halfTone);
+    if (
+      candidates.length === 0 ||
+      !Number.isFinite(measureNumber) ||
+      !Number.isFinite(scoreTimestamp) ||
+      staffId === null ||
+      !Number.isFinite(staffId)
+    ) {
+      return null;
+    }
+
+    const keySignature = this.getKeySignatureAccidentals(measureNumber, staffId);
+    const measureState = this.buildMeasureAccidentalState(
+      measureNumber,
+      scoreTimestamp,
+      staffId
+    );
+    const keyDirection =
+      keySignature.keyType < 0 ? -1 : keySignature.keyType > 0 ? 1 : 0;
+    let bestCandidate: IncorrectPitchSpelling | null = null;
+    let bestScore: number[] | null = null;
+
+    candidates.forEach((candidate) => {
+      const currentAccidental = this.getCurrentAccidentalForPitch(
+        candidate.fundamentalNote,
+        candidate.octave,
+        keySignature.alterations,
+        measureState
+      );
+      const displayAccidental = this.getDisplayAccidentalKind(
+        currentAccidental,
+        candidate.accidentalHalfTones
+      );
+      const score = [
+        displayAccidental === null ? 0 : displayAccidental === 'natural' ? 1 : 2,
+        anchorStepIndex === null
+          ? 0
+          : Math.abs(candidate.diatonicStepIndex - anchorStepIndex),
+        this.getKeyBiasCost(displayAccidental, keyDirection),
+        Math.abs(candidate.accidentalHalfTones),
+        candidate.diatonicStepIndex,
+      ];
+      if (!this.isAccidentalCandidateScoreBetter(score, bestScore)) {
+        return;
+      }
+
+      bestCandidate = {
+        ...candidate,
+        displayAccidental,
+      };
+      bestScore = score;
+    });
+
+    return bestCandidate;
+  }
+
+  private buildIncorrectPitchCandidates(halfTone: number): IncorrectPitchSpelling[] {
+    const candidates: IncorrectPitchSpelling[] = [];
+    const seen = new Set<string>();
+
+    [0, 2, 4, 5, 7, 9, 11].forEach((fundamentalNote) => {
+      [-1, 0, 1].forEach((accidentalHalfTones) => {
+        const rawOctave = halfTone - fundamentalNote - accidentalHalfTones;
+        if (((rawOctave % 12) + 12) % 12 !== 0) {
+          return;
+        }
+
+        const octave = Math.round(rawOctave / 12) - 3;
+        const key = `${fundamentalNote}:${octave}:${accidentalHalfTones}`;
+        if (seen.has(key)) {
+          return;
+        }
+
+        seen.add(key);
+        candidates.push({
+          fundamentalNote,
+          octave,
+          accidentalHalfTones,
+          diatonicStepIndex: this.getPitchDiatonicStepIndex(
+            fundamentalNote,
+            octave
+          ),
+          displayAccidental: null,
+        });
+      });
+    });
+
+    return candidates;
+  }
+
+  private buildMeasureAccidentalState(
+    measureNumber: number,
+    scoreTimestamp: number,
+    staffId: number
+  ): Map<string, number> {
+    const state = new Map<string, number>();
+    const measureIndex = this.getSourceMeasureIndexByNumber(measureNumber);
+    if (measureIndex < 0) {
+      return state;
+    }
+
+    const measure: any =
+      this.openSheetMusicDisplay?.Sheet?.SourceMeasures?.[measureIndex];
+    const measureStart =
+      measure?.AbsoluteTimestamp?.RealValue ?? measure?.absoluteTimestamp?.realValue;
+    if (!Number.isFinite(measureStart)) {
+      return state;
+    }
+
+    const relativeTimestamp = scoreTimestamp - Number(measureStart);
+    const timestampContainers =
+      measure?.VerticalSourceStaffEntryContainers ??
+      measure?.verticalSourceStaffEntryContainers ??
+      [];
+    timestampContainers.forEach((container: any) => {
+      const timestamp =
+        container?.Timestamp?.RealValue ??
+        container?.timestamp?.RealValue ??
+        container?.timestamp?.realValue ??
+        container?.timestamp;
+      if (!Number.isFinite(timestamp) || timestamp >= relativeTimestamp - 0.000001) {
+        return;
+      }
+
+      const staffEntries = container?.StaffEntries ?? container?.staffEntries ?? [];
+      const staffEntry =
+        staffEntries[staffId] ??
+        staffEntries.find(
+          (entry: any, index: number) =>
+            (entry?.ParentStaff?.idInMusicSheet ??
+              entry?.parentStaff?.idInMusicSheet ??
+              index) === staffId
+        );
+      if (!staffEntry) {
+        return;
+      }
+
+      const voiceEntries = staffEntry?.VoiceEntries ?? staffEntry?.voiceEntries ?? [];
+      voiceEntries.forEach((voiceEntry: any) => {
+        const notes = voiceEntry?.Notes ?? voiceEntry?.notes ?? [];
+        notes.forEach((note: any) => {
+          if (note?.isRest?.() === true || note?.isRestFlag === true) {
+            return;
+          }
+
+          const pitchInfo = this.getSourcePitchInfo(note);
+          if (!pitchInfo) {
+            return;
+          }
+
+          state.set(
+            `${pitchInfo.fundamentalNote}:${pitchInfo.octave}`,
+            pitchInfo.accidentalHalfTones
+          );
+        });
+      });
+    });
+
+    return state;
+  }
+
+  private getKeySignatureAccidentals(
+    measureNumber: number,
+    staffId: number
+  ): { keyType: number; alterations: Map<number, number> } {
+    const alterations = new Map<number, number>();
+    const measureIndex = this.getSourceMeasureIndexByNumber(measureNumber);
+    if (measureIndex < 0) {
+      return { keyType: 0, alterations };
+    }
+
+    const keyInstruction = this.getKeyInstructionForMeasure(measureIndex, staffId);
+    const keyType = Number(keyInstruction?.Key ?? keyInstruction?.keyType ?? 0);
+    const alteratedNotes =
+      keyInstruction?.AlteratedNotes ?? keyInstruction?.alteratedNotes ?? [];
+    const accidentalHalfTones = keyType > 0 ? 1 : keyType < 0 ? -1 : 0;
+
+    alteratedNotes.forEach((note: number) => {
+      if (!Number.isFinite(note) || accidentalHalfTones === 0) {
+        return;
+      }
+
+      alterations.set(Number(note), accidentalHalfTones);
+    });
+
+    return { keyType, alterations };
+  }
+
+  private getKeyInstructionForMeasure(measureIndex: number, staffId: number): any {
+    const measures: any[] = this.openSheetMusicDisplay?.Sheet?.SourceMeasures ?? [];
+    for (let index = measureIndex; index >= 0; index--) {
+      const instructionEntries =
+        measures[index]?.FirstInstructionsStaffEntries ??
+        measures[index]?.firstInstructionsStaffEntries ??
+        [];
+      const staffEntry = instructionEntries[staffId];
+      if (!staffEntry) {
+        continue;
+      }
+
+      const instructions = Array.from(
+        staffEntry?.Instructions ?? staffEntry?.instructions ?? []
+      );
+      const keyInstruction = instructions.find((instruction: any) =>
+        Array.isArray(
+          instruction?.AlteratedNotes ?? instruction?.alteratedNotes
+        )
+      );
+      if (keyInstruction) {
+        return keyInstruction;
+      }
+    }
+
+    return null;
+  }
+
+  private getCurrentAccidentalForPitch(
+    fundamentalNote: number,
+    octave: number,
+    keySignatureAlterations: Map<number, number>,
+    measureAccidentals: Map<string, number>
+  ): number {
+    return (
+      measureAccidentals.get(`${fundamentalNote}:${octave}`) ??
+      keySignatureAlterations.get(fundamentalNote) ??
+      0
+    );
+  }
+
+  private getDisplayAccidentalKind(
+    currentAccidental: number,
+    targetAccidental: number
+  ): FeedbackAccidentalKind | null {
+    if (currentAccidental === targetAccidental) {
+      return null;
+    }
+
+    if (targetAccidental === 0) {
+      return 'natural';
+    }
+    if (targetAccidental === 1) {
+      return 'sharp';
+    }
+    if (targetAccidental === -1) {
+      return 'flat';
+    }
+
+    return null;
+  }
+
+  private getKeyBiasCost(
+    accidental: FeedbackAccidentalKind | null,
+    keyDirection: number
+  ): number {
+    if (accidental === null || keyDirection === 0) {
+      return 0;
+    }
+    if (accidental === 'natural') {
+      return 1;
+    }
+    if (
+      (keyDirection < 0 && accidental === 'flat') ||
+      (keyDirection > 0 && accidental === 'sharp')
+    ) {
+      return 0;
+    }
+
+    return 2;
+  }
+
+  private isAccidentalCandidateScoreBetter(
+    candidateScore: number[],
+    bestScore: number[] | null
+  ): boolean {
+    if (!bestScore) {
+      return true;
+    }
+
+    for (let index = 0; index < candidateScore.length; index++) {
+      if (candidateScore[index] === bestScore[index]) {
+        continue;
+      }
+
+      return candidateScore[index] < bestScore[index];
+    }
+
+    return false;
+  }
+
+  private getFeedbackAccidentalMarker(
+    accidental: FeedbackAccidentalKind | null,
+    noteHeight: number
+  ): FeedbackAccidentalMarker | null {
+    if (!accidental) {
+      return null;
+    }
+
+    return {
+      kind: accidental,
+      symbol: this.getFeedbackAccidentalSymbol(accidental),
+      fontSize: Math.max(noteHeight * 1.9, 14),
+    };
+  }
+
+  private getFeedbackAccidentalSymbol(
+    accidental: FeedbackAccidentalKind
+  ): string {
+    switch (accidental) {
+      case 'sharp':
+        return '♯';
+      case 'flat':
+        return '♭';
+      default:
+        return '♮';
+    }
+  }
+
+  private getSourcePitchInfo(sourceNote: any): SourcePitchInfo | null {
+    const pitch = sourceNote?.Pitch ?? sourceNote?.pitch;
+    const fundamentalNote =
+      pitch?.FundamentalNote ?? pitch?.fundamentalNote ?? null;
+    const octave = pitch?.Octave ?? pitch?.octave ?? null;
+    const accidental = pitch?.Accidental ?? pitch?.accidental ?? null;
+    const halfTone =
+      pitch?.HalfTone ?? pitch?.halfTone ?? sourceNote?.halfTone ?? null;
+    if (
+      !Number.isFinite(fundamentalNote) ||
+      !Number.isFinite(octave) ||
+      !Number.isFinite(halfTone)
+    ) {
+      return null;
+    }
+
+    return {
+      halfTone: Number(halfTone),
+      fundamentalNote: Number(fundamentalNote),
+      octave: Number(octave),
+      accidentalHalfTones: this.getAccidentalHalfTones(
+        Number.isFinite(accidental) ? Number(accidental) : null
+      ),
+    };
+  }
+
+  private getAccidentalHalfTones(accidental: number | null): number {
+    switch (accidental) {
+      case 0:
+        return 1;
+      case 1:
+        return -1;
+      case 4:
+        return 2;
+      case 5:
+        return -2;
+      default:
+        return 0;
+    }
+  }
+
+  private getSourceMeasureIndexByNumber(measureNumber: number): number {
+    return (
+      this.openSheetMusicDisplay?.Sheet?.SourceMeasures?.findIndex(
+        (measure: any, index: number) =>
+          (measure.MeasureNumber ?? measure.measureNumber ?? index + 1) ===
+          measureNumber
+      ) ?? -1
+    );
   }
 
   private getPlayCursorOverlayCenterX(container: HTMLElement): number | null {
@@ -3129,6 +3623,41 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const octave = Math.floor(halfTone / 12);
     const stepByPitchClass = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6];
     return octave * 7 + stepByPitchClass[pitchClass];
+  }
+
+  private getPitchDiatonicStepIndex(
+    fundamentalNote: number,
+    octave: number
+  ): number {
+    const diatonicOrder = this.getDiatonicOrderFromFundamentalNote(fundamentalNote);
+    if (diatonicOrder === null) {
+      return this.getDiatonicStepIndex(12 * (octave + 3) + fundamentalNote);
+    }
+
+    return octave * 7 + diatonicOrder;
+  }
+
+  private getDiatonicOrderFromFundamentalNote(
+    fundamentalNote: number
+  ): number | null {
+    switch (fundamentalNote) {
+      case 0:
+        return 0;
+      case 2:
+        return 1;
+      case 4:
+        return 2;
+      case 5:
+        return 3;
+      case 7:
+        return 4;
+      case 9:
+        return 5;
+      case 11:
+        return 6;
+      default:
+        return null;
+    }
   }
 
   private clearRealtimeToleranceWindow(): void {
@@ -4556,6 +5085,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           soundingDurationWholeNotes: this.getTimedLiveGraphicalNoteDuration(
             note.graphicalNote
           ),
+          pitchInfo: note.pitchInfo,
           left: placement ? placement.left + placement.width / 2 : null,
           top: placement ? placement.top + placement.height / 2 : null,
           width: placement ? placement.width : 10,
@@ -5432,7 +5962,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private getTimedLiveSimulatedIncorrectPlacement(
     pendingNote: TimedLiveSimulatedPendingNote
-  ): { left: number; top: number; width: number; height: number } | null {
+  ): FeedbackNoteheadPlacement | null {
     const renderState = this.resolveTimedLiveCursorRenderAtTimestamp(
       pendingNote.hitTimestamp
     );
@@ -5444,18 +5974,19 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     const width = Math.max(pendingNote.note.width, 10);
     const height = Math.max(pendingNote.note.height, 8);
-    const stepDelta =
-      this.getDiatonicStepIndex(pendingNote.playedHalfTone) -
-      this.getDiatonicStepIndex(pendingNote.note.halfTone);
-    const stepHeight = Math.max(height * 0.55, 4);
-    const centerY = Number(noteCenterY) - stepDelta * stepHeight;
-
-    return {
-      left: Number(noteCenterX) - width / 2,
-      top: centerY - height / 2,
+    return this.buildIncorrectFeedbackPlacement({
+      playedHalfTone: pendingNote.playedHalfTone,
+      anchorHalfTone: pendingNote.note.halfTone,
+      anchorPitchInfo: pendingNote.note.pitchInfo,
+      anchorCenterY: Number(noteCenterY),
       width,
       height,
-    };
+      centerX: Number(noteCenterX),
+      stepHeight: Math.max(height * 0.55, 4),
+      measureNumber: pendingNote.event.measureNumber,
+      scoreTimestamp: pendingNote.event.timestamp,
+      staffId: pendingNote.note.staffId,
+    });
   }
 
   private markTimedLiveSimulatedEventNoteProcessed(
