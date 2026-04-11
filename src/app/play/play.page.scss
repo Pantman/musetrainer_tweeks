@@ -136,6 +136,7 @@ ion-input{
 
 .realtime-debug-panel__controls {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.6rem;
   margin-bottom: 0.55rem;
 }
@@ -159,7 +160,7 @@ ion-input{
   color: #f8fafc;
   font: inherit;
   padding: 0.15rem 0.35rem;
-  width: 5.5rem;
+  width: 5rem;
 }
 
 .realtime-debug-panel__events {

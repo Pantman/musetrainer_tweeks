@@ -37,7 +37,11 @@ declare global {
       playRealtime: () => void;
       stop: () => void;
       setTimedCursorDebug: (enabled?: boolean) => void;
-      setTimedCursorSim: (enabled?: boolean, offsetMs?: number) => void;
+      setTimedCursorSim: (
+        enabled?: boolean,
+        offsetMs?: number,
+        pitchOffsetSemitones?: number
+      ) => void;
       enableConsoleRelay: (
         channel?: 'wrap' | 'realtime' | 'trace' | 'all',
         enabled?: boolean
@@ -234,7 +238,8 @@ interface TimedLiveCursorDebugSnapshot {
   windowEndTimestamp: number | null;
   windowMs: number;
   windowNoteCountByStaff: Record<string, number>;
-  thresholdMs: number;
+  earlyThresholdMs: number;
+  lateThresholdMs: number;
   earlyThresholdVisible: boolean;
   lateThresholdVisible: boolean;
 }
@@ -303,6 +308,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly REALTIME_ACCEPT_TOLERANCE_WHOLE_NOTES = 1 / 4;
   private static readonly TIMED_LIVE_DEBUG_WINDOW_WHOLE_NOTES = 1 / 4;
   private static readonly TIMED_LIVE_DEBUG_THRESHOLD_WHOLE_NOTES = 1 / 8;
+  private static readonly DEFAULT_TIMED_LIVE_SIMULATION_THRESHOLD_MS =
+    Math.round(
+      (PlayPageComponent.TIMED_LIVE_DEBUG_THRESHOLD_WHOLE_NOTES * 4 * 60000) /
+        PlayPageComponent.DEFAULT_TEMPO_BPM
+    );
+  private static readonly MAX_TIMED_LIVE_SIMULATION_THRESHOLD_MS = 2000;
+  private static readonly MAX_TIMED_LIVE_SIMULATION_TIMING_OFFSET_MS = 4000;
+  private static readonly MAX_TIMED_LIVE_SIMULATION_PITCH_OFFSET_SEMITONES = 24;
   private static readonly FEEDBACK_CORRECT_COLOR = '#16a34a';
   private static readonly FEEDBACK_ERROR_COLOR = '#dc2626';
   private static readonly ENABLE_CURSOR_TRACE = false;
@@ -436,6 +449,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     null;
   timedLiveSimulatedInputEnabled: boolean = false;
   timedLiveSimulatedTimingOffsetMs: number = 0;
+  timedLiveSimulatedPitchOffsetSemitones: number = 0;
+  timedLiveSimulationEarlyThresholdMs: number =
+    PlayPageComponent.DEFAULT_TIMED_LIVE_SIMULATION_THRESHOLD_MS;
+  timedLiveSimulationLateThresholdMs: number =
+    PlayPageComponent.DEFAULT_TIMED_LIVE_SIMULATION_THRESHOLD_MS;
   timedLiveSimulatedFeedbackStats: TimedLiveSimulatedFeedbackStats = {
     scheduled: 0,
     triggered: 0,
@@ -450,6 +468,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     string,
     TimedLiveSimulatedPendingNote[]
   >();
+  private timedLiveSimulatedProcessedEventNotes = new Map<string, Set<number>>();
   private timedLiveSimulatedHeldNotes = new Map<string, number>();
   private timedLiveSimulatedOutputTokens = new Map<number, number>();
   private timedLiveSimulatedOutputTokenSeed = 0;
@@ -967,6 +986,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   handleTimedLiveSimulatedInputChange(): void {
+    this.syncTimedLiveSimulationControls();
     const shouldContinueSimulation = this.shouldUseTimedLiveSimulatedFeedback();
     const shouldHandoffToListenPlayback =
       !shouldContinueSimulation &&
@@ -975,7 +995,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.hasActiveTimedLiveSimulatedOutput();
 
     if (shouldContinueSimulation) {
-      this.clearTimedLiveSimulatedScheduleTimeouts();
+      if (this.hasTimedLiveSimulatedFeedbackActivity()) {
+        this.stopTimedLiveSimulatedFeedbackPlayback();
+      } else {
+        this.clearTimedLiveSimulatedFeedbackTimeouts();
+      }
     } else if (shouldHandoffToListenPlayback) {
       this.stopTimedLiveSimulatedFeedbackPlayback(true);
     } else if (this.hasTimedLiveSimulatedFeedbackActivity()) {
@@ -988,6 +1012,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     if (shouldContinueSimulation) {
       this.scheduleTimedLiveSimulatedFeedback(true);
     }
+  }
+
+  handleTimedLiveSimulationThresholdChange(): void {
+    this.syncTimedLiveSimulationControls();
   }
 
   // Reset selection on measures and set the cursor to the origin
@@ -3429,6 +3457,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         sessionTotals: { ...this.timedLiveCursorDebugSessionTotals },
         simulatedInputEnabled: this.timedLiveSimulatedInputEnabled,
         simulatedTimingOffsetMs: this.timedLiveSimulatedTimingOffsetMs,
+        simulatedPitchOffsetSemitones: this.timedLiveSimulatedPitchOffsetSemitones,
+        simulationEarlyThresholdMs: this.getTimedLiveSimulationEarlyThresholdMs(),
+        simulationLateThresholdMs: this.getTimedLiveSimulationLateThresholdMs(),
         simulatedFeedbackStats: { ...this.timedLiveSimulatedFeedbackStats },
       }),
       clearWrapLog: () => {
@@ -3449,9 +3480,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         this.showTimedLiveCursorDebugOverlay = enabled;
         this.handleTimedLiveCursorDebugOverlayChange();
       },
-      setTimedCursorSim: (enabled = true, offsetMs = this.timedLiveSimulatedTimingOffsetMs) => {
+      setTimedCursorSim: (
+        enabled = true,
+        offsetMs = this.timedLiveSimulatedTimingOffsetMs,
+        pitchOffsetSemitones = this.timedLiveSimulatedPitchOffsetSemitones
+      ) => {
         this.timedLiveSimulatedInputEnabled = enabled;
         this.timedLiveSimulatedTimingOffsetMs = offsetMs;
+        this.timedLiveSimulatedPitchOffsetSemitones = pitchOffsetSemitones;
         this.handleTimedLiveSimulatedInputChange();
       },
       enableConsoleRelay: (channel = 'all', enabled = true) => {
@@ -3537,6 +3573,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       timedLiveCursorSnapshot: this.timedLiveCursorDebugSnapshot,
       timedLiveSimulatedInputEnabled: this.timedLiveSimulatedInputEnabled,
       timedLiveSimulatedTimingOffsetMs: this.timedLiveSimulatedTimingOffsetMs,
+      timedLiveSimulatedPitchOffsetSemitones:
+        this.timedLiveSimulatedPitchOffsetSemitones,
+      timedLiveSimulationEarlyThresholdMs:
+        this.getTimedLiveSimulationEarlyThresholdMs(),
+      timedLiveSimulationLateThresholdMs:
+        this.getTimedLiveSimulationLateThresholdMs(),
       timedLiveSimulatedFeedbackStats: this.timedLiveSimulatedFeedbackStats,
     };
   }
@@ -4724,11 +4766,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     return [
       `${this.transportMode ?? 'idle'} loop ${this.loopPass} score ${currentScoreLabel}`,
-      `sim ${this.timedLiveSimulatedInputEnabled ? `${this.timedLiveSimulatedTimingOffsetMs}ms` : 'off'} hits ${this.timedLiveSimulatedFeedbackStats.triggered}/${this.timedLiveSimulatedFeedbackStats.scheduled}`,
+      `sim ${
+        this.timedLiveSimulatedInputEnabled
+          ? `${this.timedLiveSimulatedTimingOffsetMs}ms ${this.timedLiveSimulatedPitchOffsetSemitones >= 0 ? '+' : ''}${this.timedLiveSimulatedPitchOffsetSemitones}st`
+          : 'off'
+      } hits ${this.timedLiveSimulatedFeedbackStats.triggered}/${this.timedLiveSimulatedFeedbackStats.scheduled}`,
       `event ${snapshot.currentEventLabel}`,
       `segment ${snapshot.currentSegmentLabel} prog ${progressLabel}`,
       `window ${this.formatScoreTimestamp(snapshot.windowStartTimestamp)} -> ${this.formatScoreTimestamp(snapshot.windowEndTimestamp)}`,
-      `notes ${windowNoteSummary || 'none'} win ${snapshot.windowMs}ms thr ${snapshot.thresholdMs}ms`,
+      `notes ${windowNoteSummary || 'none'} win ${snapshot.windowMs}ms thr e ${snapshot.earlyThresholdMs}ms l ${snapshot.lateThresholdMs}ms`,
       `early ${snapshot.earlyThresholdVisible ? 'on' : 'off'} late ${snapshot.lateThresholdVisible ? 'on' : 'off'} wrap ${snapshot.wrapsSystem ? 'yes' : 'no'}`,
       `sim stats g ${this.timedLiveSimulatedFeedbackStats.onTime} e ${this.timedLiveSimulatedFeedbackStats.early} l ${this.timedLiveSimulatedFeedbackStats.late} m ${this.timedLiveSimulatedFeedbackStats.missed}`,
       `frames ${this.timedLiveCursorDebugSessionTotals.frames} seg ${this.timedLiveCursorDebugSessionTotals.segmentTransitions} wraps ${this.timedLiveCursorDebugSessionTotals.wrapTransitions}`,
@@ -4768,6 +4814,29 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     window.addEventListener(
       'pointerup',
       this.onTimedLiveCursorDebugPanelPointerUp
+    );
+  }
+
+  async handleTimedLiveCursorDebugPanelWheel(event: WheelEvent): Promise<void> {
+    const target = event.target as EventTarget | null;
+    if (target instanceof HTMLInputElement && target.type === 'number') {
+      target.blur();
+    }
+
+    const panel = event.currentTarget as HTMLElement | null;
+    if (panel && this.canElementScrollForWheelDelta(panel, event)) {
+      return;
+    }
+
+    const scrollElement = await this.content?.getScrollElement?.();
+    if (!scrollElement) {
+      return;
+    }
+
+    event.preventDefault();
+    scrollElement.scrollTop += this.getWheelDeltaPixels(
+      event,
+      scrollElement.clientHeight
     );
   }
 
@@ -4879,6 +4948,37 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     );
   };
 
+  private canElementScrollForWheelDelta(
+    element: HTMLElement,
+    event: WheelEvent
+  ): boolean {
+    if (element.scrollHeight <= element.clientHeight + 1) {
+      return false;
+    }
+
+    const deltaY = this.getWheelDeltaPixels(event, element.clientHeight);
+    if (Math.abs(deltaY) <= Number.EPSILON) {
+      return false;
+    }
+
+    if (deltaY < 0) {
+      return element.scrollTop > 0;
+    }
+
+    return element.scrollTop + element.clientHeight < element.scrollHeight - 1;
+  }
+
+  private getWheelDeltaPixels(event: WheelEvent, pageHeight: number): number {
+    switch (event.deltaMode) {
+      case WheelEvent.DOM_DELTA_LINE:
+        return event.deltaY * 16;
+      case WheelEvent.DOM_DELTA_PAGE:
+        return event.deltaY * Math.max(pageHeight, 1);
+      default:
+        return event.deltaY;
+    }
+  }
+
   private clampTimedLiveCursorDebugPanelPosition(): void {
     const position = this.timedLiveCursorDebugPanelPosition;
     if (!position) {
@@ -4952,6 +5052,81 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     );
   }
 
+  private syncTimedLiveSimulationControls(): void {
+    this.timedLiveSimulatedTimingOffsetMs =
+      this.normalizeTimedLiveSimulatedTimingOffsetMs(
+        this.timedLiveSimulatedTimingOffsetMs
+      );
+    this.timedLiveSimulatedPitchOffsetSemitones =
+      this.normalizeTimedLiveSimulatedPitchOffsetSemitones(
+        this.timedLiveSimulatedPitchOffsetSemitones
+      );
+    this.timedLiveSimulationEarlyThresholdMs =
+      this.normalizeTimedLiveSimulationThresholdMs(
+        this.timedLiveSimulationEarlyThresholdMs
+      );
+    this.timedLiveSimulationLateThresholdMs =
+      this.normalizeTimedLiveSimulationThresholdMs(
+        this.timedLiveSimulationLateThresholdMs
+      );
+  }
+
+  private normalizeTimedLiveSimulatedTimingOffsetMs(value: number): number {
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+
+    return Math.min(
+      Math.max(Math.round(value), -PlayPageComponent.MAX_TIMED_LIVE_SIMULATION_TIMING_OFFSET_MS),
+      PlayPageComponent.MAX_TIMED_LIVE_SIMULATION_TIMING_OFFSET_MS
+    );
+  }
+
+  private normalizeTimedLiveSimulatedPitchOffsetSemitones(
+    value: number
+  ): number {
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+
+    return Math.min(
+      Math.max(
+        Math.round(value),
+        -PlayPageComponent.MAX_TIMED_LIVE_SIMULATION_PITCH_OFFSET_SEMITONES
+      ),
+      PlayPageComponent.MAX_TIMED_LIVE_SIMULATION_PITCH_OFFSET_SEMITONES
+    );
+  }
+
+  private normalizeTimedLiveSimulationThresholdMs(value: number): number {
+    if (!Number.isFinite(value)) {
+      return PlayPageComponent.DEFAULT_TIMED_LIVE_SIMULATION_THRESHOLD_MS;
+    }
+
+    return Math.min(
+      Math.max(Math.round(value), 0),
+      PlayPageComponent.MAX_TIMED_LIVE_SIMULATION_THRESHOLD_MS
+    );
+  }
+
+  private getTimedLiveSimulationEarlyThresholdMs(): number {
+    return this.normalizeTimedLiveSimulationThresholdMs(
+      this.timedLiveSimulationEarlyThresholdMs
+    );
+  }
+
+  private getTimedLiveSimulationLateThresholdMs(): number {
+    return this.normalizeTimedLiveSimulationThresholdMs(
+      this.timedLiveSimulationLateThresholdMs
+    );
+  }
+
+  private getTimedLiveSimulatedPitchOffsetSemitones(): number {
+    return this.normalizeTimedLiveSimulatedPitchOffsetSemitones(
+      this.timedLiveSimulatedPitchOffsetSemitones
+    );
+  }
+
   private shouldSuppressListenAutoplayFeedbackForName(name: string): boolean {
     return (
       this.shouldUseTimedLiveSimulatedFeedback() &&
@@ -5002,10 +5177,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return 0;
   }
 
-  private isTimedLiveSimulatedHeldNote(name: string): boolean {
-    return (this.timedLiveSimulatedHeldNotes.get(name) ?? 0) > 0;
-  }
-
   private hasTimedLiveSimulatedFeedbackActivity(): boolean {
     return (
       this.timedLiveSimulatedScheduleTimeouts.length > 0 ||
@@ -5025,6 +5196,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private clearTimedLiveSimulatedPendingState(): void {
     this.timedLiveSimulatedPendingNotes.clear();
+    this.timedLiveSimulatedProcessedEventNotes.clear();
     this.timedLiveSimulatedHeldNotes.clear();
     this.timedLiveSimulatedOutputTokens.clear();
   }
@@ -5038,17 +5210,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private commitTimedLiveSimulatedFeedbackNote(
-    pendingNote: TimedLiveSimulatedPendingNote
+    pendingNote: TimedLiveSimulatedPendingNote,
+    renderNotehead: boolean = true
   ): void {
-    const renderState = this.resolveTimedLiveCursorRenderAtTimestamp(
-      pendingNote.hitTimestamp
-    );
-    const placement = this.getTimedLiveSimulatedFeedbackPlacement(
-      pendingNote.note,
-      pendingNote.timingClass,
-      renderState?.left ?? null
-    );
-
     this.timedLiveSimulatedFeedbackStats.triggered++;
     if (pendingNote.timingClass === 'correct') {
       this.timedLiveSimulatedFeedbackStats.onTime++;
@@ -5059,6 +5223,19 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     } else {
       this.timedLiveSimulatedFeedbackStats.missed++;
     }
+
+    if (!renderNotehead) {
+      return;
+    }
+
+    const renderState = this.resolveTimedLiveCursorRenderAtTimestamp(
+      pendingNote.hitTimestamp
+    );
+    const placement = this.getTimedLiveSimulatedFeedbackPlacement(
+      pendingNote.note,
+      pendingNote.timingClass,
+      renderState?.left ?? null
+    );
 
     if (!placement) {
       return;
@@ -5080,27 +5257,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       id,
       placement
     );
-  }
-
-  private handleTimedLiveSimulatedAutoplayNoteOn(name: string): boolean {
-    if (
-      !this.shouldUseTimedLiveSimulatedFeedback() ||
-      !this.isTimedLiveSimulatedHeldNote(name)
-    ) {
-      return false;
-    }
-
-    const pendingNote = this.consumeTimedLiveSimulatedPendingNote(name);
-    if (!pendingNote) {
-      return true;
-    }
-
-    this.notesService.press(name);
-    if (pendingNote.timingClass === 'correct') {
-      this.correctlyHeldPracticeKeys.add(name);
-    }
-    this.commitTimedLiveSimulatedFeedbackNote(pendingNote);
-    return true;
   }
 
   private resetTimedLiveSimulatedFeedbackStats(): void {
@@ -5218,12 +5374,115 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     this.mapNotesAutoPressed.set((pitch - 12).toFixed(), 1);
-    this.keyNoteOn(Date.now() - this.timePlayStart, pitch);
+    this.handleTimedLiveSimulatedStateNoteOn(pitch);
   }
 
   private applyTimedLiveSimulatedStateNoteOff(pitch: number): void {
-    this.mapNotesAutoPressed.delete((pitch - 12).toFixed());
-    this.keyNoteOff(Date.now() - this.timePlayStart, pitch);
+    const name = (pitch - 12).toFixed();
+    this.mapNotesAutoPressed.delete(name);
+    this.releaseTimedLiveSimulatedHeldNote(name);
+    if (this.pianoKeyboard) {
+      this.pianoKeyboard.updateNotesStatus();
+    }
+  }
+
+  private handleTimedLiveSimulatedStateNoteOn(pitch: number): void {
+    const halfTone = pitch - 12;
+    const name = halfTone.toFixed();
+    const pendingNote = this.consumeTimedLiveSimulatedPendingNote(name);
+    if (!pendingNote) {
+      if (this.pianoKeyboard) {
+        this.pianoKeyboard.updateNotesStatus();
+      }
+      return;
+    }
+
+    const matchesCurrentStep = this.getCurrentRequiredPressKeys().has(name);
+    this.commitTimedLiveSimulatedFeedbackNote(pendingNote, matchesCurrentStep);
+
+    if (!matchesCurrentStep && this.checkboxFeedback) {
+      this.renderTimedLiveSimulatedIncorrectFeedbackNote(pendingNote);
+    }
+
+    if (this.markTimedLiveSimulatedEventNoteProcessed(pendingNote)) {
+      this.advanceTimedLiveSimulatedPlaybackStep();
+    }
+
+    if (this.pianoKeyboard) {
+      this.pianoKeyboard.updateNotesStatus();
+    }
+  }
+
+  private renderTimedLiveSimulatedIncorrectFeedbackNote(
+    pendingNote: TimedLiveSimulatedPendingNote
+  ): void {
+    const placement = this.getTimedLiveSimulatedIncorrectPlacement(pendingNote);
+    if (!placement) {
+      return;
+    }
+
+    const id = `sim-wrong-${pendingNote.loopPass}-${pendingNote.event.timestamp}-${pendingNote.playedHalfTone}-${pendingNote.index}`;
+    this.renderFeedbackNotehead(
+      this.incorrectNoteheadElements,
+      'feedback-notehead feedback-notehead--incorrect',
+      id,
+      placement
+    );
+  }
+
+  private getTimedLiveSimulatedIncorrectPlacement(
+    pendingNote: TimedLiveSimulatedPendingNote
+  ): { left: number; top: number; width: number; height: number } | null {
+    const renderState = this.resolveTimedLiveCursorRenderAtTimestamp(
+      pendingNote.hitTimestamp
+    );
+    const noteCenterX = renderState?.left ?? pendingNote.note.left;
+    const noteCenterY = pendingNote.note.top;
+    if (!Number.isFinite(noteCenterX) || !Number.isFinite(noteCenterY)) {
+      return null;
+    }
+
+    const width = Math.max(pendingNote.note.width, 10);
+    const height = Math.max(pendingNote.note.height, 8);
+    const stepDelta =
+      this.getDiatonicStepIndex(pendingNote.playedHalfTone) -
+      this.getDiatonicStepIndex(pendingNote.note.halfTone);
+    const stepHeight = Math.max(height * 0.55, 4);
+    const centerY = Number(noteCenterY) - stepDelta * stepHeight;
+
+    return {
+      left: Number(noteCenterX) - width / 2,
+      top: centerY - height / 2,
+      width,
+      height,
+    };
+  }
+
+  private markTimedLiveSimulatedEventNoteProcessed(
+    pendingNote: TimedLiveSimulatedPendingNote
+  ): boolean {
+    const progressKey = `${pendingNote.loopPass}:${pendingNote.event.id}`;
+    const processedIndexes =
+      this.timedLiveSimulatedProcessedEventNotes.get(progressKey) ?? new Set<number>();
+    processedIndexes.add(pendingNote.index);
+    this.timedLiveSimulatedProcessedEventNotes.set(progressKey, processedIndexes);
+
+    const expectedNotes = this.getTimedLiveSimulatedFeedbackNotesForEvent(
+      pendingNote.event
+    );
+    return processedIndexes.size >= expectedNotes.length;
+  }
+
+  private advanceTimedLiveSimulatedPlaybackStep(): void {
+    if (
+      !this.running ||
+      !this.listenMode ||
+      !this.shouldUseTimedLiveSimulatedFeedback()
+    ) {
+      return;
+    }
+
+    this.osmdCursorPlayMoveNext(true);
   }
 
   private getTimedLiveSimulatedAudioScheduleLeadMs(delayMs: number): number {
@@ -5300,13 +5559,25 @@ export class PlayPageComponent implements OnInit, OnDestroy {
             return;
           }
 
-          this.triggerTimedLiveSimulatedFeedbackNote(
+          if (note.actionable) {
+            this.triggerTimedLiveSimulatedFeedbackNote(
+              event,
+              note,
+              offsetWholeNotes,
+              offsetMs,
+              index,
+              rawDelayMs,
+              audioLeadMs
+            );
+            return;
+          }
+
+          this.triggerTimedLiveSimulatedTieFeedbackNote(
             event,
             note,
             offsetWholeNotes,
             offsetMs,
             index,
-            rawDelayMs,
             audioLeadMs
           );
         }, audioScheduleDelayMs, 'schedule');
@@ -5318,7 +5589,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private getTimedLiveSimulatedFeedbackNotesForEvent(
     event: TimedLiveCursorEvent
   ): TimedLiveCursorNote[] {
-    return event.notes.filter((note) => note.actionable);
+    return event.notes;
   }
 
   private triggerTimedLiveSimulatedFeedbackNote(
@@ -5331,16 +5602,18 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     stateDelayMs: number = 0
   ): void {
     const timingClass = this.classifyTimedLiveSimulatedFeedback(offsetMs);
-    const pitch = note.halfTone + 12;
-    if (Number.isFinite(pitch)) {
+    const playedHalfTone =
+      note.halfTone + this.getTimedLiveSimulatedPitchOffsetSemitones();
+    const pitch = playedHalfTone + 12;
+    if (Number.isFinite(pitch) && pitch >= 0 && pitch <= 127) {
       const hitTimestamp = event.timestamp + offsetWholeNotes;
-      const name = note.halfTone.toFixed();
+      const name = playedHalfTone.toFixed();
       this.enqueueTimedLiveSimulatedPendingNote({
         event,
         note,
         timingClass,
         hitTimestamp,
-        playedHalfTone: note.halfTone,
+        playedHalfTone,
         loopPass: this.loopPass,
         index,
       });
@@ -5359,6 +5632,48 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         stateDelayMs
       );
     }
+  }
+
+  private triggerTimedLiveSimulatedTieFeedbackNote(
+    event: TimedLiveCursorEvent,
+    note: TimedLiveCursorNote,
+    offsetWholeNotes: number,
+    offsetMs: number,
+    index: number,
+    onsetDelayMs: number = 0
+  ): void {
+    const pendingNote: TimedLiveSimulatedPendingNote = {
+      event,
+      note,
+      timingClass: this.classifyTimedLiveSimulatedFeedback(offsetMs),
+      hitTimestamp: event.timestamp + offsetWholeNotes,
+      playedHalfTone:
+        note.halfTone + this.getTimedLiveSimulatedPitchOffsetSemitones(),
+      loopPass: this.loopPass,
+      index,
+    };
+
+    this.scheduleTimedLiveSimulatedCallback(() => {
+      if (
+        !this.running ||
+        !this.shouldUseTimedLiveSimulatedFeedback() ||
+        this.loopPass !== pendingNote.loopPass
+      ) {
+        return;
+      }
+
+      this.commitTimedLiveSimulatedFeedbackNote(pendingNote, false);
+      if (
+        this.checkboxFeedback &&
+        pendingNote.playedHalfTone !== pendingNote.note.halfTone
+      ) {
+        this.renderTimedLiveSimulatedIncorrectFeedbackNote(pendingNote);
+      }
+
+      if (this.markTimedLiveSimulatedEventNoteProcessed(pendingNote)) {
+        this.advanceTimedLiveSimulatedPlaybackStep();
+      }
+    }, onsetDelayMs);
   }
 
   private playTimedLiveSimulatedOutputNote(
@@ -5437,28 +5752,25 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private classifyTimedLiveSimulatedFeedback(
     offsetMs: number
   ): 'correct' | 'early' | 'late' | 'miss' {
-    const onTimeThresholdMs = this.getTimedLiveSimulationThresholdMs();
-    if (Math.abs(offsetMs) <= onTimeThresholdMs) {
+    const earlyThresholdMs = this.getTimedLiveSimulationEarlyThresholdMs();
+    const lateThresholdMs = this.getTimedLiveSimulationLateThresholdMs();
+    if (offsetMs >= -earlyThresholdMs && offsetMs <= lateThresholdMs) {
       return 'correct';
     }
 
     const matchWindowMs = this.getTimedLiveSimulationMatchWindowMs();
-    if (Math.abs(offsetMs) > matchWindowMs) {
+    if (offsetMs < -matchWindowMs || offsetMs > matchWindowMs) {
       return 'miss';
     }
 
     return offsetMs < 0 ? 'early' : 'late';
   }
 
-  private getTimedLiveSimulationThresholdMs(): number {
-    return this.getPlaybackDelayMs(
-      PlayPageComponent.TIMED_LIVE_DEBUG_THRESHOLD_WHOLE_NOTES
-    );
-  }
-
   private getTimedLiveSimulationMatchWindowMs(): number {
-    return this.getPlaybackDelayMs(
-      PlayPageComponent.TIMED_LIVE_DEBUG_WINDOW_WHOLE_NOTES
+    return Math.max(
+      this.getPlaybackDelayMs(PlayPageComponent.TIMED_LIVE_DEBUG_WINDOW_WHOLE_NOTES),
+      this.getTimedLiveSimulationEarlyThresholdMs(),
+      this.getTimedLiveSimulationLateThresholdMs()
     );
   }
 
@@ -5528,13 +5840,16 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     const windowWholeNotes =
       PlayPageComponent.TIMED_LIVE_DEBUG_WINDOW_WHOLE_NOTES;
-    const thresholdWholeNotes =
-      PlayPageComponent.TIMED_LIVE_DEBUG_THRESHOLD_WHOLE_NOTES;
+    const earlyThresholdMs = this.getTimedLiveSimulationEarlyThresholdMs();
+    const lateThresholdMs = this.getTimedLiveSimulationLateThresholdMs();
+    const earlyThresholdWholeNotes = this.getPlaybackWholeNotesFromMs(
+      earlyThresholdMs
+    );
+    const lateThresholdWholeNotes = this.getPlaybackWholeNotesFromMs(
+      lateThresholdMs
+    );
     const windowMs = Math.round(
       this.getPlaybackDelayMs(windowWholeNotes)
-    );
-    const thresholdMs = Math.round(
-      this.getPlaybackDelayMs(thresholdWholeNotes)
     );
     const windowStartTimestamp = Math.max(
       timeline.startTimestamp,
@@ -5546,11 +5861,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     );
     const thresholdStartTimestamp = Math.max(
       timeline.startTimestamp,
-      scoreTimestamp - thresholdWholeNotes
+      scoreTimestamp - lateThresholdWholeNotes
     );
     const thresholdEndTimestamp = Math.min(
       timeline.endTimestamp,
-      scoreTimestamp + thresholdWholeNotes
+      scoreTimestamp + earlyThresholdWholeNotes
     );
 
     this.timedLiveCursorRenderState = {
@@ -5587,7 +5902,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         windowStartTimestamp,
         windowEndTimestamp
       ),
-      thresholdMs,
+      earlyThresholdMs,
+      lateThresholdMs,
       earlyThresholdVisible: this.timedLiveCursorThresholdMarkers.some(
         (marker) => marker.id === 'timed-live-threshold-early'
       ),
@@ -6861,13 +7177,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   keyNoteOn(time: number, pitch: number): void {
     const halbTone = pitch - 12;
     const name = halbTone.toFixed();
-    if (this.handleTimedLiveSimulatedAutoplayNoteOn(name)) {
-      if (this.notesService.isRequiredNotesPressed()) {
-        this.osmdCursorPlayMoveNext(true);
-      }
-      if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
-      return;
-    }
 
     const pitchLabel = this.noteKeyToLabel(name);
     const requiredPressKeys = this.getCurrentRequiredPressKeys();
@@ -6945,21 +7254,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   keyNoteOff(time: number, pitch: number): void {
     const halbTone = pitch - 12;
     const name = halbTone.toFixed();
-    if (
-      this.shouldUseTimedLiveSimulatedFeedback() &&
-      this.isTimedLiveSimulatedHeldNote(name)
-    ) {
-      const remainingHeldCount = this.releaseTimedLiveSimulatedHeldNote(name);
-      if (remainingHeldCount <= 0) {
-        this.notesService.release(name);
-        this.correctlyHeldPracticeKeys.delete(name);
-      }
-      if (this.notesService.isRequiredNotesPressed()) {
-        this.osmdCursorPlayMoveNext(true);
-      }
-      if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
-      return;
-    }
 
     const suppressAutoplayFeedback =
       this.shouldSuppressListenAutoplayFeedbackForName(name);

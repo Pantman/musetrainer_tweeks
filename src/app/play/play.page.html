@@ -221,6 +221,7 @@
       class="realtime-debug-panel realtime-debug-panel--bottom"
       *ngIf="showTimedLiveCursorDebugPanel()"
       [ngStyle]="getTimedLiveCursorDebugPanelStyle()"
+      (wheel)="handleTimedLiveCursorDebugPanelWheel($event)"
     >
       <div
         class="realtime-debug-panel__drag-handle"
@@ -243,6 +244,35 @@
             type="number"
             [(ngModel)]="timedLiveSimulatedTimingOffsetMs"
             (ngModelChange)="handleTimedLiveSimulatedInputChange()"
+            step="10"
+          />
+        </label>
+        <label class="realtime-debug-panel__control realtime-debug-panel__control--stacked">
+          <span>pitch st +/-</span>
+          <input
+            type="number"
+            [(ngModel)]="timedLiveSimulatedPitchOffsetSemitones"
+            (ngModelChange)="handleTimedLiveSimulatedInputChange()"
+            step="1"
+          />
+        </label>
+        <label class="realtime-debug-panel__control realtime-debug-panel__control--stacked">
+          <span>early ms</span>
+          <input
+            type="number"
+            [(ngModel)]="timedLiveSimulationEarlyThresholdMs"
+            (ngModelChange)="handleTimedLiveSimulationThresholdChange()"
+            min="0"
+            step="10"
+          />
+        </label>
+        <label class="realtime-debug-panel__control realtime-debug-panel__control--stacked">
+          <span>late ms</span>
+          <input
+            type="number"
+            [(ngModel)]="timedLiveSimulationLateThresholdMs"
+            (ngModelChange)="handleTimedLiveSimulationThresholdChange()"
+            min="0"
             step="10"
           />
         </label>
