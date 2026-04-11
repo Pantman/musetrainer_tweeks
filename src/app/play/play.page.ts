@@ -138,6 +138,7 @@ interface TimedLiveCursorNote {
   halfTone: number;
   staffId: number | null;
   actionable: boolean;
+  soundingDurationWholeNotes: number;
   left: number | null;
   top: number | null;
   width: number;
@@ -256,6 +257,22 @@ interface TimedLiveSimulatedFeedbackStats {
   early: number;
   late: number;
   missed: number;
+}
+
+type TimedLiveSimulatedFeedbackTimingClass =
+  | 'correct'
+  | 'early'
+  | 'late'
+  | 'miss';
+
+interface TimedLiveSimulatedPendingNote {
+  event: TimedLiveCursorEvent;
+  note: TimedLiveCursorNote;
+  timingClass: TimedLiveSimulatedFeedbackTimingClass;
+  hitTimestamp: number;
+  playedHalfTone: number;
+  loopPass: number;
+  index: number;
 }
 
 interface RealtimeDebugStats {
@@ -427,7 +444,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     late: 0,
     missed: 0,
   };
+  private timedLiveSimulatedScheduleTimeouts: NodeJS.Timeout[] = [];
   private timedLiveSimulatedFeedbackTimeouts: NodeJS.Timeout[] = [];
+  private timedLiveSimulatedPendingNotes = new Map<
+    string,
+    TimedLiveSimulatedPendingNote[]
+  >();
+  private timedLiveSimulatedHeldNotes = new Map<string, number>();
+  private timedLiveSimulatedOutputTokens = new Map<number, number>();
+  private timedLiveSimulatedOutputTokenSeed = 0;
   private museDebugConsoleRelay = {
     wrap: false,
     realtime: false,
@@ -928,7 +953,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
     if (!this.showTimedLiveCursorDebugOverlay) {
       this.onTimedLiveCursorDebugPanelPointerUp();
-      this.clearTimedLiveSimulatedFeedbackTimeouts();
+      this.stopTimedLiveSimulatedFeedbackPlayback(
+        this.running &&
+          this.listenMode &&
+          this.timedLiveSimulatedInputEnabled &&
+          this.hasActiveTimedLiveSimulatedOutput()
+      );
       this.resetTimedLiveSimulatedFeedbackStats();
       this.resetTimingFeedbackNoteheads();
     }
@@ -937,8 +967,27 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   handleTimedLiveSimulatedInputChange(): void {
+    const shouldContinueSimulation = this.shouldUseTimedLiveSimulatedFeedback();
+    const shouldHandoffToListenPlayback =
+      !shouldContinueSimulation &&
+      this.running &&
+      this.listenMode &&
+      this.hasActiveTimedLiveSimulatedOutput();
+
+    if (shouldContinueSimulation) {
+      this.clearTimedLiveSimulatedScheduleTimeouts();
+    } else if (shouldHandoffToListenPlayback) {
+      this.stopTimedLiveSimulatedFeedbackPlayback(true);
+    } else if (this.hasTimedLiveSimulatedFeedbackActivity()) {
+      this.stopTimedLiveSimulatedFeedbackPlayback();
+    } else {
+      this.clearTimedLiveSimulatedFeedbackTimeouts();
+    }
+
     this.updateLegacyPlayCursorDebugVisibility();
-    this.scheduleTimedLiveSimulatedFeedback(true);
+    if (shouldContinueSimulation) {
+      this.scheduleTimedLiveSimulatedFeedback(true);
+    }
   }
 
   // Reset selection on measures and set the cursor to the origin
@@ -1045,7 +1094,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.pendingTimedStartBootstrapAdvance = false;
     this.correctlyHeldPracticeKeys.clear();
     this.stopTimedLiveCursorDebugLoop(true);
-    this.clearTimedLiveSimulatedFeedbackTimeouts();
+    this.stopTimedLiveSimulatedFeedbackPlayback();
     this.resetTimedLiveSimulatedFeedbackStats();
     this.updateLegacyPlayCursorDebugVisibility();
     this.refreshCursorDebugMarkersDeferred();
@@ -1350,7 +1399,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private restartLoopPlayback(): void {
     this.seedPendingLoopRestartAudioTime();
-    this.clearTimedLiveSimulatedFeedbackTimeouts();
+    this.stopTimedLiveSimulatedFeedbackPlayback();
     this.osmdResetFeedback();
     this.loopPass++;
     this.markCursorTraceLoopBoundary('loop wrap');
@@ -1798,6 +1847,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   playNote(audioTime?: number): void {
+    if (this.shouldUseTimedLiveSimulatedFeedback()) {
+      if (this.skipPlayNotes > 0) {
+        this.skipPlayNotes--;
+      }
+      return;
+    }
+
     if (this.skipPlayNotes > 0) {
       this.appendCursorWrapDebugEvent(
         `play skip consume ${this.skipPlayNotes} at ${this.formatScoreTimestamp(
@@ -4455,6 +4511,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           staffId:
             note.graphicalNote?.sourceNote?.ParentStaff?.idInMusicSheet ?? null,
           actionable: this.isActionableGraphicalPracticeNote(note.graphicalNote),
+          soundingDurationWholeNotes: this.getTimedLiveGraphicalNoteDuration(
+            note.graphicalNote
+          ),
           left: placement ? placement.left + placement.width / 2 : null,
           top: placement ? placement.top + placement.height / 2 : null,
           width: placement ? placement.width : 10,
@@ -4878,8 +4937,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    cursorElement.style.opacity =
-      this.showTimedLiveCursorDebugOverlay && this.listenMode ? '0.12' : '';
+    cursorElement.style.opacity = this.shouldUseTimedLiveSimulatedFeedback()
+      ? '0'
+      : this.showTimedLiveCursorDebugOverlay && this.listenMode
+        ? '0.12'
+        : '';
   }
 
   private shouldUseTimedLiveSimulatedFeedback(): boolean {
@@ -4897,6 +4959,150 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     );
   }
 
+  private enqueueTimedLiveSimulatedPendingNote(
+    pendingNote: TimedLiveSimulatedPendingNote
+  ): void {
+    const key = pendingNote.playedHalfTone.toFixed();
+    const pendingNotes = this.timedLiveSimulatedPendingNotes.get(key) ?? [];
+    pendingNotes.push(pendingNote);
+    this.timedLiveSimulatedPendingNotes.set(key, pendingNotes);
+  }
+
+  private consumeTimedLiveSimulatedPendingNote(
+    name: string
+  ): TimedLiveSimulatedPendingNote | null {
+    const pendingNotes = this.timedLiveSimulatedPendingNotes.get(name);
+    if (!pendingNotes || pendingNotes.length === 0) {
+      return null;
+    }
+
+    const pendingNote = pendingNotes.shift() ?? null;
+    if (pendingNotes.length === 0) {
+      this.timedLiveSimulatedPendingNotes.delete(name);
+    }
+
+    return pendingNote;
+  }
+
+  private incrementTimedLiveSimulatedHeldNote(name: string): void {
+    this.timedLiveSimulatedHeldNotes.set(
+      name,
+      (this.timedLiveSimulatedHeldNotes.get(name) ?? 0) + 1
+    );
+  }
+
+  private releaseTimedLiveSimulatedHeldNote(name: string): number {
+    const count = (this.timedLiveSimulatedHeldNotes.get(name) ?? 0) - 1;
+    if (count > 0) {
+      this.timedLiveSimulatedHeldNotes.set(name, count);
+      return count;
+    }
+
+    this.timedLiveSimulatedHeldNotes.delete(name);
+    return 0;
+  }
+
+  private isTimedLiveSimulatedHeldNote(name: string): boolean {
+    return (this.timedLiveSimulatedHeldNotes.get(name) ?? 0) > 0;
+  }
+
+  private hasTimedLiveSimulatedFeedbackActivity(): boolean {
+    return (
+      this.timedLiveSimulatedScheduleTimeouts.length > 0 ||
+      this.timedLiveSimulatedFeedbackTimeouts.length > 0 ||
+      this.timedLiveSimulatedPendingNotes.size > 0 ||
+      this.timedLiveSimulatedHeldNotes.size > 0 ||
+      this.timedLiveSimulatedOutputTokens.size > 0
+    );
+  }
+
+  private hasActiveTimedLiveSimulatedOutput(): boolean {
+    return (
+      this.timedLiveSimulatedHeldNotes.size > 0 ||
+      this.timedLiveSimulatedOutputTokens.size > 0
+    );
+  }
+
+  private clearTimedLiveSimulatedPendingState(): void {
+    this.timedLiveSimulatedPendingNotes.clear();
+    this.timedLiveSimulatedHeldNotes.clear();
+    this.timedLiveSimulatedOutputTokens.clear();
+  }
+
+  private clearTimedLiveSimulatedReflectedState(noteNames: string[]): void {
+    noteNames.forEach((name) => {
+      this.mapNotesAutoPressed.delete(name);
+      this.notesService.release(name);
+      this.correctlyHeldPracticeKeys.delete(name);
+    });
+  }
+
+  private commitTimedLiveSimulatedFeedbackNote(
+    pendingNote: TimedLiveSimulatedPendingNote
+  ): void {
+    const renderState = this.resolveTimedLiveCursorRenderAtTimestamp(
+      pendingNote.hitTimestamp
+    );
+    const placement = this.getTimedLiveSimulatedFeedbackPlacement(
+      pendingNote.note,
+      pendingNote.timingClass,
+      renderState?.left ?? null
+    );
+
+    this.timedLiveSimulatedFeedbackStats.triggered++;
+    if (pendingNote.timingClass === 'correct') {
+      this.timedLiveSimulatedFeedbackStats.onTime++;
+    } else if (pendingNote.timingClass === 'early') {
+      this.timedLiveSimulatedFeedbackStats.early++;
+    } else if (pendingNote.timingClass === 'late') {
+      this.timedLiveSimulatedFeedbackStats.late++;
+    } else {
+      this.timedLiveSimulatedFeedbackStats.missed++;
+    }
+
+    if (!placement) {
+      return;
+    }
+
+    const id = `timed-feedback-${pendingNote.loopPass}-${pendingNote.event.timestamp}-${pendingNote.note.staffId ?? 'all'}-${pendingNote.playedHalfTone}-${pendingNote.timingClass}-${pendingNote.index}`;
+    const className =
+      pendingNote.timingClass === 'correct'
+        ? 'feedback-notehead feedback-notehead--correct'
+        : pendingNote.timingClass === 'early'
+          ? 'feedback-notehead feedback-notehead--early'
+          : pendingNote.timingClass === 'late'
+            ? 'feedback-notehead feedback-notehead--late'
+            : 'feedback-notehead feedback-notehead--miss';
+
+    this.renderFeedbackNotehead(
+      this.timingFeedbackNoteheadElements,
+      className,
+      id,
+      placement
+    );
+  }
+
+  private handleTimedLiveSimulatedAutoplayNoteOn(name: string): boolean {
+    if (
+      !this.shouldUseTimedLiveSimulatedFeedback() ||
+      !this.isTimedLiveSimulatedHeldNote(name)
+    ) {
+      return false;
+    }
+
+    const pendingNote = this.consumeTimedLiveSimulatedPendingNote(name);
+    if (!pendingNote) {
+      return true;
+    }
+
+    this.notesService.press(name);
+    if (pendingNote.timingClass === 'correct') {
+      this.correctlyHeldPracticeKeys.add(name);
+    }
+    this.commitTimedLiveSimulatedFeedbackNote(pendingNote);
+    return true;
+  }
+
   private resetTimedLiveSimulatedFeedbackStats(): void {
     this.timedLiveSimulatedFeedbackStats = {
       scheduled: 0,
@@ -4908,17 +5114,131 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     };
   }
 
+  private clearTimedLiveSimulatedScheduleTimeouts(): void {
+    this.timedLiveSimulatedScheduleTimeouts.forEach((timeout) =>
+      clearTimeout(timeout)
+    );
+    this.timedLiveSimulatedScheduleTimeouts = [];
+  }
+
   private clearTimedLiveSimulatedFeedbackTimeouts(): void {
+    this.clearTimedLiveSimulatedScheduleTimeouts();
     this.timedLiveSimulatedFeedbackTimeouts.forEach((timeout) =>
       clearTimeout(timeout)
     );
     this.timedLiveSimulatedFeedbackTimeouts = [];
+    this.clearTimedLiveSimulatedPendingState();
+  }
+
+  private stopTimedLiveSimulatedFeedbackPlayback(
+    handoffToListenPlayback: boolean = false
+  ): void {
+    const activeOutputPitches = Array.from(this.timedLiveSimulatedOutputTokens.keys());
+    const reflectedNoteNames = Array.from(this.timedLiveSimulatedHeldNotes.keys());
+
+    this.clearTimedLiveSimulatedFeedbackTimeouts();
+    this.clearTimedLiveSimulatedReflectedState(reflectedNoteNames);
+
+    if (activeOutputPitches.length === 0) {
+      if (reflectedNoteNames.length > 0 && this.pianoKeyboard) {
+        this.pianoKeyboard.updateNotesStatus();
+      }
+      if (
+        handoffToListenPlayback &&
+        this.running &&
+        this.listenMode &&
+        reflectedNoteNames.length > 0
+      ) {
+        const handoffAudioTime = this.getScheduledAudioTime();
+        this.appendCursorWrapDebugEvent(
+          `sim handoff ${handoffAudioTime.toFixed(3)}`
+        );
+        this.playNote(handoffAudioTime);
+      }
+      return;
+    }
+
+    const handoffAudioTime = handoffToListenPlayback
+      ? this.getScheduledAudioTime()
+      : undefined;
+    const releaseAudioTime =
+      typeof handoffAudioTime === 'number' && Number.isFinite(handoffAudioTime)
+        ? this.getRetriggerReleaseAudioTime(handoffAudioTime) ?? handoffAudioTime
+        : this.getScheduledAudioTime();
+
+    activeOutputPitches.forEach((pitch) => {
+      this.sendOutputNoteOff(pitch, releaseAudioTime);
+    });
+
+    if (reflectedNoteNames.length > 0 && this.pianoKeyboard) {
+      this.pianoKeyboard.updateNotesStatus();
+    }
+
+    if (handoffToListenPlayback && this.running && this.listenMode) {
+      this.appendCursorWrapDebugEvent(`sim handoff ${handoffAudioTime?.toFixed(3)}`);
+      this.playNote(handoffAudioTime);
+    }
+  }
+
+  private scheduleTimedLiveSimulatedCallback(
+    callback: () => void,
+    delayMs: number,
+    type: 'schedule' | 'playback' = 'playback'
+  ): void {
+    const timeout = setTimeout(callback, Math.max(delayMs, 0));
+    if (type === 'schedule') {
+      this.timedLiveSimulatedScheduleTimeouts.push(timeout);
+      return;
+    }
+
+    this.timedLiveSimulatedFeedbackTimeouts.push(timeout);
+  }
+
+  private scheduleTimedLiveSimulatedStateNoteOn(
+    pitch: number,
+    delayMs: number
+  ): void {
+    this.scheduleTimedLiveSimulatedCallback(() => {
+      this.applyTimedLiveSimulatedStateNoteOn(pitch);
+    }, delayMs);
+  }
+
+  private scheduleTimedLiveSimulatedStateNoteOff(
+    pitch: number,
+    delayMs: number
+  ): void {
+    this.scheduleTimedLiveSimulatedCallback(() => {
+      this.applyTimedLiveSimulatedStateNoteOff(pitch);
+    }, delayMs);
+  }
+
+  private applyTimedLiveSimulatedStateNoteOn(pitch: number): void {
+    if (!this.running || !this.shouldUseTimedLiveSimulatedFeedback()) {
+      return;
+    }
+
+    this.mapNotesAutoPressed.set((pitch - 12).toFixed(), 1);
+    this.keyNoteOn(Date.now() - this.timePlayStart, pitch);
+  }
+
+  private applyTimedLiveSimulatedStateNoteOff(pitch: number): void {
+    this.mapNotesAutoPressed.delete((pitch - 12).toFixed());
+    this.keyNoteOff(Date.now() - this.timePlayStart, pitch);
+  }
+
+  private getTimedLiveSimulatedAudioScheduleLeadMs(delayMs: number): number {
+    const scheduleLeadMs = PlayPageComponent.AUDIO_SCHEDULE_AHEAD_SEC * 1000;
+    if (!Number.isFinite(delayMs) || delayMs <= 0) {
+      return 0;
+    }
+
+    return Math.min(Math.max(delayMs - 1, 0), scheduleLeadMs);
   }
 
   private scheduleTimedLiveSimulatedFeedback(
     fromCurrentPosition: boolean = false
   ): void {
-    this.clearTimedLiveSimulatedFeedbackTimeouts();
+    this.clearTimedLiveSimulatedScheduleTimeouts();
     if (fromCurrentPosition) {
       this.timedLiveSimulatedFeedbackStats = {
         ...this.timedLiveSimulatedFeedbackStats,
@@ -4966,7 +5286,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           return;
         }
 
-        const timeout = setTimeout(() => {
+        const onsetDelayMs = Math.max(rawDelayMs, 0);
+        const audioLeadMs =
+          this.getTimedLiveSimulatedAudioScheduleLeadMs(onsetDelayMs);
+        const audioScheduleDelayMs = onsetDelayMs - audioLeadMs;
+
+        this.scheduleTimedLiveSimulatedCallback(() => {
           if (
             !this.running ||
             !this.shouldUseTimedLiveSimulatedFeedback() ||
@@ -4980,11 +5305,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
             note,
             offsetWholeNotes,
             offsetMs,
-            index
+            index,
+            rawDelayMs,
+            audioLeadMs
           );
-        }, Math.max(rawDelayMs, 0));
-
-        this.timedLiveSimulatedFeedbackTimeouts.push(timeout);
+        }, audioScheduleDelayMs, 'schedule');
         this.timedLiveSimulatedFeedbackStats.scheduled++;
       });
     });
@@ -4993,8 +5318,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private getTimedLiveSimulatedFeedbackNotesForEvent(
     event: TimedLiveCursorEvent
   ): TimedLiveCursorNote[] {
-    const actionableNotes = event.notes.filter((note) => note.actionable);
-    return actionableNotes.length > 0 ? actionableNotes : event.notes;
+    return event.notes.filter((note) => note.actionable);
   }
 
   private triggerTimedLiveSimulatedFeedbackNote(
@@ -5002,47 +5326,112 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     note: TimedLiveCursorNote,
     offsetWholeNotes: number,
     offsetMs: number,
-    index: number
+    index: number,
+    rawDelayMs: number = 0,
+    stateDelayMs: number = 0
   ): void {
     const timingClass = this.classifyTimedLiveSimulatedFeedback(offsetMs);
-    const hitTimestamp = event.timestamp + offsetWholeNotes;
-    const renderState = this.resolveTimedLiveCursorRenderAtTimestamp(hitTimestamp);
-    const placement = this.getTimedLiveSimulatedFeedbackPlacement(
-      note,
-      timingClass,
-      renderState?.left ?? null
-    );
-    if (!placement) {
-      return;
+    const pitch = note.halfTone + 12;
+    if (Number.isFinite(pitch)) {
+      const hitTimestamp = event.timestamp + offsetWholeNotes;
+      const name = note.halfTone.toFixed();
+      this.enqueueTimedLiveSimulatedPendingNote({
+        event,
+        note,
+        timingClass,
+        hitTimestamp,
+        playedHalfTone: note.halfTone,
+        loopPass: this.loopPass,
+        index,
+      });
+      this.incrementTimedLiveSimulatedHeldNote(name);
+      const cueDurationMs = this.getTimedLiveSimulatedCueDurationMs(
+        note,
+        rawDelayMs
+      );
+      const audioTime = this.getTimedLiveSimulatedAudioTime(hitTimestamp);
+      this.playTimedLiveSimulatedOutputNote(
+        pitch,
+        60,
+        cueDurationMs,
+        cueDurationMs + Math.max(stateDelayMs, 0),
+        audioTime,
+        stateDelayMs
+      );
+    }
+  }
+
+  private playTimedLiveSimulatedOutputNote(
+    pitch: number,
+    velocity: number,
+    durationMs: number,
+    releaseDelayMs: number,
+    audioTime?: number,
+    stateDelayMs: number = 0
+  ): void {
+    const previousToken = this.timedLiveSimulatedOutputTokens.get(pitch);
+    if (previousToken !== undefined) {
+      this.sendOutputNoteOff(
+        pitch,
+        this.getRetriggerReleaseAudioTime(audioTime) ?? audioTime
+      );
+      this.scheduleTimedLiveSimulatedStateNoteOff(pitch, stateDelayMs);
     }
 
-    this.timedLiveSimulatedFeedbackStats.triggered++;
-    if (timingClass === 'correct') {
-      this.timedLiveSimulatedFeedbackStats.onTime++;
-    } else if (timingClass === 'early') {
-      this.timedLiveSimulatedFeedbackStats.early++;
-    } else if (timingClass === 'late') {
-      this.timedLiveSimulatedFeedbackStats.late++;
-    } else {
-      this.timedLiveSimulatedFeedbackStats.missed++;
+    const token = ++this.timedLiveSimulatedOutputTokenSeed;
+    this.timedLiveSimulatedOutputTokens.set(pitch, token);
+    this.sendOutputNoteOn(pitch, velocity, audioTime);
+    this.scheduleTimedLiveSimulatedStateNoteOn(pitch, stateDelayMs);
+
+    this.scheduleTimedLiveSimulatedCallback(() => {
+      if (
+        !this.running ||
+        !this.shouldUseTimedLiveSimulatedFeedback() ||
+        this.timedLiveSimulatedOutputTokens.get(pitch) !== token
+      ) {
+        return;
+      }
+
+      this.timedLiveSimulatedOutputTokens.delete(pitch);
+      const releaseAudioTime =
+        typeof audioTime === 'number' && Number.isFinite(audioTime)
+          ? audioTime + durationMs / 1000
+          : undefined;
+      this.sendOutputNoteOff(pitch, releaseAudioTime);
+      this.applyTimedLiveSimulatedStateNoteOff(pitch);
+    }, releaseDelayMs);
+  }
+
+  private getTimedLiveSimulatedAudioTime(
+    scoreTimestamp: number
+  ): number | undefined {
+    const playbackStartAudioTimeSec = this.playbackStartAudioTimeSec;
+    if (
+      typeof playbackStartAudioTimeSec !== 'number' ||
+      !Number.isFinite(playbackStartAudioTimeSec) ||
+      !Number.isFinite(this.playbackStartScoreTimestamp)
+    ) {
+      return undefined;
     }
 
-    const id = `timed-feedback-${this.loopPass}-${event.timestamp}-${note.staffId ?? 'all'}-${note.halfTone}-${timingClass}-${index}`;
-    const className =
-      timingClass === 'correct'
-        ? 'feedback-notehead feedback-notehead--correct'
-        : timingClass === 'early'
-          ? 'feedback-notehead feedback-notehead--early'
-          : timingClass === 'late'
-            ? 'feedback-notehead feedback-notehead--late'
-            : 'feedback-notehead feedback-notehead--miss';
-
-    this.renderFeedbackNotehead(
-      this.timingFeedbackNoteheadElements,
-      className,
-      id,
-      placement
+    const offsetMs = this.getPlaybackDelayMs(
+      scoreTimestamp - this.playbackStartScoreTimestamp
     );
+    if (!Number.isFinite(offsetMs)) {
+      return undefined;
+    }
+
+    return playbackStartAudioTimeSec + offsetMs / 1000;
+  }
+
+  private getTimedLiveSimulatedCueDurationMs(
+    note: TimedLiveCursorNote,
+    rawDelayMs: number = 0
+  ): number {
+    const eventDurationMs = this.getPlaybackDelayMs(
+      Math.max(note.soundingDurationWholeNotes, 1 / 32)
+    );
+    return Math.max(40, eventDurationMs + Math.min(rawDelayMs, 0));
   }
 
   private classifyTimedLiveSimulatedFeedback(
@@ -5762,6 +6151,30 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     );
   }
 
+  private getTimedLiveGraphicalNoteDuration(graphicalNote: any): number {
+    const sourceNote = graphicalNote?.sourceNote;
+    if (!sourceNote) {
+      return 0;
+    }
+
+    const tieNotes = Array.isArray(sourceNote.NoteTie?.notes)
+      ? sourceNote.NoteTie.notes
+      : null;
+    if (
+      tieNotes &&
+      tieNotes.length > 0 &&
+      sourceNote === sourceNote.NoteTie?.StartNote
+    ) {
+      return tieNotes.reduce((total: number, tieNote: any) => {
+        const length = tieNote?.Length?.RealValue;
+        return total + (Number.isFinite(length) ? Number(length) : 0);
+      }, 0);
+    }
+
+    const length = sourceNote.Length?.RealValue;
+    return Number.isFinite(length) ? Number(length) : 0;
+  }
+
   private getMeasureTimestampX(
     measure: any,
     timestamp: number,
@@ -6372,13 +6785,30 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.keyPressNoteInternal(pitch, velocity, audioTime, true);
   }
 
+  private sendOutputNoteOn(
+    pitch: number,
+    velocity: number,
+    audioTime?: number
+  ): void {
+    this.appendScheduledAudioDebugEvent('on', pitch, audioTime);
+
+    if (this.midiAvailable && this.checkboxMidiOut) {
+      CapacitorMuseTrainerMidi.sendCommand({
+        command: [0x90, pitch, velocity],
+        timestamp: performance.now(),
+      }).catch((e) => console.error(e));
+      return;
+    }
+
+    this.piano?.keyDown({ midi: pitch, time: audioTime });
+  }
+
   keyPressNoteInternal(
     pitch: number,
     velocity: number,
     audioTime?: number,
     reflectInput: boolean = true
   ): void {
-    this.appendScheduledAudioDebugEvent('on', pitch, audioTime);
     this.mapNotesAutoPressed.set((pitch - 12).toFixed(), 1);
     if (reflectInput) {
       this.timeouts.push(
@@ -6388,14 +6818,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       );
     }
 
-    if (this.midiAvailable && this.checkboxMidiOut) {
-      CapacitorMuseTrainerMidi.sendCommand({
-        command: [0x90, pitch, velocity],
-        timestamp: performance.now(),
-      }).catch((e) => console.error(e));
-    } else {
-      this.piano?.keyDown({ midi: pitch, time: audioTime });
-    }
+    this.sendOutputNoteOn(pitch, velocity, audioTime);
   }
 
   // Release note on Ouput MIDI Device
@@ -6403,12 +6826,25 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.keyReleaseNoteInternal(pitch, audioTime, true);
   }
 
+  private sendOutputNoteOff(pitch: number, audioTime?: number): void {
+    this.appendScheduledAudioDebugEvent('off', pitch, audioTime);
+
+    if (this.midiAvailable && this.checkboxMidiOut) {
+      CapacitorMuseTrainerMidi.sendCommand({
+        command: [0x80, pitch, 0x00],
+        timestamp: performance.now(),
+      }).catch((e) => console.error(e));
+      return;
+    }
+
+    this.piano?.keyUp({ midi: pitch, time: audioTime });
+  }
+
   keyReleaseNoteInternal(
     pitch: number,
     audioTime?: number,
     reflectInput: boolean = true
   ): void {
-    this.appendScheduledAudioDebugEvent('off', pitch, audioTime);
     this.mapNotesAutoPressed.delete((pitch - 12).toFixed());
     if (reflectInput) {
       this.timeouts.push(
@@ -6418,20 +6854,21 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       );
     }
 
-    if (this.midiAvailable && this.checkboxMidiOut) {
-      CapacitorMuseTrainerMidi.sendCommand({
-        command: [0x80, pitch, 0x00],
-        timestamp: performance.now(),
-      }).catch((e) => console.error(e));
-    } else {
-      this.piano?.keyUp({ midi: pitch, time: audioTime });
-    }
+    this.sendOutputNoteOff(pitch, audioTime);
   }
 
   // Input note pressed
   keyNoteOn(time: number, pitch: number): void {
     const halbTone = pitch - 12;
     const name = halbTone.toFixed();
+    if (this.handleTimedLiveSimulatedAutoplayNoteOn(name)) {
+      if (this.notesService.isRequiredNotesPressed()) {
+        this.osmdCursorPlayMoveNext(true);
+      }
+      if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
+      return;
+    }
+
     const pitchLabel = this.noteKeyToLabel(name);
     const requiredPressKeys = this.getCurrentRequiredPressKeys();
     const acceptedLateRealtimeNote = this.isAcceptedLateRealtimeNote(name);
@@ -6508,6 +6945,22 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   keyNoteOff(time: number, pitch: number): void {
     const halbTone = pitch - 12;
     const name = halbTone.toFixed();
+    if (
+      this.shouldUseTimedLiveSimulatedFeedback() &&
+      this.isTimedLiveSimulatedHeldNote(name)
+    ) {
+      const remainingHeldCount = this.releaseTimedLiveSimulatedHeldNote(name);
+      if (remainingHeldCount <= 0) {
+        this.notesService.release(name);
+        this.correctlyHeldPracticeKeys.delete(name);
+      }
+      if (this.notesService.isRequiredNotesPressed()) {
+        this.osmdCursorPlayMoveNext(true);
+      }
+      if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
+      return;
+    }
+
     const suppressAutoplayFeedback =
       this.shouldSuppressListenAutoplayFeedbackForName(name);
     this.updateRealtimeDebugWindow();
