@@ -228,6 +228,25 @@
       >
         timed live cursor
       </div>
+      <div class="realtime-debug-panel__controls">
+        <label class="realtime-debug-panel__control">
+          <input
+            type="checkbox"
+            [(ngModel)]="timedLiveSimulatedInputEnabled"
+            (ngModelChange)="handleTimedLiveSimulatedInputChange()"
+          />
+          <span>simulate input</span>
+        </label>
+        <label class="realtime-debug-panel__control realtime-debug-panel__control--stacked">
+          <span>timing ms +/-</span>
+          <input
+            type="number"
+            [(ngModel)]="timedLiveSimulatedTimingOffsetMs"
+            (ngModelChange)="handleTimedLiveSimulatedInputChange()"
+            step="10"
+          />
+        </label>
+      </div>
       <div *ngFor="let line of getTimedLiveCursorDebugSummaryLines()">{{ line }}</div>
     </div>
   </div>

@@ -134,6 +134,34 @@ ion-input{
   cursor: grabbing;
 }
 
+.realtime-debug-panel__controls {
+  display: flex;
+  gap: 0.6rem;
+  margin-bottom: 0.55rem;
+}
+
+.realtime-debug-panel__control {
+  align-items: center;
+  display: flex;
+  gap: 0.35rem;
+}
+
+.realtime-debug-panel__control--stacked {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.realtime-debug-panel__control input[type='number'] {
+  background: rgb(15 23 42 / 0.95);
+  border: 1px solid rgb(148 163 184 / 0.45);
+  border-radius: 0.35rem;
+  color: #f8fafc;
+  font: inherit;
+  padding: 0.15rem 0.35rem;
+  width: 5.5rem;
+}
+
 .realtime-debug-panel__events {
   border-top: 1px solid rgb(148 163 184 / 0.35);
   margin-top: 0.45rem;

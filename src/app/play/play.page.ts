@@ -37,6 +37,7 @@ declare global {
       playRealtime: () => void;
       stop: () => void;
       setTimedCursorDebug: (enabled?: boolean) => void;
+      setTimedCursorSim: (enabled?: boolean, offsetMs?: number) => void;
       enableConsoleRelay: (
         channel?: 'wrap' | 'realtime' | 'trace' | 'all',
         enabled?: boolean
@@ -139,6 +140,8 @@ interface TimedLiveCursorNote {
   actionable: boolean;
   left: number | null;
   top: number | null;
+  width: number;
+  height: number;
 }
 
 interface TimedLiveCursorEvent {
@@ -244,6 +247,14 @@ interface TimedLiveCursorDebugSessionTotals {
 interface TimedLiveCursorDebugPanelPosition {
   left: number;
   top: number;
+}
+
+interface TimedLiveSimulatedFeedbackStats {
+  scheduled: number;
+  triggered: number;
+  onTime: number;
+  early: number;
+  late: number;
 }
 
 interface RealtimeDebugStats {
@@ -364,8 +375,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   computerNotesService: NotesService;
   private correctNoteheadElements = new Map<string, HTMLElement>();
   private incorrectNoteheadElements = new Map<string, HTMLElement>();
+  private timingFeedbackNoteheadElements = new Map<string, HTMLElement>();
   private activePracticeNoteElements: SVGElement[] = [];
   private activePracticeGraphicalNotes: PracticeGraphicalNote[] = [];
+  private correctlyHeldPracticeKeys = new Set<string>();
   private realtimePreviousStepKeys = new Set<string>();
   private realtimePreviousStepMatchedKeys = new Set<string>();
   private realtimePreviousStepElements: SVGElement[] = [];
@@ -403,6 +416,16 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     null;
   private timedLiveCursorDebugPanelSize: { width: number; height: number } | null =
     null;
+  timedLiveSimulatedInputEnabled: boolean = false;
+  timedLiveSimulatedTimingOffsetMs: number = 0;
+  timedLiveSimulatedFeedbackStats: TimedLiveSimulatedFeedbackStats = {
+    scheduled: 0,
+    triggered: 0,
+    onTime: 0,
+    early: 0,
+    late: 0,
+  };
+  private timedLiveSimulatedFeedbackTimeouts: NodeJS.Timeout[] = [];
   private museDebugConsoleRelay = {
     wrap: false,
     realtime: false,
@@ -903,9 +926,24 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
     if (!this.showTimedLiveCursorDebugOverlay) {
       this.onTimedLiveCursorDebugPanelPointerUp();
+      this.clearTimedLiveSimulatedFeedbackTimeouts();
+      this.resetTimedLiveSimulatedFeedbackStats();
+      this.resetTimingFeedbackNoteheads();
     }
     this.updateLegacyPlayCursorDebugVisibility();
     this.syncTimedLiveCursorDebugLoop();
+  }
+
+  handleTimedLiveSimulatedInputChange(): void {
+    this.updateLegacyPlayCursorDebugVisibility();
+    this.clearTimedLiveSimulatedFeedbackTimeouts();
+    this.resetTimedLiveSimulatedFeedbackStats();
+    this.resetTimingFeedbackNoteheads();
+    if (!this.running || !this.listenMode) {
+      return;
+    }
+
+    this.scheduleTimedLiveSimulatedFeedback(true);
   }
 
   // Reset selection on measures and set the cursor to the origin
@@ -1010,7 +1048,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.lastPlayCursorTransitionDurationMs = 0;
     this.pendingDeferredTieStepAdvance = false;
     this.pendingTimedStartBootstrapAdvance = false;
+    this.correctlyHeldPracticeKeys.clear();
     this.stopTimedLiveCursorDebugLoop(true);
+    this.clearTimedLiveSimulatedFeedbackTimeouts();
+    this.resetTimedLiveSimulatedFeedbackStats();
     this.updateLegacyPlayCursorDebugVisibility();
     this.refreshCursorDebugMarkersDeferred();
   }
@@ -1024,6 +1065,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.markCursorTraceLoopBoundary('listen start');
     this.setTransportMode('listen');
     this.resetTimedLiveCursorDebugSession();
+    this.resetTimedLiveSimulatedFeedbackStats();
     this.syncTimedLiveCursorDebugLoop();
     this.startFlashCount = 0;
     this.osmdCursorStart();
@@ -1313,6 +1355,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private restartLoopPlayback(): void {
     this.seedPendingLoopRestartAudioTime();
+    this.clearTimedLiveSimulatedFeedbackTimeouts();
     this.osmdResetFeedback();
     this.loopPass++;
     this.markCursorTraceLoopBoundary('loop wrap');
@@ -1376,6 +1419,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
     this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
+    this.renderHeldTieContinuationNotesIfMatched();
 
     if (this.realtimeMode) {
       this.computerNotesService.calculateRequired(
@@ -1401,6 +1445,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.releaseComputerPressedNotes();
     this.computerNotesService.clear();
     this.notesService.clear();
+    this.correctlyHeldPracticeKeys.clear();
 
     Array.from(this.mapNotesAutoPressed.keys()).forEach((key) => {
       this.keyReleaseNoteInternal(parseInt(key) + 12, undefined, false);
@@ -1549,11 +1594,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   // Move cursor to next note
-  osmdCursorPlayMoveNext(): void {
+  osmdCursorPlayMoveNext(skipFeedback = false): void {
     // Required to stop next calls if stop is pressed during play
     if (!this.running) return;
 
-    if (this.notesService.getMapRequired().size > 0) {
+    if (!skipFeedback && this.notesService.getMapRequired().size > 0) {
       this.markCurrentNotesCorrect();
     }
 
@@ -1716,6 +1761,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     // Play initial notes
     if (this.listenMode) {
       this.playNote(audioTime);
+      this.scheduleTimedLiveSimulatedFeedback();
     } else if (this.realtimeMode) {
       this.playComputerNotes(audioTime);
     }
@@ -1792,6 +1838,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   osmdResetFeedback(): void {
     this.resetCorrectNoteheads();
     this.resetIncorrectNoteheads();
+    this.resetTimingFeedbackNoteheads();
+    this.correctlyHeldPracticeKeys.clear();
     let elems = document.getElementsByClassName('feedback');
     // Remove all elements
     while (elems.length > 0) {
@@ -1816,6 +1864,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       graphicalNotes,
       this.getCurrentPracticeTimestamp()
     );
+    this.rememberCorrectlyHeldPracticeNotes(graphicalNotes);
   }
 
   private markCurrentNoteCorrect(name: string): void {
@@ -1840,6 +1889,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       matchingNotes,
       this.getCurrentPracticeTimestamp()
     );
+    this.rememberCorrectlyHeldPracticeNotes(matchingNotes);
   }
 
   private markPreviousStepNoteCorrect(name: string): void {
@@ -1863,6 +1913,60 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.renderCorrectPracticeNotes(
       matchingNotes,
       this.realtimePreviousStepTimestamp
+    );
+    this.rememberCorrectlyHeldPracticeNotes(matchingNotes);
+  }
+
+  private rememberCorrectlyHeldPracticeNotes(
+    graphicalNotes: PracticeGraphicalNote[]
+  ): void {
+    graphicalNotes.forEach((note) => {
+      if (!this.isActionableGraphicalPracticeNote(note.graphicalNote)) {
+        return;
+      }
+
+      const key = note.halfTone.toString();
+      if (this.notesService.getMapPressed().has(key)) {
+        this.correctlyHeldPracticeKeys.add(key);
+      }
+    });
+  }
+
+  private renderHeldTieContinuationNotesIfMatched(): void {
+    if (!this.checkboxFeedback || this.activePracticeGraphicalNotes.length === 0) {
+      return;
+    }
+
+    const heldTieNotes = this.activePracticeGraphicalNotes.filter((note) => {
+      if (!this.isTieContinuationGraphicalPracticeNote(note)) {
+        return false;
+      }
+
+      const key = note.halfTone.toString();
+      return (
+        this.correctlyHeldPracticeKeys.has(key) &&
+        this.notesService.getMapPressed().has(key)
+      );
+    });
+
+    if (heldTieNotes.length === 0) {
+      return;
+    }
+
+    this.renderCorrectPracticeNotes(
+      heldTieNotes,
+      this.getCurrentPracticeTimestamp()
+    );
+  }
+
+  private isTieContinuationGraphicalPracticeNote(
+    note: PracticeGraphicalNote
+  ): boolean {
+    const sourceNote = note.graphicalNote?.sourceNote;
+    return (
+      !!sourceNote &&
+      typeof sourceNote.NoteTie !== 'undefined' &&
+      sourceNote !== sourceNote.NoteTie?.StartNote
     );
   }
 
@@ -1906,18 +2010,32 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     const isCorrect = className.includes('feedback-notehead--correct');
+    const isEarly = className.includes('feedback-notehead--early');
+    const isLate = className.includes('feedback-notehead--late');
     element.style.position = 'absolute';
     element.style.pointerEvents = 'none';
     element.style.borderRadius = '50% 48% 52% 50%';
     element.style.transform = 'rotate(-24deg)';
     element.style.zIndex = '3';
-    element.style.background = isCorrect ? '#16a34a' : '#dc2626';
+    element.style.background = isCorrect
+      ? '#16a34a'
+      : isEarly
+        ? '#f97316'
+        : isLate
+          ? '#7c3aed'
+          : '#dc2626';
     element.style.border = isCorrect
       ? '1px solid #166534'
-      : '1px solid #991b1b';
+      : isEarly
+        ? '1px solid #c2410c'
+        : isLate
+          ? '1px solid #5b21b6'
+          : '1px solid #991b1b';
     element.style.boxShadow = isCorrect
       ? '0 0 0 1px rgb(255 255 255 / 0.18)'
-      : '0 0 0 1px rgb(255 255 255 / 0.25)';
+      : isEarly || isLate
+        ? '0 0 0 1px rgb(255 255 255 / 0.22)'
+        : '0 0 0 1px rgb(255 255 255 / 0.25)';
 
     element.style.left = `${placement.left}px`;
     element.style.top = `${placement.top}px`;
@@ -2799,6 +2917,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.incorrectNoteheadElements.clear();
   }
 
+  private resetTimingFeedbackNoteheads(): void {
+    this.timingFeedbackNoteheadElements.forEach((element) => element.remove());
+    this.timingFeedbackNoteheadElements.clear();
+  }
+
   private getIncorrectNotePlacement(halfTone: number): {
     id: string;
     left: number;
@@ -3253,6 +3376,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         thresholds: [...this.timedLiveCursorThresholdMarkers],
         snapshot: this.timedLiveCursorDebugSnapshot,
         sessionTotals: { ...this.timedLiveCursorDebugSessionTotals },
+        simulatedInputEnabled: this.timedLiveSimulatedInputEnabled,
+        simulatedTimingOffsetMs: this.timedLiveSimulatedTimingOffsetMs,
+        simulatedFeedbackStats: { ...this.timedLiveSimulatedFeedbackStats },
       }),
       clearWrapLog: () => {
         this.cursorWrapDebugEvents = [];
@@ -3271,6 +3397,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       setTimedCursorDebug: (enabled = true) => {
         this.showTimedLiveCursorDebugOverlay = enabled;
         this.handleTimedLiveCursorDebugOverlayChange();
+      },
+      setTimedCursorSim: (enabled = true, offsetMs = this.timedLiveSimulatedTimingOffsetMs) => {
+        this.timedLiveSimulatedInputEnabled = enabled;
+        this.timedLiveSimulatedTimingOffsetMs = offsetMs;
+        this.handleTimedLiveSimulatedInputChange();
       },
       enableConsoleRelay: (channel = 'all', enabled = true) => {
         if (channel === 'all') {
@@ -3353,6 +3484,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       timedLiveCursorWindowCount: this.timedLiveCursorWindowRects.length,
       timedLiveCursorThresholdCount: this.timedLiveCursorThresholdMarkers.length,
       timedLiveCursorSnapshot: this.timedLiveCursorDebugSnapshot,
+      timedLiveSimulatedInputEnabled: this.timedLiveSimulatedInputEnabled,
+      timedLiveSimulatedTimingOffsetMs: this.timedLiveSimulatedTimingOffsetMs,
+      timedLiveSimulatedFeedbackStats: this.timedLiveSimulatedFeedbackStats,
     };
   }
 
@@ -4319,19 +4453,17 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const allTargets = this.getCursorTargetCenters(cursor, container);
     const notes = this.getPracticeGraphicalNotesForCursor(cursor)
       .map((note) => {
-        const rect = this.getAnchorDomRect(
-          note.anchorElement,
-          note.groupElement,
-          container
-        );
+        const placement = this.getRenderedNoteheadPlacement(note);
 
         return {
           halfTone: note.halfTone,
           staffId:
             note.graphicalNote?.sourceNote?.ParentStaff?.idInMusicSheet ?? null,
           actionable: this.isActionableGraphicalPracticeNote(note.graphicalNote),
-          left: rect ? rect.left + rect.width / 2 : null,
-          top: rect ? rect.top + rect.height / 2 : null,
+          left: placement ? placement.left + placement.width / 2 : null,
+          top: placement ? placement.top + placement.height / 2 : null,
+          width: placement ? placement.width : 10,
+          height: placement ? placement.height : 8,
         };
       })
       .sort((a, b) => {
@@ -4538,11 +4670,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     return [
       `${this.transportMode ?? 'idle'} loop ${this.loopPass} score ${currentScoreLabel}`,
+      `sim ${this.timedLiveSimulatedInputEnabled ? `${this.timedLiveSimulatedTimingOffsetMs}ms` : 'off'} hits ${this.timedLiveSimulatedFeedbackStats.triggered}/${this.timedLiveSimulatedFeedbackStats.scheduled}`,
       `event ${snapshot.currentEventLabel}`,
       `segment ${snapshot.currentSegmentLabel} prog ${progressLabel}`,
       `window ${this.formatScoreTimestamp(snapshot.windowStartTimestamp)} -> ${this.formatScoreTimestamp(snapshot.windowEndTimestamp)}`,
       `notes ${windowNoteSummary || 'none'} win ${snapshot.windowMs}ms thr ${snapshot.thresholdMs}ms`,
       `early ${snapshot.earlyThresholdVisible ? 'on' : 'off'} late ${snapshot.lateThresholdVisible ? 'on' : 'off'} wrap ${snapshot.wrapsSystem ? 'yes' : 'no'}`,
+      `sim stats g ${this.timedLiveSimulatedFeedbackStats.onTime} e ${this.timedLiveSimulatedFeedbackStats.early} l ${this.timedLiveSimulatedFeedbackStats.late}`,
       `frames ${this.timedLiveCursorDebugSessionTotals.frames} seg ${this.timedLiveCursorDebugSessionTotals.segmentTransitions} wraps ${this.timedLiveCursorDebugSessionTotals.wrapTransitions}`,
       `timeline ${this.timedLiveCursorTimeline?.events.length ?? 0} events ${this.timedLiveCursorTimeline?.segments.length ?? 0} segments`,
     ];
@@ -4751,6 +4885,201 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     cursorElement.style.opacity =
       this.showTimedLiveCursorDebugOverlay && this.listenMode ? '0.12' : '';
+  }
+
+  private shouldUseTimedLiveSimulatedFeedback(): boolean {
+    return (
+      this.showTimedLiveCursorDebugOverlay &&
+      this.listenMode &&
+      this.timedLiveSimulatedInputEnabled
+    );
+  }
+
+  private shouldSuppressListenAutoplayFeedbackForName(name: string): boolean {
+    return (
+      this.shouldUseTimedLiveSimulatedFeedback() &&
+      this.mapNotesAutoPressed.has(name)
+    );
+  }
+
+  private resetTimedLiveSimulatedFeedbackStats(): void {
+    this.timedLiveSimulatedFeedbackStats = {
+      scheduled: 0,
+      triggered: 0,
+      onTime: 0,
+      early: 0,
+      late: 0,
+    };
+  }
+
+  private clearTimedLiveSimulatedFeedbackTimeouts(): void {
+    this.timedLiveSimulatedFeedbackTimeouts.forEach((timeout) =>
+      clearTimeout(timeout)
+    );
+    this.timedLiveSimulatedFeedbackTimeouts = [];
+  }
+
+  private scheduleTimedLiveSimulatedFeedback(
+    fromCurrentPosition: boolean = false
+  ): void {
+    this.clearTimedLiveSimulatedFeedbackTimeouts();
+    if (!this.shouldUseTimedLiveSimulatedFeedback()) {
+      return;
+    }
+
+    const timeline = this.timedLiveCursorTimeline;
+    if (!timeline) {
+      return;
+    }
+
+    const scheduleAnchorTimestamp = fromCurrentPosition
+      ? this.getTimedLiveCursorScoreTimestamp() ?? this.playbackStartScoreTimestamp
+      : this.playbackStartScoreTimestamp;
+    if (!Number.isFinite(scheduleAnchorTimestamp)) {
+      return;
+    }
+
+    const loopPass = this.loopPass;
+    const offsetMs = this.timedLiveSimulatedTimingOffsetMs;
+    const offsetWholeNotes = this.getPlaybackWholeNotesFromMs(offsetMs);
+
+    if (!fromCurrentPosition) {
+      this.resetTimedLiveSimulatedFeedbackStats();
+    }
+
+    timeline.events.forEach((event) => {
+      const notes = this.getTimedLiveSimulatedFeedbackNotesForEvent(event);
+      notes.forEach((note, index) => {
+        const rawDelayMs =
+          this.getPlaybackDelayMs(event.timestamp - scheduleAnchorTimestamp) +
+          offsetMs;
+        if (rawDelayMs < -150) {
+          return;
+        }
+
+        const timeout = setTimeout(() => {
+          if (
+            !this.running ||
+            !this.shouldUseTimedLiveSimulatedFeedback() ||
+            this.loopPass !== loopPass
+          ) {
+            return;
+          }
+
+          this.triggerTimedLiveSimulatedFeedbackNote(
+            event,
+            note,
+            offsetWholeNotes,
+            offsetMs,
+            index
+          );
+        }, Math.max(rawDelayMs, 0));
+
+        this.timedLiveSimulatedFeedbackTimeouts.push(timeout);
+        this.timedLiveSimulatedFeedbackStats.scheduled++;
+      });
+    });
+  }
+
+  private getTimedLiveSimulatedFeedbackNotesForEvent(
+    event: TimedLiveCursorEvent
+  ): TimedLiveCursorNote[] {
+    const actionableNotes = event.notes.filter((note) => note.actionable);
+    return actionableNotes.length > 0 ? actionableNotes : event.notes;
+  }
+
+  private triggerTimedLiveSimulatedFeedbackNote(
+    event: TimedLiveCursorEvent,
+    note: TimedLiveCursorNote,
+    offsetWholeNotes: number,
+    offsetMs: number,
+    index: number
+  ): void {
+    const timingClass = this.classifyTimedLiveSimulatedFeedback(offsetMs);
+    const hitTimestamp = event.timestamp + offsetWholeNotes;
+    const renderState = this.resolveTimedLiveCursorRenderAtTimestamp(hitTimestamp);
+    const placement = this.getTimedLiveSimulatedFeedbackPlacement(
+      note,
+      timingClass,
+      renderState?.left ?? null
+    );
+    if (!placement) {
+      return;
+    }
+
+    this.timedLiveSimulatedFeedbackStats.triggered++;
+    if (timingClass === 'correct') {
+      this.timedLiveSimulatedFeedbackStats.onTime++;
+    } else if (timingClass === 'early') {
+      this.timedLiveSimulatedFeedbackStats.early++;
+    } else {
+      this.timedLiveSimulatedFeedbackStats.late++;
+    }
+
+    const id = `timed-feedback-${this.loopPass}-${event.timestamp}-${note.staffId ?? 'all'}-${note.halfTone}-${timingClass}-${index}`;
+    const className =
+      timingClass === 'correct'
+        ? 'feedback-notehead feedback-notehead--correct'
+        : timingClass === 'early'
+          ? 'feedback-notehead feedback-notehead--early'
+          : 'feedback-notehead feedback-notehead--late';
+
+    this.renderFeedbackNotehead(
+      this.timingFeedbackNoteheadElements,
+      className,
+      id,
+      placement
+    );
+  }
+
+  private classifyTimedLiveSimulatedFeedback(
+    offsetMs: number
+  ): 'correct' | 'early' | 'late' {
+    const thresholdMs = this.getTimedLiveSimulationThresholdMs();
+    if (Math.abs(offsetMs) <= thresholdMs) {
+      return 'correct';
+    }
+
+    return offsetMs < 0 ? 'early' : 'late';
+  }
+
+  private getTimedLiveSimulationThresholdMs(): number {
+    return this.getPlaybackDelayMs(
+      PlayPageComponent.TIMED_LIVE_DEBUG_THRESHOLD_WHOLE_NOTES
+    );
+  }
+
+  private getPlaybackWholeNotesFromMs(durationMs: number): number {
+    const wholeNoteMs = this.getPlaybackDelayMs(1);
+    if (!Number.isFinite(durationMs) || !Number.isFinite(wholeNoteMs) || wholeNoteMs <= 0) {
+      return 0;
+    }
+
+    return durationMs / wholeNoteMs;
+  }
+
+  private getTimedLiveSimulatedFeedbackPlacement(
+    note: TimedLiveCursorNote,
+    timingClass: 'correct' | 'early' | 'late',
+    cursorLeft: number | null
+  ): { left: number; top: number; width: number; height: number } | null {
+    if (!Number.isFinite(note.left) || !Number.isFinite(note.top)) {
+      return null;
+    }
+
+    const width = Math.max(note.width, 10);
+    const height = Math.max(note.height, 8);
+    const leftCenter =
+      timingClass === 'correct' || !Number.isFinite(cursorLeft)
+        ? Number(note.left)
+        : Number(cursorLeft);
+
+    return {
+      left: leftCenter - width / 2,
+      top: Number(note.top) - height / 2,
+      width,
+      height,
+    };
   }
 
   private updateTimedLiveCursorDebugOverlay(): void {
@@ -6082,6 +6411,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const pitchLabel = this.noteKeyToLabel(name);
     const requiredPressKeys = this.getCurrentRequiredPressKeys();
     const acceptedLateRealtimeNote = this.isAcceptedLateRealtimeNote(name);
+    const suppressAutoplayFeedback =
+      this.shouldSuppressListenAutoplayFeedbackForName(name);
     const matchesCurrentStep = requiredPressKeys.has(name);
     this.updateRealtimeDebugWindow();
     this.debugRealtimeStats.playedTotal++;
@@ -6122,25 +6453,29 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       !this.realtimeCurrentStepMatchedKeys.has(name)
     ) {
       this.realtimeCurrentStepMatchedKeys.add(name);
-      this.markCurrentNoteCorrect(name);
-      this.debugRealtimeStats.acceptedOnTime++;
-      this.debugRealtimeStats.lastPitch = pitchLabel;
-      this.debugRealtimeStats.lastResult = 'hit current';
-      this.appendRealtimeDebugEvent(`${pitchLabel} hit`);
-      this.updateRealtimeDebugWindow();
+      if (!suppressAutoplayFeedback) {
+        this.markCurrentNoteCorrect(name);
+        this.debugRealtimeStats.acceptedOnTime++;
+        this.debugRealtimeStats.lastPitch = pitchLabel;
+        this.debugRealtimeStats.lastResult = 'hit current';
+        this.appendRealtimeDebugEvent(`${pitchLabel} hit`);
+        this.updateRealtimeDebugWindow();
+      }
     }
 
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
     if (!acceptedLateRealtimeNote && this.notesService.isRequiredNotesPressed()) {
-      this.debugRealtimeStats.lastPitch = pitchLabel;
-      this.debugRealtimeStats.lastResult = 'step satisfied';
-      this.appendRealtimeDebugEvent(`${pitchLabel} step satisfied`);
-      this.updateRealtimeDebugWindow();
-      this.markCurrentNotesCorrect();
+      if (!suppressAutoplayFeedback) {
+        this.debugRealtimeStats.lastPitch = pitchLabel;
+        this.debugRealtimeStats.lastResult = 'step satisfied';
+        this.appendRealtimeDebugEvent(`${pitchLabel} step satisfied`);
+        this.updateRealtimeDebugWindow();
+        this.markCurrentNotesCorrect();
+      }
       if (this.realtimeMode) {
         this.currentStepSatisfied = true;
       } else {
-        this.osmdCursorPlayMoveNext();
+        this.osmdCursorPlayMoveNext(suppressAutoplayFeedback);
       }
     }
   }
@@ -6149,16 +6484,21 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   keyNoteOff(time: number, pitch: number): void {
     const halbTone = pitch - 12;
     const name = halbTone.toFixed();
+    const suppressAutoplayFeedback =
+      this.shouldSuppressListenAutoplayFeedbackForName(name);
     this.updateRealtimeDebugWindow();
     if (this.isAcceptedLateRealtimeNote(name)) {
       return;
     }
     this.notesService.release(name);
+    this.correctlyHeldPracticeKeys.delete(name);
 
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
     if (!this.realtimeMode && this.notesService.isRequiredNotesPressed()) {
-      this.markCurrentNotesCorrect();
-      this.osmdCursorPlayMoveNext();
+      if (!suppressAutoplayFeedback) {
+        this.markCurrentNotesCorrect();
+      }
+      this.osmdCursorPlayMoveNext(suppressAutoplayFeedback);
     }
   }
 
