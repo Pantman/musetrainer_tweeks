@@ -255,6 +255,7 @@ interface TimedLiveSimulatedFeedbackStats {
   onTime: number;
   early: number;
   late: number;
+  missed: number;
 }
 
 interface RealtimeDebugStats {
@@ -424,6 +425,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     onTime: 0,
     early: 0,
     late: 0,
+    missed: 0,
   };
   private timedLiveSimulatedFeedbackTimeouts: NodeJS.Timeout[] = [];
   private museDebugConsoleRelay = {
@@ -936,13 +938,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   handleTimedLiveSimulatedInputChange(): void {
     this.updateLegacyPlayCursorDebugVisibility();
-    this.clearTimedLiveSimulatedFeedbackTimeouts();
-    this.resetTimedLiveSimulatedFeedbackStats();
-    this.resetTimingFeedbackNoteheads();
-    if (!this.running || !this.listenMode) {
-      return;
-    }
-
     this.scheduleTimedLiveSimulatedFeedback(true);
   }
 
@@ -4676,7 +4671,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       `window ${this.formatScoreTimestamp(snapshot.windowStartTimestamp)} -> ${this.formatScoreTimestamp(snapshot.windowEndTimestamp)}`,
       `notes ${windowNoteSummary || 'none'} win ${snapshot.windowMs}ms thr ${snapshot.thresholdMs}ms`,
       `early ${snapshot.earlyThresholdVisible ? 'on' : 'off'} late ${snapshot.lateThresholdVisible ? 'on' : 'off'} wrap ${snapshot.wrapsSystem ? 'yes' : 'no'}`,
-      `sim stats g ${this.timedLiveSimulatedFeedbackStats.onTime} e ${this.timedLiveSimulatedFeedbackStats.early} l ${this.timedLiveSimulatedFeedbackStats.late}`,
+      `sim stats g ${this.timedLiveSimulatedFeedbackStats.onTime} e ${this.timedLiveSimulatedFeedbackStats.early} l ${this.timedLiveSimulatedFeedbackStats.late} m ${this.timedLiveSimulatedFeedbackStats.missed}`,
       `frames ${this.timedLiveCursorDebugSessionTotals.frames} seg ${this.timedLiveCursorDebugSessionTotals.segmentTransitions} wraps ${this.timedLiveCursorDebugSessionTotals.wrapTransitions}`,
       `timeline ${this.timedLiveCursorTimeline?.events.length ?? 0} events ${this.timedLiveCursorTimeline?.segments.length ?? 0} segments`,
     ];
@@ -4909,6 +4904,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       onTime: 0,
       early: 0,
       late: 0,
+      missed: 0,
     };
   }
 
@@ -4923,6 +4919,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     fromCurrentPosition: boolean = false
   ): void {
     this.clearTimedLiveSimulatedFeedbackTimeouts();
+    if (fromCurrentPosition) {
+      this.timedLiveSimulatedFeedbackStats = {
+        ...this.timedLiveSimulatedFeedbackStats,
+        scheduled: this.timedLiveSimulatedFeedbackStats.triggered,
+      };
+    }
     if (!this.shouldUseTimedLiveSimulatedFeedback()) {
       return;
     }
@@ -4948,6 +4950,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     timeline.events.forEach((event) => {
+      if (
+        fromCurrentPosition &&
+        event.timestamp <= scheduleAnchorTimestamp + 0.000001
+      ) {
+        return;
+      }
+
       const notes = this.getTimedLiveSimulatedFeedbackNotesForEvent(event);
       notes.forEach((note, index) => {
         const rawDelayMs =
@@ -5012,8 +5021,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.timedLiveSimulatedFeedbackStats.onTime++;
     } else if (timingClass === 'early') {
       this.timedLiveSimulatedFeedbackStats.early++;
-    } else {
+    } else if (timingClass === 'late') {
       this.timedLiveSimulatedFeedbackStats.late++;
+    } else {
+      this.timedLiveSimulatedFeedbackStats.missed++;
     }
 
     const id = `timed-feedback-${this.loopPass}-${event.timestamp}-${note.staffId ?? 'all'}-${note.halfTone}-${timingClass}-${index}`;
@@ -5022,7 +5033,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         ? 'feedback-notehead feedback-notehead--correct'
         : timingClass === 'early'
           ? 'feedback-notehead feedback-notehead--early'
-          : 'feedback-notehead feedback-notehead--late';
+          : timingClass === 'late'
+            ? 'feedback-notehead feedback-notehead--late'
+            : 'feedback-notehead feedback-notehead--miss';
 
     this.renderFeedbackNotehead(
       this.timingFeedbackNoteheadElements,
@@ -5034,10 +5047,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private classifyTimedLiveSimulatedFeedback(
     offsetMs: number
-  ): 'correct' | 'early' | 'late' {
-    const thresholdMs = this.getTimedLiveSimulationThresholdMs();
-    if (Math.abs(offsetMs) <= thresholdMs) {
+  ): 'correct' | 'early' | 'late' | 'miss' {
+    const onTimeThresholdMs = this.getTimedLiveSimulationThresholdMs();
+    if (Math.abs(offsetMs) <= onTimeThresholdMs) {
       return 'correct';
+    }
+
+    const matchWindowMs = this.getTimedLiveSimulationMatchWindowMs();
+    if (Math.abs(offsetMs) > matchWindowMs) {
+      return 'miss';
     }
 
     return offsetMs < 0 ? 'early' : 'late';
@@ -5046,6 +5064,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private getTimedLiveSimulationThresholdMs(): number {
     return this.getPlaybackDelayMs(
       PlayPageComponent.TIMED_LIVE_DEBUG_THRESHOLD_WHOLE_NOTES
+    );
+  }
+
+  private getTimedLiveSimulationMatchWindowMs(): number {
+    return this.getPlaybackDelayMs(
+      PlayPageComponent.TIMED_LIVE_DEBUG_WINDOW_WHOLE_NOTES
     );
   }
 
@@ -5060,7 +5084,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private getTimedLiveSimulatedFeedbackPlacement(
     note: TimedLiveCursorNote,
-    timingClass: 'correct' | 'early' | 'late',
+    timingClass: 'correct' | 'early' | 'late' | 'miss',
     cursorLeft: number | null
   ): { left: number; top: number; width: number; height: number } | null {
     if (!Number.isFinite(note.left) || !Number.isFinite(note.top)) {
