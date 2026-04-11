@@ -1,4 +1,4 @@
-import { Component, HostListener, OnInit, ViewChild } from '@angular/core';
+import { Component, HostListener, OnDestroy, OnInit, ViewChild, isDevMode } from '@angular/core';
 import {
   IonContent,
   NavController,
@@ -20,6 +20,36 @@ import { Filesystem } from '@capacitor/filesystem';
 import packageJson from '../../../package.json';
 
 declare const Ionic: any;
+
+declare global {
+  interface Window {
+    __museDebug?: {
+      getWrapLog: () => string[];
+      getRealtimeLog: () => string[];
+      getCursorTrace: () => string[];
+      clearWrapLog: () => void;
+      clearRealtimeLog: () => void;
+      clearCursorTrace: () => void;
+      getState: () => Record<string, unknown>;
+      playListen: () => void;
+      playWait: () => void;
+      playRealtime: () => void;
+      stop: () => void;
+      enableConsoleRelay: (
+        channel?: 'wrap' | 'realtime' | 'trace' | 'all',
+        enabled?: boolean
+      ) => void;
+      enableLocalRelay: (
+        channel?: 'wrap' | 'realtime' | 'trace' | 'all',
+        enabled?: boolean
+      ) => void;
+      setLocalRelayUrl: (url: string) => void;
+      clearLocalRelay: () => Promise<void>;
+      getRelayStatus: () => Record<string, unknown>;
+      dumpWrapLog: () => string[];
+    };
+  }
+}
 
 type TempoPreset = 'normal' | 'slow' | 'verySlow' | 'custom';
 type RangeHandle = 'start' | 'end';
@@ -119,7 +149,7 @@ interface RealtimeDebugStats {
   templateUrl: 'play.page.html',
   styleUrls: ['play.page.scss'],
 })
-export class PlayPageComponent implements OnInit {
+export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly DEFAULT_TEMPO_BPM = 120;
   private static readonly OSMD_UNIT_IN_PIXELS = 10;
   private static readonly MIN_SPEED_PERCENT = 30;
@@ -235,6 +265,17 @@ export class PlayPageComponent implements OnInit {
   cursorWrapDebugEvents: string[] = [];
   cursorWrapDebugSnapshot: CursorWrapDebugSnapshot | null = null;
   private cursorDebugRefreshTimeout: number | null = null;
+  private museDebugConsoleRelay = {
+    wrap: false,
+    realtime: false,
+    trace: false,
+  };
+  private museDebugLocalRelay = {
+    wrap: false,
+    realtime: false,
+    trace: false,
+  };
+  private museDebugLocalRelayUrl = 'http://127.0.0.1:4310/log';
   // Midi handlers
   midiHandlers: PluginListenerHandle[] = [];
 
@@ -250,6 +291,7 @@ export class PlayPageComponent implements OnInit {
 
   ngOnInit(): void {
     this.playVersion = packageJson.version;
+    this.installMuseDebugApi();
     this.openSheetMusicDisplay = new OpenSheetMusicDisplay('osmdContainer');
     this.openSheetMusicDisplay.setOptions({
       backend: 'svg',
@@ -269,6 +311,10 @@ export class PlayPageComponent implements OnInit {
       this.zoomText = this.zoomValue * 100 + '%';
       this.openSheetMusicDisplay.zoom = this.zoomValue;
     }
+  }
+
+  ngOnDestroy(): void {
+    this.uninstallMuseDebugApi();
   }
 
   @HostListener('window:resize')
@@ -306,6 +352,7 @@ export class PlayPageComponent implements OnInit {
   }
 
   ionViewWillLeave() {
+    this.uninstallMuseDebugApi();
     // osmd
     this.osmdReset();
     this.openSheetMusicDisplay.clear();
@@ -856,13 +903,6 @@ export class PlayPageComponent implements OnInit {
         ? this.openSheetMusicDisplay.cursors[index].iterator.CurrentSourceTimestamp
             .RealValue
         : null;
-    const previousMeasureEndTimestamp =
-      shouldAnimate && index === 0
-        ? this.openSheetMusicDisplay.cursors[index].iterator.CurrentMeasure
-            .AbsoluteTimestamp.RealValue +
-          this.openSheetMusicDisplay.cursors[index].iterator.CurrentMeasure.Duration
-            .RealValue
-        : null;
     const transitionDuration = shouldAnimate
       ? this.getCursorStepDelayMs(index)
       : 0;
@@ -930,23 +970,40 @@ export class PlayPageComponent implements OnInit {
           previousMeasureNumber !== null &&
           nextMeasureNumber !== null &&
           this.isPlayCursorSystemWrap(previousMeasureNumber, nextMeasureNumber);
+        const container = document.getElementById('scoreOverlayHost');
+        const nextActionableTargets =
+          shouldTreatAsSystemWrap && container
+            ? this.getCursorActionableTargetCenters(
+                this.openSheetMusicDisplay.cursors[index],
+                container
+              )
+            : [];
+        const nextTargets =
+          shouldTreatAsSystemWrap && container
+            ? this.getCursorTargetCenters(
+                this.openSheetMusicDisplay.cursors[index],
+                container
+              )
+            : [];
         const startedSystemWrapAnimation =
           shouldTreatAsSystemWrap &&
           index === 0 &&
-          previousMeasureNumber !== null &&
+          !!previousPosition &&
+          !!nextPosition &&
+          Number.isFinite(previousTargetX) &&
           previousTimestamp !== null &&
-          previousMeasureEndTimestamp !== null &&
           nextTimestamp !== null &&
           nextMeasureNumber !== null &&
+          Number.isFinite(nextActionableTargets[0] ?? nextTargets[0]) &&
           this.startPlayCursorSystemWrapAnimation({
             previousPosition,
             nextPosition,
-            previousTargetX,
+            previousTargetX: Number(previousTargetX),
             previousMeasureNumber,
             previousTimestamp,
-            previousMeasureEndTimestamp,
             nextMeasureNumber,
             nextTimestamp,
+            nextTargetX: Number(nextActionableTargets[0] ?? nextTargets[0]),
           });
 
         if (!startedSystemWrapAnimation) {
@@ -965,11 +1022,19 @@ export class PlayPageComponent implements OnInit {
         } else {
           this.tracePlayCursor('move wrap', 'system teleport');
           this.appendCursorWrapDebugEvent(
-            `wrap system m${previousMeasureNumber}->${nextMeasureNumber} ${
+            `wrap system start m${previousMeasureNumber}->${nextMeasureNumber} ${
               this.formatScoreTimestamp(previousTimestamp)
             }->${
               this.formatScoreTimestamp(nextTimestamp)
             }`
+          );
+          this.appendPlayCursorWrapGeometryDebugEvent(
+            'wrap start geom',
+            `prevBase ${Math.round(previousPosition.left)},${Math.round(
+              previousPosition.top
+            )} nextBase ${Math.round(nextPosition.left)},${Math.round(
+              nextPosition.top
+            )}`
           );
         }
       }
@@ -1075,6 +1140,7 @@ export class PlayPageComponent implements OnInit {
 
   private restartLoopPlayback(): void {
     this.seedPendingLoopRestartAudioTime();
+    this.osmdResetFeedback();
     this.loopPass++;
     this.markCursorTraceLoopBoundary('loop wrap');
     this.osmdCursorStart();
@@ -1305,7 +1371,7 @@ export class PlayPageComponent implements OnInit {
     }
 
     this.rebuildCurrentPlaybackStepState();
-    this.updatePlayCursorVisualAlignment();
+    this.alignOrAnimatePlayCursorAfterAdvance();
     this.pendingTimedStartBootstrapAdvance = !this.hasCurrentRequiredPressKeys();
   }
 
@@ -1323,7 +1389,7 @@ export class PlayPageComponent implements OnInit {
     }
 
     this.rebuildCurrentPlaybackStepState();
-    this.updatePlayCursorVisualAlignment();
+    this.alignOrAnimatePlayCursorAfterAdvance();
     this.pendingTimedStartBootstrapAdvance = false;
 
     // If ties occured, move to next and skip one additional note
@@ -1988,6 +2054,10 @@ export class PlayPageComponent implements OnInit {
     this.playCursorLoopWrapAnimation = null;
   }
 
+  private alignOrAnimatePlayCursorAfterAdvance(): void {
+    this.updatePlayCursorVisualAlignment();
+  }
+
   private getActivePracticeTargetCenters(
     container: HTMLElement,
     actionableOnly = false
@@ -2255,14 +2325,14 @@ export class PlayPageComponent implements OnInit {
   }
 
   private startPlayCursorSystemWrapAnimation(params: {
-    previousPosition: { left: number; top: number } | null;
-    nextPosition: { left: number; top: number } | null;
-    previousTargetX: number | null;
+    previousPosition: { left: number; top: number };
+    nextPosition: { left: number; top: number };
+    previousTargetX: number;
     previousMeasureNumber: number;
     previousTimestamp: number;
-    previousMeasureEndTimestamp: number;
     nextMeasureNumber: number;
     nextTimestamp: number;
+    nextTargetX: number;
   }): boolean {
     const {
       previousPosition,
@@ -2270,14 +2340,10 @@ export class PlayPageComponent implements OnInit {
       previousTargetX,
       previousMeasureNumber,
       previousTimestamp,
-      previousMeasureEndTimestamp,
       nextMeasureNumber,
       nextTimestamp,
+      nextTargetX,
     } = params;
-
-    if (!previousPosition || !nextPosition) {
-      return false;
-    }
 
     const previousMeasureOverlay = this.measureOverlays.find(
       (measure) => measure.measureNumber === previousMeasureNumber
@@ -2285,37 +2351,15 @@ export class PlayPageComponent implements OnInit {
     const nextMeasureOverlay = this.measureOverlays.find(
       (measure) => measure.measureNumber === nextMeasureNumber
     );
-    const nextMeasureStartTimestamp =
-      this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasure
-        ?.AbsoluteTimestamp?.RealValue ?? null;
-    const container = document.getElementById('scoreOverlayHost');
-    const currentPracticeNotes = this.getCurrentPracticeGraphicalNotes();
-    const nextActionableTargets = container
-      ? this.getGraphicalPracticeTargetCenters(
-          currentPracticeNotes,
-          container,
-          true
-        )
-      : [];
-    const nextTargets = container
-      ? this.getGraphicalPracticeTargetCenters(
-          currentPracticeNotes,
-          container,
-          false
-        )
-      : [];
-    const nextTargetX = nextActionableTargets[0] ?? nextTargets[0] ?? null;
 
     if (
       !previousMeasureOverlay ||
       !nextMeasureOverlay ||
-      !Number.isFinite(previousTargetX) ||
-      !Number.isFinite(nextMeasureStartTimestamp) ||
       !Number.isFinite(nextTargetX)
     ) {
       this.appendCursorWrapDebugEvent(
         `wrap reject prev m${previousMeasureNumber} next m${nextMeasureNumber} prevX ${
-          Number.isFinite(previousTargetX) ? Math.round(Number(previousTargetX)) : 'na'
+          Math.round(previousTargetX)
         } nextX ${Number.isFinite(nextTargetX) ? Math.round(Number(nextTargetX)) : 'na'}`
       );
       return false;
@@ -2323,74 +2367,79 @@ export class PlayPageComponent implements OnInit {
 
     this.appendCursorWrapDebugEvent(
       `wrap accept prev m${previousMeasureNumber} next m${nextMeasureNumber} prevX ${Math.round(
-        Number(previousTargetX)
-      )} nextX ${Math.round(Number(nextTargetX))} next ${this.formatScoreTimestamp(
+        previousTargetX
+      )} nextX ${Math.round(nextTargetX)} next ${this.formatScoreTimestamp(
         nextTimestamp
       )}`
     );
 
-    const firstPhaseDurationMs = this.getPlaybackDelayMs(
-      previousMeasureEndTimestamp - previousTimestamp
+    const totalDurationMs = this.getPlaybackDelayMs(
+      nextTimestamp - previousTimestamp
     );
-    const secondPhaseDurationMs = this.getPlaybackDelayMs(
-      nextTimestamp - nextMeasureStartTimestamp
-    );
-    const boundaryTimeMs = performance.now() + firstPhaseDurationMs;
     const restartBaseLeft = nextPosition.left;
     const previousTop = previousPosition.top;
     const nextTop = nextPosition.top;
-    const resolvedPreviousTargetX = Number(previousTargetX);
+    const resolvedPreviousTargetX = previousTargetX;
     const resolvedNextTargetX = Number(nextTargetX);
+    const distanceToSystemEnd = Math.max(
+      previousMeasureOverlay.right - resolvedPreviousTargetX,
+      0
+    );
+    const distanceFromSystemStart = Math.max(
+      resolvedNextTargetX - nextMeasureOverlay.left,
+      0
+    );
+    const totalTravelDistance = distanceToSystemEnd + distanceFromSystemStart;
+
+    if (totalTravelDistance <= 0) {
+      return false;
+    }
 
     this.cancelScheduledPlayCursorAlignment();
     this.resetPlayCursorTransition();
+    this.positionPlayCursorAtPoint(
+      resolvedPreviousTargetX,
+      restartBaseLeft,
+      previousTop
+    );
+    this.appendPlayCursorWrapGeometryDebugEvent(
+      'wrap start pin',
+      `prevX ${Math.round(resolvedPreviousTargetX)}`
+    );
 
+    const animationStartMs = performance.now();
     const tick = () => {
       if (!this.running) {
         this.cancelScheduledPlayCursorAlignment();
         return;
       }
 
-      const nowMs = performance.now();
+      const elapsedMs = Math.max(performance.now() - animationStartMs, 0);
+      const progress =
+        totalDurationMs > 0
+          ? Math.min(elapsedMs / totalDurationMs, 1)
+          : 1;
+      const distanceTravelled = totalTravelDistance * progress;
 
-      if (nowMs < boundaryTimeMs) {
-        const progress =
-          firstPhaseDurationMs > 0
-            ? Math.min(
-                Math.max(
-                  (nowMs - (boundaryTimeMs - firstPhaseDurationMs)) /
-                    firstPhaseDurationMs,
-                  0
-                ),
-                1
-              )
-            : 1;
-        const interpolatedX =
-          resolvedPreviousTargetX +
-          (previousMeasureOverlay.right - resolvedPreviousTargetX) * progress;
+      if (distanceTravelled <= distanceToSystemEnd) {
+        const interpolatedX = resolvedPreviousTargetX + distanceTravelled;
         this.positionPlayCursorAtPoint(
           interpolatedX,
           restartBaseLeft,
           previousTop
         );
-        this.playCursorAlignmentFrame = window.requestAnimationFrame(tick);
-        return;
+      } else {
+        const interpolatedX =
+          nextMeasureOverlay.left + (distanceTravelled - distanceToSystemEnd);
+        this.positionPlayCursorAtPoint(interpolatedX, restartBaseLeft, nextTop);
       }
-
-      const progress =
-        secondPhaseDurationMs > 0
-          ? Math.min(
-              Math.max((nowMs - boundaryTimeMs) / secondPhaseDurationMs, 0),
-              1
-            )
-          : 1;
-      const interpolatedX =
-        nextMeasureOverlay.left +
-        (resolvedNextTargetX - nextMeasureOverlay.left) * progress;
-      this.positionPlayCursorAtPoint(interpolatedX, restartBaseLeft, nextTop);
 
       if (progress >= 1) {
         this.cancelScheduledPlayCursorAlignment();
+        this.appendPlayCursorWrapGeometryDebugEvent(
+          'wrap handoff',
+          `targetX ${Math.round(resolvedNextTargetX)}`
+        );
         this.updatePlayCursorVisualAlignment();
         this.refreshCursorWrapDebugSnapshot();
         return;
@@ -2401,6 +2450,24 @@ export class PlayPageComponent implements OnInit {
 
     this.playCursorAlignmentFrame = window.requestAnimationFrame(tick);
     return true;
+  }
+
+  private appendPlayCursorWrapGeometryDebugEvent(
+    label: string,
+    extra: string = ''
+  ): void {
+    const base = this.getPlayCursorPosition();
+    const rendered = this.getTraceRenderedPlayCursorPosition();
+    const dx = Math.round(this.getPlayCursorTransformX());
+    const suffix = extra ? ` ${extra}` : '';
+
+    this.appendCursorWrapDebugEvent(
+      `${label} base ${
+        base ? `${Math.round(base.left)},${Math.round(base.top)}` : 'na'
+      } render ${
+        rendered ? `${Math.round(rendered.left)},${Math.round(rendered.top)}` : 'na'
+      } dx ${dx}${suffix}`
+    );
   }
 
   private isPlayCursorSystemWrap(
@@ -2734,6 +2801,7 @@ export class PlayPageComponent implements OnInit {
   private appendRealtimeDebugEvent(message: string): void {
     this.realtimeDebugEvents.unshift(message);
     this.realtimeDebugEvents = this.realtimeDebugEvents.slice(0, 12);
+    this.relayDebugEvent('realtime', message);
   }
 
   private appendCursorTraceEvent(message: string): void {
@@ -2741,6 +2809,7 @@ export class PlayPageComponent implements OnInit {
       return;
     }
     this.cursorTraceEvents.push(message);
+    this.relayDebugEvent('trace', message);
   }
 
   private clearCursorTraceEvents(): void {
@@ -2935,6 +3004,161 @@ export class PlayPageComponent implements OnInit {
 
   private appendCursorWrapDebugEvent(message: string): void {
     this.cursorWrapDebugEvents.unshift(message);
+    this.relayDebugEvent('wrap', message);
+  }
+
+  private relayDebugEvent(
+    channel: 'wrap' | 'realtime' | 'trace',
+    message: string
+  ): void {
+    if (!isDevMode()) {
+      return;
+    }
+
+    if (this.museDebugConsoleRelay[channel]) {
+      console.debug(`[muse:${channel}] ${message}`);
+    }
+
+    if (this.museDebugLocalRelay[channel]) {
+      void this.postMuseDebugRelayEvent(channel, message);
+    }
+  }
+
+  private async postMuseDebugRelayEvent(
+    channel: 'wrap' | 'realtime' | 'trace',
+    message: string
+  ): Promise<void> {
+    try {
+      await fetch(this.museDebugLocalRelayUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          channel,
+          message,
+          transportMode: this.transportMode,
+          loopPass: this.loopPass,
+          measureNumber:
+            (this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasureIndex ??
+              -1) + 1,
+          timestamp:
+            this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentSourceTimestamp
+              ?.RealValue ?? null,
+        }),
+        keepalive: true,
+      });
+    } catch (error) {
+      if (this.museDebugConsoleRelay[channel]) {
+        console.warn(
+          `[muse:${channel}] local relay failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+  }
+
+  private installMuseDebugApi(): void {
+    if (!isDevMode() || typeof window === 'undefined') {
+      return;
+    }
+
+    window.__museDebug = {
+      getWrapLog: () => [...this.cursorWrapDebugEvents],
+      getRealtimeLog: () => [...this.realtimeDebugEvents],
+      getCursorTrace: () => [...this.cursorTraceEvents],
+      clearWrapLog: () => {
+        this.cursorWrapDebugEvents = [];
+      },
+      clearRealtimeLog: () => {
+        this.realtimeDebugEvents = [];
+      },
+      clearCursorTrace: () => {
+        this.cursorTraceEvents = [];
+      },
+      getState: () => this.getMuseDebugState(),
+      playListen: () => this.osmdListen(),
+      playWait: () => this.osmdPractice(),
+      playRealtime: () => this.osmdPracticeRealtime(),
+      stop: () => this.osmdStop(),
+      enableConsoleRelay: (channel = 'all', enabled = true) => {
+        if (channel === 'all') {
+          this.museDebugConsoleRelay.wrap = enabled;
+          this.museDebugConsoleRelay.realtime = enabled;
+          this.museDebugConsoleRelay.trace = enabled;
+          return;
+        }
+
+        this.museDebugConsoleRelay[channel] = enabled;
+      },
+      enableLocalRelay: (channel = 'all', enabled = true) => {
+        if (channel === 'all') {
+          this.museDebugLocalRelay.wrap = enabled;
+          this.museDebugLocalRelay.realtime = enabled;
+          this.museDebugLocalRelay.trace = enabled;
+          return;
+        }
+
+        this.museDebugLocalRelay[channel] = enabled;
+      },
+      setLocalRelayUrl: (url: string) => {
+        this.museDebugLocalRelayUrl = url;
+      },
+      clearLocalRelay: async () => {
+        await fetch(this.museDebugLocalRelayUrl.replace(/\/log$/, '/clear'), {
+          method: 'POST',
+        });
+      },
+      getRelayStatus: () => ({
+        consoleRelay: { ...this.museDebugConsoleRelay },
+        localRelay: { ...this.museDebugLocalRelay },
+        localRelayUrl: this.museDebugLocalRelayUrl,
+      }),
+      dumpWrapLog: () => {
+        const lines = [...this.cursorWrapDebugEvents].reverse();
+        lines.forEach((line) => console.debug(`[muse:wrap] ${line}`));
+        return lines;
+      },
+    };
+  }
+
+  private uninstallMuseDebugApi(): void {
+    if (typeof window === 'undefined' || window.__museDebug === undefined) {
+      return;
+    }
+
+    delete window.__museDebug;
+  }
+
+  private getMuseDebugState(): Record<string, unknown> {
+    const cursor = this.openSheetMusicDisplay?.cursors?.[0];
+    const container = document.getElementById('scoreOverlayHost');
+    const base = this.getPlayCursorPosition();
+    const rendered = this.getTraceRenderedPlayCursorPosition();
+    const visualDebug = container
+      ? this.getCurrentPlayCursorVisualDebug(container)
+      : null;
+
+    return {
+      running: this.running,
+      transportMode: this.transportMode,
+      loopPass: this.loopPass,
+      measureNumber:
+        (cursor?.iterator?.CurrentMeasureIndex ?? -1) + 1,
+      timestamp: cursor?.iterator?.CurrentSourceTimestamp?.RealValue ?? null,
+      requiredSummary: this.formatRequiredNoteSummary(),
+      skipPlayNotes: this.skipPlayNotes,
+      playbackClock: { ...this.playbackClock },
+      cursorBase: base,
+      cursorRendered: rendered,
+      cursorTransformX: this.getPlayCursorTransformX(),
+      wrapSnapshot: this.cursorWrapDebugSnapshot,
+      visualTargets: visualDebug,
+      wrapLogSize: this.cursorWrapDebugEvents.length,
+      realtimeLogSize: this.realtimeDebugEvents.length,
+      traceLogSize: this.cursorTraceEvents.length,
+    };
   }
 
   private formatRequiredNoteSummary(): string {
