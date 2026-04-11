@@ -106,7 +106,12 @@
     <ion-spinner name="circles"></ion-spinner>
     <ion-label class="m-4">Preparing your masterpiece...</ion-label>
   </ion-row>
-  <div class="score-shell" id="scoreOverlayHost" [class.score-shell--locked]="running">
+  <div
+    class="score-shell"
+    id="scoreOverlayHost"
+    [class.score-shell--locked]="running"
+    [class.score-shell--timed-live-debug]="showTimedLiveCursorDebugPanel()"
+  >
     <ion-row style="background-color: white;" id="osmdContainer"></ion-row>
     <div class="score-shell__interaction-blocker" *ngIf="running"></div>
     <div class="realtime-debug-panel" *ngIf="showRealtimeDebugPanel()">
@@ -185,6 +190,46 @@
         <div class="score-cursor-debug-overlay__line"></div>
       </div>
     </div>
+
+    <div
+      *ngIf="showTimedLiveCursorDebugPanel()"
+      class="score-timed-live-debug-overlay"
+    >
+      <div
+        *ngFor="let windowRect of timedLiveCursorWindowRects"
+        class="score-timed-live-window"
+        [ngStyle]="getTimedLiveCursorWindowStyle(windowRect)"
+      >
+        <div class="score-timed-live-window__label">{{ windowRect.label }}</div>
+      </div>
+      <div
+        *ngFor="let marker of timedLiveCursorThresholdMarkers"
+        class="score-timed-live-threshold"
+        [ngStyle]="getTimedLiveCursorThresholdStyle(marker)"
+      >
+        <div class="score-timed-live-threshold__label">{{ marker.label }}</div>
+      </div>
+    </div>
+
+    <div
+      *ngIf="timedLiveCursorRenderState?.visible && showTimedLiveCursorDebugPanel()"
+      class="score-timed-live-cursor"
+      [ngStyle]="getTimedLiveCursorStyle()"
+    ></div>
+
+    <div
+      class="realtime-debug-panel realtime-debug-panel--bottom"
+      *ngIf="showTimedLiveCursorDebugPanel()"
+      [ngStyle]="getTimedLiveCursorDebugPanelStyle()"
+    >
+      <div
+        class="realtime-debug-panel__drag-handle"
+        (pointerdown)="startTimedLiveCursorDebugPanelDrag($event)"
+      >
+        timed live cursor
+      </div>
+      <div *ngFor="let line of getTimedLiveCursorDebugSummaryLines()">{{ line }}</div>
+    </div>
   </div>
 </ion-content>
 
@@ -223,6 +268,16 @@
     <ion-item>
       <ion-label color="dark">Wrap diagnostics</ion-label>
       <ion-toggle [(ngModel)]="showCursorWrapDebugOverlay" color="dark" slot="end" [enableOnOffLabels]="true"></ion-toggle>
+    </ion-item>
+    <ion-item>
+      <ion-label color="dark">Timed cursor debug</ion-label>
+      <ion-toggle
+        [(ngModel)]="showTimedLiveCursorDebugOverlay"
+        (ngModelChange)="handleTimedLiveCursorDebugOverlayChange()"
+        color="dark"
+        slot="end"
+        [enableOnOffLabels]="true"
+      ></ion-toggle>
     </ion-item>
     <ion-item>
       <ion-label color="dark">Show keyboard</ion-label>

@@ -76,6 +76,10 @@ ion-input{
   pointer-events: none;
 }
 
+.score-shell--timed-live-debug #cursorImg-0 {
+  opacity: 0.12 !important;
+}
+
 .score-shell__interaction-blocker {
   cursor: default;
   inset: 0;
@@ -106,6 +110,28 @@ ion-input{
 .realtime-debug-panel--right {
   left: auto;
   right: 0.75rem;
+}
+
+.realtime-debug-panel--bottom {
+  bottom: auto;
+  left: auto;
+  max-width: min(24rem, calc(100% - 1.5rem));
+  position: fixed;
+  right: 0.75rem;
+  top: 5rem;
+}
+
+.realtime-debug-panel__drag-handle {
+  border-bottom: 1px solid rgb(148 163 184 / 0.35);
+  cursor: grab;
+  font-weight: 600;
+  margin: -0.5rem -0.65rem 0.45rem;
+  padding: 0.45rem 0.65rem 0.4rem;
+  text-transform: lowercase;
+}
+
+.realtime-debug-panel__drag-handle:active {
+  cursor: grabbing;
 }
 
 .realtime-debug-panel__events {
@@ -172,6 +198,74 @@ ion-input{
       rgb(245 158 11 / 0.95) 0 6px,
       rgb(245 158 11 / 0.2) 6px 11px
     );
+}
+
+.score-timed-live-debug-overlay {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 4;
+}
+
+.score-timed-live-window {
+  background: color-mix(in srgb, var(--timed-live-window-color) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--timed-live-window-color) 70%, white 10%);
+  border-radius: 0.5rem;
+  position: absolute;
+}
+
+.score-timed-live-window__label {
+  background: color-mix(in srgb, var(--timed-live-window-color) 85%, black 12%);
+  border-radius: 999px;
+  color: #f8fafc;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.65rem;
+  left: 0.35rem;
+  padding: 0.08rem 0.38rem;
+  position: absolute;
+  top: 0.35rem;
+}
+
+.score-timed-live-threshold {
+  position: absolute;
+  transform: translateX(-50%);
+}
+
+.score-timed-live-threshold::before {
+  background: color-mix(in srgb, var(--timed-live-threshold-color) 88%, white 5%);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.18);
+  content: '';
+  display: block;
+  height: 100%;
+  margin: 0 auto;
+  width: 2px;
+}
+
+.score-timed-live-threshold__label {
+  background: color-mix(in srgb, var(--timed-live-threshold-color) 90%, black 12%);
+  border-radius: 999px;
+  color: #fff7ed;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.65rem;
+  left: 50%;
+  padding: 0.08rem 0.38rem;
+  position: absolute;
+  top: -1rem;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.score-timed-live-cursor {
+  border-left: 2px solid #16a34a;
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 0.25),
+    0 0 12px rgb(22 163 74 / 0.35);
+  min-width: 2px;
+  pointer-events: none;
+  position: absolute;
+  transform: translateX(-50%);
+  width: 2px;
+  z-index: 4;
 }
 
 .score-range-overlay__shade {

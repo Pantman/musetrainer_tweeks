@@ -27,6 +27,7 @@ declare global {
       getWrapLog: () => string[];
       getRealtimeLog: () => string[];
       getCursorTrace: () => string[];
+      getTimedLiveCursorDebug: () => Record<string, unknown>;
       clearWrapLog: () => void;
       clearRealtimeLog: () => void;
       clearCursorTrace: () => void;
@@ -35,6 +36,7 @@ declare global {
       playWait: () => void;
       playRealtime: () => void;
       stop: () => void;
+      setTimedCursorDebug: (enabled?: boolean) => void;
       enableConsoleRelay: (
         channel?: 'wrap' | 'realtime' | 'trace' | 'all',
         enabled?: boolean
@@ -131,6 +133,119 @@ interface CursorWrapDebugSnapshot {
   renderedTop: number | null;
 }
 
+interface TimedLiveCursorNote {
+  halfTone: number;
+  staffId: number | null;
+  actionable: boolean;
+  left: number | null;
+  top: number | null;
+}
+
+interface TimedLiveCursorEvent {
+  id: string;
+  measureNumber: number;
+  timestamp: number;
+  durationToNext: number;
+  left: number;
+  top: number;
+  height: number;
+  barStartX: number;
+  barEndX: number;
+  systemId: number | null;
+  actionable: boolean;
+  actionableTargets: number[];
+  allTargets: number[];
+  notes: TimedLiveCursorNote[];
+}
+
+interface TimedLiveCursorSegment {
+  id: string;
+  startTimestamp: number;
+  endTimestamp: number;
+  duration: number;
+  startLeft: number;
+  startTop: number;
+  startHeight: number;
+  endLeft: number;
+  endTop: number;
+  endHeight: number;
+  wrapsSystem: boolean;
+  wrapExitX: number | null;
+  wrapEntryX: number | null;
+}
+
+interface TimedLiveCursorTimeline {
+  range: MeasureRange;
+  startTimestamp: number;
+  startLeft: number;
+  startTop: number;
+  startHeight: number;
+  endTimestamp: number;
+  endLeft: number;
+  endTop: number;
+  endHeight: number;
+  events: TimedLiveCursorEvent[];
+  segments: TimedLiveCursorSegment[];
+  builtAt: number;
+}
+
+interface TimedLiveCursorRenderState {
+  left: number;
+  top: number;
+  height: number;
+  visible: boolean;
+}
+
+interface TimedLiveCursorWindowRect {
+  id: string;
+  staffId: number | null;
+  systemId: number | null;
+  label: string;
+  noteCount: number;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  color: string;
+}
+
+interface TimedLiveCursorThresholdMarker {
+  id: string;
+  label: string;
+  left: number;
+  top: number;
+  height: number;
+  color: string;
+}
+
+interface TimedLiveCursorDebugSnapshot {
+  scoreTimestamp: number | null;
+  currentEventId: string | null;
+  currentEventLabel: string;
+  currentSegmentId: string | null;
+  currentSegmentLabel: string;
+  progressPercent: number | null;
+  wrapsSystem: boolean;
+  windowStartTimestamp: number | null;
+  windowEndTimestamp: number | null;
+  windowMs: number;
+  windowNoteCountByStaff: Record<string, number>;
+  thresholdMs: number;
+  earlyThresholdVisible: boolean;
+  lateThresholdVisible: boolean;
+}
+
+interface TimedLiveCursorDebugSessionTotals {
+  frames: number;
+  segmentTransitions: number;
+  wrapTransitions: number;
+}
+
+interface TimedLiveCursorDebugPanelPosition {
+  left: number;
+  top: number;
+}
+
 interface RealtimeDebugStats {
   playedTotal: number;
   acceptedOnTime: number;
@@ -157,6 +272,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly TEMPO_STEP_BPM = 5;
   private static readonly AUDIO_SCHEDULE_AHEAD_SEC = 0.05;
   private static readonly REALTIME_ACCEPT_TOLERANCE_WHOLE_NOTES = 1 / 4;
+  private static readonly TIMED_LIVE_DEBUG_WINDOW_WHOLE_NOTES = 1 / 4;
+  private static readonly TIMED_LIVE_DEBUG_THRESHOLD_WHOLE_NOTES = 1 / 8;
   private static readonly FEEDBACK_CORRECT_COLOR = '#16a34a';
   private static readonly FEEDBACK_ERROR_COLOR = '#dc2626';
   private static readonly ENABLE_CURSOR_TRACE = false;
@@ -202,6 +319,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   // Play
   timePlayStart: number = 0;
   playbackStartScoreTimestamp: number = 0;
+  private playbackStartAudioTimeSec: number | null = null;
   private transportMode: TransportMode | null = null;
   private playbackClock: PlaybackClockState = {
     scheduledAudioTimeSec: null,
@@ -262,9 +380,29 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   showCursorDebugOverlay: boolean = false;
   showDebugConsoleOverlay: boolean = false;
   showCursorWrapDebugOverlay: boolean = false;
+  showTimedLiveCursorDebugOverlay: boolean = false;
   cursorWrapDebugEvents: string[] = [];
   cursorWrapDebugSnapshot: CursorWrapDebugSnapshot | null = null;
   private cursorDebugRefreshTimeout: number | null = null;
+  timedLiveCursorTimeline: TimedLiveCursorTimeline | null = null;
+  timedLiveCursorRenderState: TimedLiveCursorRenderState | null = null;
+  timedLiveCursorWindowRects: TimedLiveCursorWindowRect[] = [];
+  timedLiveCursorThresholdMarkers: TimedLiveCursorThresholdMarker[] = [];
+  timedLiveCursorDebugSnapshot: TimedLiveCursorDebugSnapshot | null = null;
+  timedLiveCursorDebugSessionTotals: TimedLiveCursorDebugSessionTotals = {
+    frames: 0,
+    segmentTransitions: 0,
+    wrapTransitions: 0,
+  };
+  private timedLiveCursorRefreshTimeout: number | null = null;
+  private timedLiveCursorAnimationFrame: number | null = null;
+  private timedLiveCursorLastSegmentId: string | null = null;
+  timedLiveCursorDebugPanelPosition: TimedLiveCursorDebugPanelPosition | null =
+    null;
+  private timedLiveCursorDebugPanelDragOffset: { x: number; y: number } | null =
+    null;
+  private timedLiveCursorDebugPanelSize: { width: number; height: number } | null =
+    null;
   private museDebugConsoleRelay = {
     wrap: false,
     realtime: false,
@@ -314,11 +452,20 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    window.removeEventListener(
+      'pointermove',
+      this.onTimedLiveCursorDebugPanelPointerMove
+    );
+    window.removeEventListener(
+      'pointerup',
+      this.onTimedLiveCursorDebugPanelPointerUp
+    );
     this.uninstallMuseDebugApi();
   }
 
   @HostListener('window:resize')
   onWindowResize(): void {
+    this.clampTimedLiveCursorDebugPanelPosition();
     if (this.fileLoaded) {
       this.refreshMeasureOverlaysDeferred();
     }
@@ -650,6 +797,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     void startTone().catch(() => undefined);
     this.updateRepeat();
     this.osmdStop();
+    this.refreshTimedLiveCursorTimeline();
     if (this.checkboxWaitMode) {
       this.osmdPractice();
       return;
@@ -744,6 +892,22 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.refreshCursorDebugMarkersDeferred();
   }
 
+  toggleTimedLiveCursorDebugOverlay(): void {
+    this.showTimedLiveCursorDebugOverlay = !this.showTimedLiveCursorDebugOverlay;
+    this.handleTimedLiveCursorDebugOverlayChange();
+  }
+
+  handleTimedLiveCursorDebugOverlayChange(): void {
+    if (this.showTimedLiveCursorDebugOverlay && !this.timedLiveCursorTimeline) {
+      this.refreshTimedLiveCursorTimeline();
+    }
+    if (!this.showTimedLiveCursorDebugOverlay) {
+      this.onTimedLiveCursorDebugPanelPointerUp();
+    }
+    this.updateLegacyPlayCursorDebugVisibility();
+    this.syncTimedLiveCursorDebugLoop();
+  }
+
   // Reset selection on measures and set the cursor to the origin
   osmdReset(): void {
     this.osmdStop();
@@ -829,6 +993,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   osmdStop(): void {
     this.running = false;
     this.setTransportMode(null);
+    this.timePlayStart = 0;
+    this.playbackStartScoreTimestamp = 0;
+    this.playbackStartAudioTimeSec = null;
     this.loopPass = 0;
     this.currentStepSatisfied = false;
     this.resetPlayCursorTransition();
@@ -843,6 +1010,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.lastPlayCursorTransitionDurationMs = 0;
     this.pendingDeferredTieStepAdvance = false;
     this.pendingTimedStartBootstrapAdvance = false;
+    this.stopTimedLiveCursorDebugLoop(true);
+    this.updateLegacyPlayCursorDebugVisibility();
     this.refreshCursorDebugMarkersDeferred();
   }
 
@@ -854,6 +1023,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.clearCursorTraceEvents();
     this.markCursorTraceLoopBoundary('listen start');
     this.setTransportMode('listen');
+    this.resetTimedLiveCursorDebugSession();
+    this.syncTimedLiveCursorDebugLoop();
     this.startFlashCount = 0;
     this.osmdCursorStart();
   }
@@ -866,6 +1037,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.clearCursorTraceEvents();
     this.markCursorTraceLoopBoundary('practice start');
     this.setTransportMode('wait');
+    this.stopTimedLiveCursorDebugLoop(true);
     this.startFlashCount = 4;
     this.osmdCursorStart();
   }
@@ -878,6 +1050,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.resetRealtimeDebugStats();
     this.markCursorTraceLoopBoundary('realtime start');
     this.setTransportMode('realtime');
+    this.stopTimedLiveCursorDebugLoop(true);
     this.currentStepSatisfied = false;
     this.startFlashCount = 4;
     this.osmdCursorStart();
@@ -1535,6 +1708,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     } else {
       audioTime = this.getCurrentScheduledPlaybackAudioTime();
     }
+    this.playbackStartAudioTimeSec = audioTime;
+    this.syncTimedLiveCursorDebugLoop();
 
     this.startMetronome();
 
@@ -2547,6 +2722,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private getCurrentPracticeGraphicalNotes(): PracticeGraphicalNote[] {
     const cursor: any = this.openSheetMusicDisplay?.cursors?.[0];
+    return this.getPracticeGraphicalNotesForCursor(cursor);
+  }
+
+  private getPracticeGraphicalNotesForCursor(cursor: any): PracticeGraphicalNote[] {
     if (!cursor?.GNotesUnderCursor) {
       return [];
     }
@@ -3068,6 +3247,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       getWrapLog: () => [...this.cursorWrapDebugEvents],
       getRealtimeLog: () => [...this.realtimeDebugEvents],
       getCursorTrace: () => [...this.cursorTraceEvents],
+      getTimedLiveCursorDebug: () => ({
+        renderState: this.timedLiveCursorRenderState,
+        windows: [...this.timedLiveCursorWindowRects],
+        thresholds: [...this.timedLiveCursorThresholdMarkers],
+        snapshot: this.timedLiveCursorDebugSnapshot,
+        sessionTotals: { ...this.timedLiveCursorDebugSessionTotals },
+      }),
       clearWrapLog: () => {
         this.cursorWrapDebugEvents = [];
       },
@@ -3082,6 +3268,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       playWait: () => this.osmdPractice(),
       playRealtime: () => this.osmdPracticeRealtime(),
       stop: () => this.osmdStop(),
+      setTimedCursorDebug: (enabled = true) => {
+        this.showTimedLiveCursorDebugOverlay = enabled;
+        this.handleTimedLiveCursorDebugOverlayChange();
+      },
       enableConsoleRelay: (channel = 'all', enabled = true) => {
         if (channel === 'all') {
           this.museDebugConsoleRelay.wrap = enabled;
@@ -3158,6 +3348,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       wrapLogSize: this.cursorWrapDebugEvents.length,
       realtimeLogSize: this.realtimeDebugEvents.length,
       traceLogSize: this.cursorTraceEvents.length,
+      timedLiveCursorDebugEnabled: this.showTimedLiveCursorDebugOverlay,
+      timedLiveCursorRenderState: this.timedLiveCursorRenderState,
+      timedLiveCursorWindowCount: this.timedLiveCursorWindowRects.length,
+      timedLiveCursorThresholdCount: this.timedLiveCursorThresholdMarkers.length,
+      timedLiveCursorSnapshot: this.timedLiveCursorDebugSnapshot,
     };
   }
 
@@ -3588,6 +3783,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.showRangePicker = true;
     }
     this.loopPass = 0;
+    this.refreshTimedLiveCursorTimelineDeferred();
+    this.refreshCursorDebugMarkersDeferred();
   }
 
   private clearLoopRange(): void {
@@ -3603,6 +3800,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.loopPass = 0;
     this.inputMeasure.lower = this.inputMeasureRange.lower;
     this.inputMeasure.upper = this.inputMeasureRange.upper;
+    this.refreshTimedLiveCursorTimelineDeferred();
+    this.refreshCursorDebugMarkersDeferred();
   }
 
   private restoreLoopRange(): void {
@@ -3612,10 +3811,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.checkboxRepeat = true;
       this.showRangePicker = true;
       this.loopPass = 0;
+      this.refreshTimedLiveCursorTimelineDeferred();
+      this.refreshCursorDebugMarkersDeferred();
       return;
     }
 
     this.showRangePicker = true;
+    this.refreshTimedLiveCursorTimelineDeferred();
+    this.refreshCursorDebugMarkersDeferred();
   }
 
   private readonly onRangeHandlePointerMove = (event: PointerEvent): void => {
@@ -3862,6 +4065,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private refreshMeasureOverlays(): void {
     if (!this.fileLoaded) {
       this.measureOverlays = [];
+      this.timedLiveCursorTimeline = null;
+      this.timedLiveCursorRenderState = null;
       return;
     }
 
@@ -3871,6 +4076,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     if (!sheet || !graphicSheet || !container) {
       this.measureOverlays = [];
+      this.timedLiveCursorTimeline = null;
+      this.timedLiveCursorRenderState = null;
       return;
     }
 
@@ -3925,7 +4132,1079 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     });
 
     this.measureOverlays = overlays;
+    this.refreshTimedLiveCursorTimelineDeferred();
     this.refreshCursorDebugMarkersDeferred();
+  }
+
+  private refreshTimedLiveCursorTimelineDeferred(): void {
+    if (this.timedLiveCursorRefreshTimeout !== null) {
+      window.clearTimeout(this.timedLiveCursorRefreshTimeout);
+    }
+
+    this.timedLiveCursorRefreshTimeout = window.setTimeout(() => {
+      this.timedLiveCursorRefreshTimeout = null;
+      this.refreshTimedLiveCursorTimeline();
+    }, 0);
+  }
+
+  private refreshTimedLiveCursorTimeline(): void {
+    if (!this.fileLoaded) {
+      this.timedLiveCursorTimeline = null;
+      this.timedLiveCursorRenderState = null;
+      this.syncTimedLiveCursorDebugLoop();
+      return;
+    }
+
+    // Build the new timed/live cursor timeline only while idle so we do not
+    // disturb the active playback cursors until the runtime handoff is ready.
+    if (this.running) {
+      return;
+    }
+
+    const cursor: any = this.openSheetMusicDisplay?.cursors?.[0];
+    const container = document.getElementById('scoreOverlayHost');
+    if (!cursor || !container || this.measureOverlays.length === 0) {
+      this.timedLiveCursorTimeline = null;
+      this.timedLiveCursorRenderState = null;
+      this.syncTimedLiveCursorDebugLoop();
+      return;
+    }
+
+    const timeline = this.buildTimedLiveCursorTimeline(cursor, container);
+    this.timedLiveCursorTimeline = timeline;
+    this.timedLiveCursorRenderState = timeline
+      ? {
+          left: timeline.startLeft,
+          top: timeline.startTop,
+          height: timeline.startHeight,
+          visible: false,
+        }
+      : null;
+    this.syncTimedLiveCursorDebugLoop();
+  }
+
+  private buildTimedLiveCursorTimeline(
+    cursor: any,
+    container: HTMLElement
+  ): TimedLiveCursorTimeline | null {
+    const startMeasure = this.getSourceMeasureByNumber(this.inputMeasure.lower);
+    const endMeasure = this.getSourceMeasureByNumber(this.inputMeasure.upper);
+    const startOverlay = this.getMeasureOverlayByNumber(this.inputMeasure.lower);
+    const endOverlay = this.getMeasureOverlayByNumber(this.inputMeasure.upper);
+
+    if (!startMeasure || !endMeasure || !startOverlay || !endOverlay) {
+      return null;
+    }
+
+    const startTimestamp = startMeasure.AbsoluteTimestamp?.RealValue;
+    const endTimestamp =
+      endMeasure.AbsoluteTimestamp?.RealValue + endMeasure.Duration?.RealValue;
+    if (!Number.isFinite(startTimestamp) || !Number.isFinite(endTimestamp)) {
+      return null;
+    }
+
+    const events: TimedLiveCursorEvent[] = [];
+    const previousFollowCursor = this.openSheetMusicDisplay?.FollowCursor;
+    const previousCursorFollow = cursor?.cursorOptions?.follow;
+    const wasHidden = !!cursor?.hidden;
+
+    if (typeof previousFollowCursor === 'boolean') {
+      this.openSheetMusicDisplay.FollowCursor = false;
+    }
+    if (cursor?.cursorOptions) {
+      cursor.cursorOptions.follow = false;
+    }
+
+    try {
+      cursor.show?.();
+      cursor.reset?.();
+      cursor.update?.();
+
+      while (true) {
+        const measureNumber = cursor.iterator?.CurrentMeasureIndex + 1;
+        if (!Number.isFinite(measureNumber) || measureNumber > this.inputMeasure.upper) {
+          break;
+        }
+
+        if (measureNumber >= this.inputMeasure.lower) {
+          const event = this.buildTimedLiveCursorEvent(
+            cursor,
+            container,
+            events.length
+          );
+          if (event) {
+            events.push(event);
+          }
+        }
+
+        const it2 = cursor.iterator?.clone?.();
+        if (!it2) {
+          break;
+        }
+        it2.moveToNext();
+        if (it2.EndReached || this.inputMeasure.upper < it2.CurrentMeasureIndex + 1) {
+          break;
+        }
+
+        cursor.next?.();
+        cursor.update?.();
+      }
+
+      cursor.reset?.();
+      cursor.update?.();
+    } finally {
+      if (typeof previousFollowCursor === 'boolean') {
+        this.openSheetMusicDisplay.FollowCursor = previousFollowCursor;
+      }
+      if (cursor?.cursorOptions) {
+        cursor.cursorOptions.follow = previousCursorFollow;
+      }
+      if (wasHidden) {
+        cursor.hide?.();
+      }
+    }
+
+    if (events.length === 0) {
+      return null;
+    }
+
+    return {
+      range: {
+        lower: this.inputMeasure.lower,
+        upper: this.inputMeasure.upper,
+      },
+      startTimestamp: Number(startTimestamp),
+      startLeft: startOverlay.left,
+      startTop: startOverlay.top,
+      startHeight: Math.max(startOverlay.bottom - startOverlay.top, 12),
+      endTimestamp: Number(endTimestamp),
+      endLeft: endOverlay.right,
+      endTop: endOverlay.top,
+      endHeight: Math.max(endOverlay.bottom - endOverlay.top, 12),
+      events,
+      segments: this.buildTimedLiveCursorSegments(
+        events,
+        Number(startTimestamp),
+        Number(endTimestamp),
+        startOverlay,
+        endOverlay
+      ),
+      builtAt: Date.now(),
+    };
+  }
+
+  private buildTimedLiveCursorEvent(
+    cursor: any,
+    container: HTMLElement,
+    index: number
+  ): TimedLiveCursorEvent | null {
+    const timestamp = cursor.iterator?.CurrentSourceTimestamp?.RealValue;
+    const measureNumber = cursor.iterator?.CurrentMeasureIndex + 1;
+    const currentMeasure = cursor.iterator?.CurrentMeasure;
+
+    if (
+      !Number.isFinite(timestamp) ||
+      !Number.isFinite(measureNumber) ||
+      !currentMeasure
+    ) {
+      return null;
+    }
+
+    const measureOverlay = this.getMeasureOverlayByNumber(measureNumber);
+    if (!measureOverlay) {
+      return null;
+    }
+
+    const actionableTargets = this.getCursorActionableTargetCenters(cursor, container);
+    const allTargets = this.getCursorTargetCenters(cursor, container);
+    const notes = this.getPracticeGraphicalNotesForCursor(cursor)
+      .map((note) => {
+        const rect = this.getAnchorDomRect(
+          note.anchorElement,
+          note.groupElement,
+          container
+        );
+
+        return {
+          halfTone: note.halfTone,
+          staffId:
+            note.graphicalNote?.sourceNote?.ParentStaff?.idInMusicSheet ?? null,
+          actionable: this.isActionableGraphicalPracticeNote(note.graphicalNote),
+          left: rect ? rect.left + rect.width / 2 : null,
+          top: rect ? rect.top + rect.height / 2 : null,
+        };
+      })
+      .sort((a, b) => {
+        const leftA = Number.isFinite(a.left) ? Number(a.left) : Number.POSITIVE_INFINITY;
+        const leftB = Number.isFinite(b.left) ? Number(b.left) : Number.POSITIVE_INFINITY;
+        if (leftA !== leftB) {
+          return leftA - leftB;
+        }
+
+        return a.halfTone - b.halfTone;
+      });
+    const left =
+      allTargets[0] ??
+      this.getMeasureTimestampX(currentMeasure, timestamp, measureOverlay);
+    if (!Number.isFinite(left)) {
+      return null;
+    }
+
+    const actionable = this.cursorStepHasActionablePracticeNote(
+      cursor,
+      this.getPracticeStaffSelection()
+    );
+    const nextTimestamp = this.getNextRawCursorTimestamp(cursor);
+    const durationToNext =
+      nextTimestamp !== null ? Math.max(nextTimestamp - timestamp, 0) : 0;
+
+    return {
+      id: `timed-live-${measureNumber}-${timestamp}-${index}`,
+      measureNumber,
+      timestamp,
+      durationToNext,
+      left: Number(left),
+      top: measureOverlay.top,
+      height: Math.max(measureOverlay.bottom - measureOverlay.top, 12),
+      barStartX: measureOverlay.left,
+      barEndX: measureOverlay.right,
+      systemId: this.getRenderedSystemIdForMeasure(measureNumber),
+      actionable,
+      actionableTargets,
+      allTargets,
+      notes,
+    };
+  }
+
+  private buildTimedLiveCursorSegments(
+    events: TimedLiveCursorEvent[],
+    startTimestamp: number,
+    endTimestamp: number,
+    startOverlay: MeasureOverlay,
+    endOverlay: MeasureOverlay
+  ): TimedLiveCursorSegment[] {
+    const segments: TimedLiveCursorSegment[] = [];
+    const startHeight = Math.max(startOverlay.bottom - startOverlay.top, 12);
+    const endHeight = Math.max(endOverlay.bottom - endOverlay.top, 12);
+
+    const firstEvent = events[0] ?? null;
+    if (
+      firstEvent &&
+      firstEvent.timestamp > startTimestamp + Number.EPSILON
+    ) {
+      segments.push({
+        id: `timed-live-segment-start-${startTimestamp}-${firstEvent.timestamp}`,
+        startTimestamp,
+        endTimestamp: firstEvent.timestamp,
+        duration: Math.max(firstEvent.timestamp - startTimestamp, 0),
+        startLeft: startOverlay.left,
+        startTop: startOverlay.top,
+        startHeight,
+        endLeft: firstEvent.left,
+        endTop: firstEvent.top,
+        endHeight: firstEvent.height,
+        wrapsSystem: false,
+        wrapExitX: null,
+        wrapEntryX: null,
+      });
+    }
+
+    for (let index = 0; index < events.length - 1; index++) {
+      const current = events[index];
+      const next = events[index + 1];
+      const wrapsSystem =
+        current.systemId !== null &&
+        next.systemId !== null &&
+        current.systemId !== next.systemId;
+
+      segments.push({
+        id: `timed-live-segment-${current.timestamp}-${next.timestamp}-${index}`,
+        startTimestamp: current.timestamp,
+        endTimestamp: next.timestamp,
+        duration: Math.max(next.timestamp - current.timestamp, 0),
+        startLeft: current.left,
+        startTop: current.top,
+        startHeight: current.height,
+        endLeft: next.left,
+        endTop: next.top,
+        endHeight: next.height,
+        wrapsSystem,
+        wrapExitX: wrapsSystem ? current.barEndX : null,
+        wrapEntryX: wrapsSystem ? next.barStartX : null,
+      });
+    }
+
+    const lastEvent = events[events.length - 1] ?? null;
+    if (lastEvent && endTimestamp > lastEvent.timestamp + Number.EPSILON) {
+      segments.push({
+        id: `timed-live-segment-end-${lastEvent.timestamp}-${endTimestamp}`,
+        startTimestamp: lastEvent.timestamp,
+        endTimestamp,
+        duration: Math.max(endTimestamp - lastEvent.timestamp, 0),
+        startLeft: lastEvent.left,
+        startTop: lastEvent.top,
+        startHeight: lastEvent.height,
+        endLeft: endOverlay.right,
+        endTop: endOverlay.top,
+        endHeight,
+        wrapsSystem: false,
+        wrapExitX: null,
+        wrapEntryX: null,
+      });
+    }
+
+    return segments;
+  }
+
+  getTimedLiveCursorStyle(): Record<string, string> {
+    const cursor = this.timedLiveCursorRenderState;
+    if (!cursor || !cursor.visible) {
+      return {};
+    }
+
+    return {
+      left: `${cursor.left}px`,
+      top: `${cursor.top}px`,
+      height: `${Math.max(cursor.height, 12)}px`,
+    };
+  }
+
+  getTimedLiveCursorWindowStyle(
+    windowRect: TimedLiveCursorWindowRect
+  ): Record<string, string> {
+    return {
+      left: `${windowRect.left}px`,
+      top: `${windowRect.top}px`,
+      width: `${windowRect.width}px`,
+      height: `${windowRect.height}px`,
+      '--timed-live-window-color': windowRect.color,
+    };
+  }
+
+  getTimedLiveCursorThresholdStyle(
+    marker: TimedLiveCursorThresholdMarker
+  ): Record<string, string> {
+    return {
+      left: `${marker.left}px`,
+      top: `${marker.top}px`,
+      height: `${Math.max(marker.height, 12)}px`,
+      '--timed-live-threshold-color': marker.color,
+    };
+  }
+
+  getTimedLiveCursorDebugPanelStyle(): Record<string, string> {
+    const position = this.timedLiveCursorDebugPanelPosition;
+    if (!position) {
+      return {};
+    }
+
+    return {
+      left: `${position.left}px`,
+      top: `${position.top}px`,
+      right: 'auto',
+    };
+  }
+
+  showTimedLiveCursorDebugPanel(): boolean {
+    return this.showTimedLiveCursorDebugOverlay && this.fileLoaded;
+  }
+
+  getTimedLiveCursorDebugSummaryLines(): string[] {
+    const snapshot = this.timedLiveCursorDebugSnapshot;
+    if (!snapshot) {
+      const timeline = this.timedLiveCursorTimeline;
+      if (!timeline) {
+        return ['timeline unavailable'];
+      }
+
+      return [
+        `timeline ${timeline.events.length} events ${timeline.segments.length} segments`,
+        `range m${timeline.range.lower}-${timeline.range.upper}`,
+        'transport idle',
+      ];
+    }
+
+    const currentScoreLabel =
+      snapshot.scoreTimestamp !== null
+        ? this.formatScoreTimestamp(snapshot.scoreTimestamp)
+        : 't?';
+    const progressLabel =
+      snapshot.progressPercent !== null
+        ? `${Math.round(snapshot.progressPercent)}%`
+        : 'na';
+    const windowNoteSummary = Object.entries(snapshot.windowNoteCountByStaff)
+      .map(([staff, count]) => `${staff}:${count}`)
+      .join(' ');
+
+    return [
+      `${this.transportMode ?? 'idle'} loop ${this.loopPass} score ${currentScoreLabel}`,
+      `event ${snapshot.currentEventLabel}`,
+      `segment ${snapshot.currentSegmentLabel} prog ${progressLabel}`,
+      `window ${this.formatScoreTimestamp(snapshot.windowStartTimestamp)} -> ${this.formatScoreTimestamp(snapshot.windowEndTimestamp)}`,
+      `notes ${windowNoteSummary || 'none'} win ${snapshot.windowMs}ms thr ${snapshot.thresholdMs}ms`,
+      `early ${snapshot.earlyThresholdVisible ? 'on' : 'off'} late ${snapshot.lateThresholdVisible ? 'on' : 'off'} wrap ${snapshot.wrapsSystem ? 'yes' : 'no'}`,
+      `frames ${this.timedLiveCursorDebugSessionTotals.frames} seg ${this.timedLiveCursorDebugSessionTotals.segmentTransitions} wraps ${this.timedLiveCursorDebugSessionTotals.wrapTransitions}`,
+      `timeline ${this.timedLiveCursorTimeline?.events.length ?? 0} events ${this.timedLiveCursorTimeline?.segments.length ?? 0} segments`,
+    ];
+  }
+
+  startTimedLiveCursorDebugPanelDrag(event: PointerEvent): void {
+    const handle = event.currentTarget as HTMLElement | null;
+    const panel = handle?.closest('.realtime-debug-panel') as HTMLElement | null;
+    if (!panel) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const rect = panel.getBoundingClientRect();
+    const containingRect = this.getTimedLiveCursorDebugPanelContainingRect(panel);
+    this.timedLiveCursorDebugPanelPosition = {
+      left: rect.left - containingRect.left,
+      top: rect.top - containingRect.top,
+    };
+    this.timedLiveCursorDebugPanelDragOffset = {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    };
+    this.timedLiveCursorDebugPanelSize = {
+      width: rect.width,
+      height: rect.height,
+    };
+
+    window.addEventListener(
+      'pointermove',
+      this.onTimedLiveCursorDebugPanelPointerMove
+    );
+    window.addEventListener(
+      'pointerup',
+      this.onTimedLiveCursorDebugPanelPointerUp
+    );
+  }
+
+  private syncTimedLiveCursorDebugLoop(): void {
+    this.updateLegacyPlayCursorDebugVisibility();
+    if (this.shouldRunTimedLiveCursorDebugLoop()) {
+      this.startTimedLiveCursorDebugLoop();
+      return;
+    }
+
+    this.stopTimedLiveCursorDebugLoop(true);
+  }
+
+  private shouldRunTimedLiveCursorDebugLoop(): boolean {
+    return (
+      this.showTimedLiveCursorDebugOverlay &&
+      this.running &&
+      this.listenMode &&
+      !!this.timedLiveCursorTimeline
+    );
+  }
+
+  private startTimedLiveCursorDebugLoop(): void {
+    if (this.timedLiveCursorAnimationFrame !== null) {
+      return;
+    }
+
+    const tick = () => {
+      this.timedLiveCursorAnimationFrame = null;
+      if (!this.shouldRunTimedLiveCursorDebugLoop()) {
+        this.stopTimedLiveCursorDebugLoop(true);
+        return;
+      }
+
+      this.updateTimedLiveCursorDebugOverlay();
+      this.timedLiveCursorAnimationFrame = window.requestAnimationFrame(tick);
+    };
+
+    this.updateTimedLiveCursorDebugOverlay();
+    this.timedLiveCursorAnimationFrame = window.requestAnimationFrame(tick);
+  }
+
+  private stopTimedLiveCursorDebugLoop(reset: boolean): void {
+    if (this.timedLiveCursorAnimationFrame !== null) {
+      window.cancelAnimationFrame(this.timedLiveCursorAnimationFrame);
+      this.timedLiveCursorAnimationFrame = null;
+    }
+
+    if (reset) {
+      this.clearTimedLiveCursorDebugState();
+    }
+  }
+
+  private resetTimedLiveCursorDebugSession(): void {
+    this.timedLiveCursorDebugSessionTotals = {
+      frames: 0,
+      segmentTransitions: 0,
+      wrapTransitions: 0,
+    };
+    this.timedLiveCursorLastSegmentId = null;
+    this.timedLiveCursorDebugSnapshot = null;
+    this.timedLiveCursorThresholdMarkers = [];
+    this.timedLiveCursorWindowRects = [];
+  }
+
+  private readonly onTimedLiveCursorDebugPanelPointerMove = (
+    event: PointerEvent
+  ): void => {
+    if (!this.timedLiveCursorDebugPanelDragOffset) {
+      return;
+    }
+
+    event.preventDefault();
+    const containingRect = this.getTimedLiveCursorDebugPanelContainingRect();
+    const width = this.timedLiveCursorDebugPanelSize?.width ?? 320;
+    const height = this.timedLiveCursorDebugPanelSize?.height ?? 180;
+    const minInset = 12;
+    const left = Math.min(
+      Math.max(
+        event.clientX -
+          containingRect.left -
+          this.timedLiveCursorDebugPanelDragOffset.x,
+        minInset
+      ),
+      Math.max(containingRect.width - width - minInset, minInset)
+    );
+    const top = Math.min(
+      Math.max(
+        event.clientY -
+          containingRect.top -
+          this.timedLiveCursorDebugPanelDragOffset.y,
+        minInset
+      ),
+      Math.max(containingRect.height - height - minInset, minInset)
+    );
+
+    this.timedLiveCursorDebugPanelPosition = { left, top };
+  };
+
+  private readonly onTimedLiveCursorDebugPanelPointerUp = (): void => {
+    this.timedLiveCursorDebugPanelDragOffset = null;
+    window.removeEventListener(
+      'pointermove',
+      this.onTimedLiveCursorDebugPanelPointerMove
+    );
+    window.removeEventListener(
+      'pointerup',
+      this.onTimedLiveCursorDebugPanelPointerUp
+    );
+  };
+
+  private clampTimedLiveCursorDebugPanelPosition(): void {
+    const position = this.timedLiveCursorDebugPanelPosition;
+    if (!position) {
+      return;
+    }
+
+    const containingRect = this.getTimedLiveCursorDebugPanelContainingRect();
+    const width = this.timedLiveCursorDebugPanelSize?.width ?? 320;
+    const height = this.timedLiveCursorDebugPanelSize?.height ?? 180;
+    const minInset = 12;
+
+    this.timedLiveCursorDebugPanelPosition = {
+      left: Math.min(
+        Math.max(position.left, minInset),
+        Math.max(containingRect.width - width - minInset, minInset)
+      ),
+      top: Math.min(
+        Math.max(position.top, minInset),
+        Math.max(containingRect.height - height - minInset, minInset)
+      ),
+    };
+  }
+
+  private getTimedLiveCursorDebugPanelContainingRect(
+    panel?: HTMLElement | null
+  ): DOMRect {
+    const referencePanel =
+      panel ??
+      (document.querySelector('.realtime-debug-panel--bottom') as HTMLElement | null);
+    const containingElement =
+      (referencePanel?.offsetParent as HTMLElement | null) ??
+      document.getElementById('play-content');
+
+    return (
+      containingElement?.getBoundingClientRect?.() ??
+      new DOMRect(0, 0, window.innerWidth, window.innerHeight)
+    );
+  }
+
+  private clearTimedLiveCursorDebugState(): void {
+    this.timedLiveCursorLastSegmentId = null;
+    this.timedLiveCursorThresholdMarkers = [];
+    this.timedLiveCursorWindowRects = [];
+    this.timedLiveCursorDebugSnapshot = null;
+    if (this.timedLiveCursorRenderState) {
+      this.timedLiveCursorRenderState = {
+        ...this.timedLiveCursorRenderState,
+        visible: false,
+      };
+    }
+  }
+
+  private updateLegacyPlayCursorDebugVisibility(): void {
+    const cursorElement = this.getPlayCursorElement();
+    if (!cursorElement) {
+      return;
+    }
+
+    cursorElement.style.opacity =
+      this.showTimedLiveCursorDebugOverlay && this.listenMode ? '0.12' : '';
+  }
+
+  private updateTimedLiveCursorDebugOverlay(): void {
+    const timeline = this.timedLiveCursorTimeline;
+    if (!timeline) {
+      this.clearTimedLiveCursorDebugState();
+      return;
+    }
+
+    const scoreTimestamp = this.getTimedLiveCursorScoreTimestamp();
+    if (scoreTimestamp === null) {
+      this.clearTimedLiveCursorDebugState();
+      return;
+    }
+
+    const cursorState = this.resolveTimedLiveCursorRenderAtTimestamp(scoreTimestamp);
+    if (!cursorState) {
+      this.clearTimedLiveCursorDebugState();
+      return;
+    }
+
+    this.timedLiveCursorDebugSessionTotals.frames++;
+    if (
+      cursorState.segment &&
+      cursorState.segment.id !== this.timedLiveCursorLastSegmentId
+    ) {
+      this.timedLiveCursorDebugSessionTotals.segmentTransitions++;
+      if (cursorState.segment.wrapsSystem) {
+        this.timedLiveCursorDebugSessionTotals.wrapTransitions++;
+      }
+      this.timedLiveCursorLastSegmentId = cursorState.segment.id;
+    }
+
+    const windowWholeNotes =
+      PlayPageComponent.TIMED_LIVE_DEBUG_WINDOW_WHOLE_NOTES;
+    const thresholdWholeNotes =
+      PlayPageComponent.TIMED_LIVE_DEBUG_THRESHOLD_WHOLE_NOTES;
+    const windowMs = Math.round(
+      this.getPlaybackDelayMs(windowWholeNotes)
+    );
+    const thresholdMs = Math.round(
+      this.getPlaybackDelayMs(thresholdWholeNotes)
+    );
+    const windowStartTimestamp = Math.max(
+      timeline.startTimestamp,
+      scoreTimestamp - windowWholeNotes
+    );
+    const windowEndTimestamp = Math.min(
+      timeline.endTimestamp,
+      scoreTimestamp + windowWholeNotes
+    );
+    const thresholdStartTimestamp = Math.max(
+      timeline.startTimestamp,
+      scoreTimestamp - thresholdWholeNotes
+    );
+    const thresholdEndTimestamp = Math.min(
+      timeline.endTimestamp,
+      scoreTimestamp + thresholdWholeNotes
+    );
+
+    this.timedLiveCursorRenderState = {
+      left: cursorState.left,
+      top: cursorState.top,
+      height: cursorState.height,
+      visible: true,
+    };
+    this.timedLiveCursorThresholdMarkers = this.buildTimedLiveCursorThresholdMarkers(
+      thresholdStartTimestamp,
+      thresholdEndTimestamp
+    );
+    this.timedLiveCursorWindowRects = this.buildTimedLiveCursorWindowRects(
+      windowStartTimestamp,
+      windowEndTimestamp
+    );
+    this.timedLiveCursorDebugSnapshot = {
+      scoreTimestamp,
+      currentEventId: cursorState.event?.id ?? null,
+      currentEventLabel: this.formatTimedLiveCursorEventLabel(cursorState.event),
+      currentSegmentId: cursorState.segment?.id ?? null,
+      currentSegmentLabel: this.formatTimedLiveCursorSegmentLabel(
+        cursorState.segment
+      ),
+      progressPercent:
+        cursorState.progress !== null
+          ? Math.max(0, Math.min(100, cursorState.progress * 100))
+          : null,
+      wrapsSystem: !!cursorState.segment?.wrapsSystem,
+      windowStartTimestamp,
+      windowEndTimestamp,
+      windowMs,
+      windowNoteCountByStaff: this.summarizeTimedLiveCursorWindowNotes(
+        windowStartTimestamp,
+        windowEndTimestamp
+      ),
+      thresholdMs,
+      earlyThresholdVisible: this.timedLiveCursorThresholdMarkers.some(
+        (marker) => marker.id === 'timed-live-threshold-early'
+      ),
+      lateThresholdVisible: this.timedLiveCursorThresholdMarkers.some(
+        (marker) => marker.id === 'timed-live-threshold-late'
+      ),
+    };
+  }
+
+  private buildTimedLiveCursorThresholdMarkers(
+    windowStartTimestamp: number,
+    windowEndTimestamp: number
+  ): TimedLiveCursorThresholdMarker[] {
+    const markers: TimedLiveCursorThresholdMarker[] = [];
+    const lateState = this.resolveTimedLiveCursorRenderAtTimestamp(
+      windowStartTimestamp
+    );
+    const earlyState = this.resolveTimedLiveCursorRenderAtTimestamp(
+      windowEndTimestamp
+    );
+
+    if (lateState) {
+      markers.push({
+        id: 'timed-live-threshold-late',
+        label: 'late',
+        left: lateState.left,
+        top: lateState.top,
+        height: lateState.height,
+        color: '#7c3aed',
+      });
+    }
+
+    if (earlyState) {
+      markers.push({
+        id: 'timed-live-threshold-early',
+        label: 'early',
+        left: earlyState.left,
+        top: earlyState.top,
+        height: earlyState.height,
+        color: '#f97316',
+      });
+    }
+
+    return markers;
+  }
+
+  private buildTimedLiveCursorWindowRects(
+    windowStartTimestamp: number,
+    windowEndTimestamp: number
+  ): TimedLiveCursorWindowRect[] {
+    const timeline = this.timedLiveCursorTimeline;
+    if (!timeline) {
+      return [];
+    }
+
+    const notesByStaffAndSystem = new Map<
+      string,
+      {
+        staffId: number | null;
+        systemId: number | null;
+        notes: TimedLiveCursorNote[];
+      }
+    >();
+    timeline.events
+      .filter(
+        (event) =>
+          event.timestamp >= windowStartTimestamp - Number.EPSILON &&
+          event.timestamp <= windowEndTimestamp + Number.EPSILON
+      )
+      .forEach((event) => {
+        const preferredNotes = event.notes.filter((note) => note.actionable);
+        const notes = preferredNotes.length > 0 ? preferredNotes : event.notes;
+        notes.forEach((note) => {
+          if (!Number.isFinite(note.left) || !Number.isFinite(note.top)) {
+            return;
+          }
+
+          const groupKey = `${note.staffId ?? 'all'}:${event.systemId ?? 'na'}`;
+          const existing = notesByStaffAndSystem.get(groupKey) ?? {
+            staffId: note.staffId,
+            systemId: event.systemId ?? null,
+            notes: [],
+          };
+          existing.notes.push(note);
+          notesByStaffAndSystem.set(groupKey, existing);
+        });
+      });
+
+    return Array.from(notesByStaffAndSystem.values())
+      .map(({ staffId, systemId, notes }) => {
+        if (!notes.length) {
+          return null;
+        }
+
+        const lefts = notes
+          .map((note) => note.left)
+          .filter((value): value is number => Number.isFinite(value));
+        const tops = notes
+          .map((note) => note.top)
+          .filter((value): value is number => Number.isFinite(value));
+        if (!lefts.length || !tops.length) {
+          return null;
+        }
+
+        const paddingX = 18;
+        const paddingY = 18;
+        const left = Math.min(...lefts) - paddingX;
+        const right = Math.max(...lefts) + paddingX;
+        const top = Math.min(...tops) - paddingY;
+        const bottom = Math.max(...tops) + paddingY;
+
+        return {
+          id: `timed-live-window-${staffId ?? 'all'}-${systemId ?? 'na'}`,
+          staffId,
+          systemId,
+          label: `${this.getTimedLiveCursorStaffLabel(staffId)} ${notes.length}`,
+          noteCount: notes.length,
+          left,
+          top,
+          width: Math.max(right - left, 24),
+          height: Math.max(bottom - top, 24),
+          color: this.getTimedLiveCursorStaffColor(staffId),
+        };
+      })
+      .filter((windowRect): windowRect is TimedLiveCursorWindowRect => !!windowRect);
+  }
+
+  private summarizeTimedLiveCursorWindowNotes(
+    windowStartTimestamp: number,
+    windowEndTimestamp: number
+  ): Record<string, number> {
+    const summary: Record<string, number> = {};
+    this.buildTimedLiveCursorWindowRects(windowStartTimestamp, windowEndTimestamp).forEach(
+      (windowRect) => {
+        const label = this.getTimedLiveCursorStaffLabel(windowRect.staffId);
+        summary[label] = (summary[label] ?? 0) + windowRect.noteCount;
+      }
+    );
+    return summary;
+  }
+
+  private getTimedLiveCursorStaffLabel(staffId: number | null): string {
+    if (staffId === 0) {
+      return 'RH';
+    }
+    if (staffId === 1) {
+      return 'LH';
+    }
+    if (Number.isFinite(staffId)) {
+      return `S${Number(staffId) + 1}`;
+    }
+
+    return 'All';
+  }
+
+  private getTimedLiveCursorStaffColor(staffId: number | null): string {
+    if (staffId === 0) {
+      return '#0ea5e9';
+    }
+    if (staffId === 1) {
+      return '#ec4899';
+    }
+
+    return '#64748b';
+  }
+
+  private formatTimedLiveCursorEventLabel(
+    event: TimedLiveCursorEvent | null
+  ): string {
+    if (!event) {
+      return 'none';
+    }
+
+    return `m${event.measureNumber} ${this.formatScoreTimestamp(event.timestamp)}`;
+  }
+
+  private formatTimedLiveCursorSegmentLabel(
+    segment: TimedLiveCursorSegment | null
+  ): string {
+    if (!segment) {
+      return 'none';
+    }
+
+    return `${this.formatScoreTimestamp(segment.startTimestamp)} -> ${this.formatScoreTimestamp(segment.endTimestamp)}`;
+  }
+
+  private getTimedLiveCursorScoreTimestamp(): number | null {
+    const timeline = this.timedLiveCursorTimeline;
+    if (!timeline || !this.running || !this.listenMode) {
+      return null;
+    }
+
+    if (!Number.isFinite(this.playbackStartScoreTimestamp) || this.timePlayStart <= 0) {
+      return null;
+    }
+
+    const startAudioTimeSec = this.playbackStartAudioTimeSec;
+    if (typeof startAudioTimeSec !== 'number' || !Number.isFinite(startAudioTimeSec)) {
+      return null;
+    }
+
+    const wholeNotesPerSecond = this.getEffectiveTempoBPM() / 240;
+    const elapsedSec = Math.max(toneNow() - startAudioTimeSec, 0);
+    const estimatedTimestamp =
+      this.playbackStartScoreTimestamp + elapsedSec * wholeNotesPerSecond;
+
+    return Math.min(
+      Math.max(estimatedTimestamp, timeline.startTimestamp),
+      timeline.endTimestamp
+    );
+  }
+
+  private resolveTimedLiveCursorRenderAtTimestamp(timestamp: number): {
+    left: number;
+    top: number;
+    height: number;
+    progress: number | null;
+    segment: TimedLiveCursorSegment | null;
+    event: TimedLiveCursorEvent | null;
+  } | null {
+    const timeline = this.timedLiveCursorTimeline;
+    if (!timeline) {
+      return null;
+    }
+
+    const clampedTimestamp = Math.min(
+      Math.max(timestamp, timeline.startTimestamp),
+      timeline.endTimestamp
+    );
+    const segment = this.findTimedLiveCursorSegmentAtTimestamp(clampedTimestamp);
+    if (!segment) {
+      return {
+        left: timeline.endLeft,
+        top: timeline.endTop,
+        height: timeline.endHeight,
+        progress: null,
+        segment: null,
+        event: timeline.events[timeline.events.length - 1] ?? null,
+      };
+    }
+
+    const duration = Math.max(segment.duration, Number.EPSILON);
+    const progress =
+      duration > Number.EPSILON
+        ? Math.min(
+            Math.max((clampedTimestamp - segment.startTimestamp) / duration, 0),
+            1
+          )
+        : 1;
+
+    const height = this.interpolateLinear(
+      segment.startHeight,
+      segment.endHeight,
+      progress
+    );
+    const top = this.interpolateLinear(segment.startTop, segment.endTop, progress);
+
+    if (!segment.wrapsSystem) {
+      return {
+        left: this.interpolateLinear(segment.startLeft, segment.endLeft, progress),
+        top,
+        height,
+        progress,
+        segment,
+        event: this.getTimedLiveCursorEventAtOrBefore(clampedTimestamp),
+      };
+    }
+
+    const wrapExitX = segment.wrapExitX ?? segment.startLeft;
+    const wrapEntryX = segment.wrapEntryX ?? segment.endLeft;
+    const firstDistance = Math.max(wrapExitX - segment.startLeft, 0);
+    const secondDistance = Math.max(segment.endLeft - wrapEntryX, 0);
+    const totalDistance = firstDistance + secondDistance;
+
+    if (totalDistance <= Number.EPSILON) {
+      return {
+        left: segment.endLeft,
+        top: segment.endTop,
+        height: segment.endHeight,
+        progress,
+        segment,
+        event: this.getTimedLiveCursorEventAtOrBefore(clampedTimestamp),
+      };
+    }
+
+    const travelled = totalDistance * progress;
+    if (travelled <= firstDistance || secondDistance <= Number.EPSILON) {
+      return {
+        left: segment.startLeft + travelled,
+        top: segment.startTop,
+        height: segment.startHeight,
+        progress,
+        segment,
+        event: this.getTimedLiveCursorEventAtOrBefore(clampedTimestamp),
+      };
+    }
+
+    return {
+      left: wrapEntryX + (travelled - firstDistance),
+      top: segment.endTop,
+      height: segment.endHeight,
+      progress,
+      segment,
+      event: this.getTimedLiveCursorEventAtOrBefore(clampedTimestamp),
+    };
+  }
+
+  private findTimedLiveCursorSegmentAtTimestamp(
+    timestamp: number
+  ): TimedLiveCursorSegment | null {
+    const timeline = this.timedLiveCursorTimeline;
+    if (!timeline) {
+      return null;
+    }
+
+    return (
+      timeline.segments.find(
+        (segment) =>
+          segment.startTimestamp - Number.EPSILON <= timestamp &&
+          timestamp <= segment.endTimestamp + Number.EPSILON
+      ) ?? null
+    );
+  }
+
+  private getTimedLiveCursorEventAtOrBefore(
+    timestamp: number
+  ): TimedLiveCursorEvent | null {
+    const timeline = this.timedLiveCursorTimeline;
+    if (!timeline) {
+      return null;
+    }
+
+    let result: TimedLiveCursorEvent | null = null;
+    timeline.events.forEach((event) => {
+      if (event.timestamp <= timestamp + Number.EPSILON) {
+        result = event;
+      }
+    });
+    return result;
+  }
+
+  private interpolateLinear(start: number, end: number, progress: number): number {
+    return start + (end - start) * progress;
+  }
+
+  private getMeasureOverlayByNumber(measureNumber: number): MeasureOverlay | null {
+    return (
+      this.measureOverlays.find((measure) => measure.measureNumber === measureNumber) ??
+      null
+    );
+  }
+
+  private getSourceMeasureByNumber(measureNumber: number): any {
+    return (
+      this.openSheetMusicDisplay?.Sheet?.SourceMeasures?.find(
+        (measure: any, index: number) =>
+          (measure.MeasureNumber ?? index + 1) === measureNumber
+      ) ?? null
+    );
   }
 
   private refreshCursorDebugMarkers(): void {
