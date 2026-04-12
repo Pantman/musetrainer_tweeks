@@ -336,6 +336,14 @@ interface TimedLiveSimulatedPendingNote {
   index: number;
 }
 
+interface TimedLiveMatchedRealtimeNote {
+  event: TimedLiveCursorEvent;
+  note: TimedLiveCursorNote;
+  index: number;
+  timingClass: TimedLiveSimulatedFeedbackTimingClass;
+  offsetMs: number;
+}
+
 interface RealtimeDebugStats {
   playedTotal: number;
   acceptedOnTime: number;
@@ -537,6 +545,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     TimedLiveSimulatedPendingNote[]
   >();
   private timedLiveSimulatedProcessedEventNotes = new Map<string, Set<number>>();
+  private timedLiveRealtimeMatchedEventNotes = new Map<string, Set<number>>();
   private timedLiveSimulatedHeldNotes = new Map<string, number>();
   private timedLiveSimulatedOutputTokens = new Map<number, number>();
   private timedLiveSimulatedOutputInstrumentIds = new Map<number, number | null>();
@@ -1682,6 +1691,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.pendingDeferredTieStepAdvance = false;
     this.pendingTimedStartBootstrapAdvance = false;
     this.correctlyHeldPracticeKeys.clear();
+    this.timedLiveRealtimeMatchedEventNotes.clear();
     this.stopTimedLiveCursorDebugLoop(true);
     this.stopTimedLiveSimulatedFeedbackPlayback();
     this.resetTimedLiveSimulatedFeedbackStats();
@@ -2340,6 +2350,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.resetPlayCursorTransition();
     this.tracePlayCursor('start reset');
     this.clearRealtimeToleranceWindow();
+    this.timedLiveRealtimeMatchedEventNotes.clear();
     this.lastPlayCursorTransitionDurationMs = 0;
     this.pendingDeferredTieStepAdvance = false;
     this.pendingTimedStartBootstrapAdvance = false;
@@ -6317,6 +6328,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private clearTimedLiveSimulatedPendingState(): void {
     this.timedLiveSimulatedPendingNotes.clear();
     this.timedLiveSimulatedProcessedEventNotes.clear();
+    this.timedLiveRealtimeMatchedEventNotes.clear();
     this.timedLiveSimulatedHeldNotes.clear();
     this.timedLiveSimulatedOutputTokens.clear();
     this.timedLiveSimulatedOutputInstrumentIds.clear();
@@ -6931,6 +6943,136 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     );
   }
 
+  private shouldUseTimedLiveRealtimeClassification(): boolean {
+    return (
+      this.realtimeMode &&
+      !!this.timedLiveCursorTimeline &&
+      !this.shouldUseTimedLiveSimulatedFeedback()
+    );
+  }
+
+  private getTimedLiveSelectedEventNotes(
+    event: TimedLiveCursorEvent
+  ): Array<{ note: TimedLiveCursorNote; index: number }> {
+    const practiceSelection = this.getPracticeStaffSelection();
+    return event.notes
+      .map((note, index) => ({ note, index }))
+      .filter(({ note }) => {
+        if (!note.actionable) {
+          return false;
+        }
+
+        return note.staffId === null || practiceSelection[note.staffId];
+      });
+  }
+
+  private getTimedLiveRealtimeMatchKey(event: TimedLiveCursorEvent): string {
+    return `${this.loopPass}:${event.id}`;
+  }
+
+  private isTimedLiveRealtimeNoteMatched(
+    event: TimedLiveCursorEvent,
+    index: number
+  ): boolean {
+    const matchedIndexes =
+      this.timedLiveRealtimeMatchedEventNotes.get(
+        this.getTimedLiveRealtimeMatchKey(event)
+      ) ?? new Set<number>();
+    return matchedIndexes.has(index);
+  }
+
+  private markTimedLiveRealtimeNoteMatched(
+    event: TimedLiveCursorEvent,
+    index: number
+  ): void {
+    const key = this.getTimedLiveRealtimeMatchKey(event);
+    const matchedIndexes =
+      this.timedLiveRealtimeMatchedEventNotes.get(key) ?? new Set<number>();
+    matchedIndexes.add(index);
+    this.timedLiveRealtimeMatchedEventNotes.set(key, matchedIndexes);
+  }
+
+  private findTimedLiveRealtimeMatch(
+    playedHalfTone: number,
+    scoreTimestamp: number
+  ): TimedLiveMatchedRealtimeNote | null {
+    const timeline = this.timedLiveCursorTimeline;
+    if (!timeline) {
+      return null;
+    }
+
+    const matchWindowMs = this.getTimedLiveSimulationMatchWindowMs();
+    let bestMatch: TimedLiveMatchedRealtimeNote | null = null;
+
+    timeline.events.forEach((event) => {
+      const offsetMs = this.getPlaybackSignedDurationMs(
+        scoreTimestamp - event.timestamp
+      );
+      if (Math.abs(offsetMs) > matchWindowMs) {
+        return;
+      }
+
+      this.getTimedLiveSelectedEventNotes(event).forEach(({ note, index }) => {
+        if (note.halfTone !== playedHalfTone) {
+          return;
+        }
+        if (this.isTimedLiveRealtimeNoteMatched(event, index)) {
+          return;
+        }
+
+        const candidate: TimedLiveMatchedRealtimeNote = {
+          event,
+          note,
+          index,
+          timingClass: this.classifyTimedLiveSimulatedFeedback(offsetMs),
+          offsetMs,
+        };
+
+        if (
+          !bestMatch ||
+          Math.abs(candidate.offsetMs) < Math.abs(bestMatch.offsetMs)
+        ) {
+          bestMatch = candidate;
+        }
+      });
+    });
+
+    return bestMatch;
+  }
+
+  private buildTimedLiveRealtimePendingNote(
+    match: TimedLiveMatchedRealtimeNote,
+    playedHalfTone: number,
+    scoreTimestamp: number
+  ): TimedLiveSimulatedPendingNote {
+    return {
+      event: match.event,
+      note: match.note,
+      timingClass: match.timingClass,
+      hitTimestamp: scoreTimestamp,
+      playedHalfTone,
+      loopPass: this.loopPass,
+      index: match.index,
+    };
+  }
+
+  private handleTimedLiveRealtimeNoteOn(
+    playedHalfTone: number,
+    scoreTimestamp: number
+  ): TimedLiveMatchedRealtimeNote | null {
+    const match = this.findTimedLiveRealtimeMatch(playedHalfTone, scoreTimestamp);
+    if (!match) {
+      return null;
+    }
+
+    this.markTimedLiveRealtimeNoteMatched(match.event, match.index);
+    this.commitTimedLiveSimulatedFeedbackNote(
+      this.buildTimedLiveRealtimePendingNote(match, playedHalfTone, scoreTimestamp),
+      true
+    );
+    return match;
+  }
+
   private getPlaybackWholeNotesFromMs(durationMs: number): number {
     const wholeNoteMs = this.getPlaybackDelayMs(1);
     if (!Number.isFinite(durationMs) || !Number.isFinite(wholeNoteMs) || wholeNoteMs <= 0) {
@@ -6938,6 +7080,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     return durationMs / wholeNoteMs;
+  }
+
+  private getPlaybackSignedDurationMs(durationInWholeNotes: number): number {
+    if (!Number.isFinite(durationInWholeNotes)) {
+      return 0;
+    }
+
+    return (durationInWholeNotes * 4 * 60000) / this.getEffectiveTempoBPM();
   }
 
   private getTimedLiveSimulatedFeedbackPlacement(
@@ -8376,6 +8526,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     const halbTone = pitch - 12;
     const name = halbTone.toFixed();
+    const timedLiveRealtimeClassification =
+      this.shouldUseTimedLiveRealtimeClassification();
+    const scoreTimestamp = timedLiveRealtimeClassification
+      ? this.getTimedLiveCursorScoreTimestamp()
+      : null;
 
     const pitchLabel = this.noteKeyToLabel(name);
     const requiredPressKeys = this.getCurrentRequiredPressKeys();
@@ -8390,45 +8545,85 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.notesService.press(name);
     }
 
-    // Key wrong pressed
-    if (
-      !matchesCurrentStep &&
-      this.isPracticing() &&
-      (this.checkboxFeedback || this.realtimeMode)
-    ) {
-      if (acceptedLateRealtimeNote) {
-        this.acceptLateRealtimeNote(name);
-      } else {
-        if (this.realtimeMode && this.realtimeNextStepKeys.has(name)) {
+    if (timedLiveRealtimeClassification && scoreTimestamp !== null) {
+      const match = this.handleTimedLiveRealtimeNoteOn(halbTone, scoreTimestamp);
+      if (match) {
+        if (!this.realtimeCurrentStepMatchedKeys.has(name) && matchesCurrentStep) {
+          this.realtimeCurrentStepMatchedKeys.add(name);
+        }
+
+        const timingClass = match.timingClass;
+        if (timingClass === 'correct') {
+          this.debugRealtimeStats.acceptedOnTime++;
+          this.debugRealtimeStats.lastResult = 'on-time';
+        } else if (timingClass === 'early') {
           this.debugRealtimeStats.early++;
-          this.debugRealtimeStats.lastPitch = pitchLabel;
           this.debugRealtimeStats.lastResult = 'early';
-          this.appendRealtimeDebugEvent(`${pitchLabel} early`);
-          this.updateRealtimeDebugWindow();
+        } else if (timingClass === 'late') {
+          this.debugRealtimeStats.acceptedLate++;
+          this.debugRealtimeStats.lastResult = 'late';
         } else {
           this.debugRealtimeStats.rejected++;
-          this.debugRealtimeStats.lastPitch = pitchLabel;
-          this.debugRealtimeStats.lastResult = 'rejected';
-          this.appendRealtimeDebugEvent(`${pitchLabel} rejected`);
-          this.updateRealtimeDebugWindow();
-          this.markIncorrectInputNote(halbTone);
+          this.debugRealtimeStats.lastResult = 'miss';
+        }
+        this.debugRealtimeStats.lastPitch = pitchLabel;
+        this.appendRealtimeDebugEvent(
+          `${pitchLabel} ${this.debugRealtimeStats.lastResult}`
+        );
+        this.updateRealtimeDebugWindow();
+      } else if (
+        !matchesCurrentStep &&
+        this.isPracticing() &&
+        (this.checkboxFeedback || this.realtimeMode)
+      ) {
+        this.debugRealtimeStats.rejected++;
+        this.debugRealtimeStats.lastPitch = pitchLabel;
+        this.debugRealtimeStats.lastResult = 'rejected';
+        this.appendRealtimeDebugEvent(`${pitchLabel} rejected`);
+        this.updateRealtimeDebugWindow();
+        this.markIncorrectInputNote(halbTone);
+      }
+    } else {
+      // Key wrong pressed
+      if (
+        !matchesCurrentStep &&
+        this.isPracticing() &&
+        (this.checkboxFeedback || this.realtimeMode)
+      ) {
+        if (acceptedLateRealtimeNote) {
+          this.acceptLateRealtimeNote(name);
+        } else {
+          if (this.realtimeMode && this.realtimeNextStepKeys.has(name)) {
+            this.debugRealtimeStats.early++;
+            this.debugRealtimeStats.lastPitch = pitchLabel;
+            this.debugRealtimeStats.lastResult = 'early';
+            this.appendRealtimeDebugEvent(`${pitchLabel} early`);
+            this.updateRealtimeDebugWindow();
+          } else {
+            this.debugRealtimeStats.rejected++;
+            this.debugRealtimeStats.lastPitch = pitchLabel;
+            this.debugRealtimeStats.lastResult = 'rejected';
+            this.appendRealtimeDebugEvent(`${pitchLabel} rejected`);
+            this.updateRealtimeDebugWindow();
+            this.markIncorrectInputNote(halbTone);
+          }
         }
       }
-    }
 
-    if (
-      !acceptedLateRealtimeNote &&
-      matchesCurrentStep &&
-      !this.realtimeCurrentStepMatchedKeys.has(name)
-    ) {
-      this.realtimeCurrentStepMatchedKeys.add(name);
-      if (!suppressAutoplayFeedback) {
-        this.markCurrentNoteCorrect(name);
-        this.debugRealtimeStats.acceptedOnTime++;
-        this.debugRealtimeStats.lastPitch = pitchLabel;
-        this.debugRealtimeStats.lastResult = 'hit current';
-        this.appendRealtimeDebugEvent(`${pitchLabel} hit`);
-        this.updateRealtimeDebugWindow();
+      if (
+        !acceptedLateRealtimeNote &&
+        matchesCurrentStep &&
+        !this.realtimeCurrentStepMatchedKeys.has(name)
+      ) {
+        this.realtimeCurrentStepMatchedKeys.add(name);
+        if (!suppressAutoplayFeedback) {
+          this.markCurrentNoteCorrect(name);
+          this.debugRealtimeStats.acceptedOnTime++;
+          this.debugRealtimeStats.lastPitch = pitchLabel;
+          this.debugRealtimeStats.lastResult = 'hit current';
+          this.appendRealtimeDebugEvent(`${pitchLabel} hit`);
+          this.updateRealtimeDebugWindow();
+        }
       }
     }
 
@@ -8461,6 +8656,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const suppressAutoplayFeedback =
       this.shouldSuppressListenAutoplayFeedbackForName(name);
     this.updateRealtimeDebugWindow();
+    if (this.shouldUseTimedLiveRealtimeClassification()) {
+      this.notesService.release(name);
+      this.correctlyHeldPracticeKeys.delete(name);
+      if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
+      return;
+    }
+
     if (this.isAcceptedLateRealtimeNote(name)) {
       return;
     }
