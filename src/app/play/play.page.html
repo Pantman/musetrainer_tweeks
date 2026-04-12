@@ -112,6 +112,13 @@
     [class.score-shell--locked]="running"
     [class.score-shell--timed-live-cursor]="showTimedLiveCursorOverlay()"
   >
+    <div
+      class="play-build-badge play-build-badge--score"
+      *ngIf="fileLoaded"
+      aria-label="Play screen build number"
+    >
+      {{ playBuildLabel }}
+    </div>
     <ion-row style="background-color: white;" id="osmdContainer"></ion-row>
     <div class="score-shell__interaction-blocker" *ngIf="running"></div>
     <div class="realtime-debug-panel" *ngIf="showRealtimeDebugPanel()">
@@ -334,6 +341,15 @@
       <ion-toggle
         [(ngModel)]="showTimedLiveCursorDebugOverlay"
         (ngModelChange)="handleTimedLiveCursorDebugOverlayChange()"
+        color="dark"
+        slot="end"
+        [enableOnOffLabels]="true"
+      ></ion-toggle>
+    </ion-item>
+    <ion-item *ngIf="showTimedLiveCursorDebugOverlay">
+      <ion-label color="dark">Early/late follow cursor</ion-label>
+      <ion-toggle
+        [(ngModel)]="timedLiveEarlyLateFeedbackUsesCursorAnchor"
         color="dark"
         slot="end"
         [enableOnOffLabels]="true"

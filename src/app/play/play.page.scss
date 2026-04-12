@@ -107,6 +107,27 @@ ion-input{
   z-index: 4;
 }
 
+.play-build-badge {
+  background: rgb(255 255 255 / 0.94);
+  border: 1px solid rgb(203 213 225 / 0.95);
+  border-radius: 999px;
+  box-shadow: 0 4px 14px rgb(15 23 42 / 0.08);
+  color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  padding: 0.2rem 0.55rem;
+  white-space: nowrap;
+}
+
+.play-build-badge--score {
+  pointer-events: none;
+  position: absolute;
+  right: 1rem;
+  top: 0.9rem;
+  z-index: 2;
+}
+
 .realtime-debug-panel--right {
   left: auto;
   right: 0.75rem;

@@ -274,6 +274,7 @@ interface TimedLiveCursorRenderState {
   top: number;
   height: number;
   visible: boolean;
+  scoreTimestamp: number | null;
 }
 
 interface TimedLiveCursorWindowRect {
@@ -413,6 +414,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_BORDER = '#9b2d42';
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
+  // Bump this marker whenever we want a visibly new play-screen build badge.
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.2';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -420,6 +423,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   openSheetMusicDisplay!: OpenSheetMusicDisplay;
 
   playVersion = '';
+  playBuildLabel = '';
 
   // Music Sheet GUI
   isMobileLayout = false;
@@ -538,6 +542,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   showDebugConsoleOverlay: boolean = false;
   showCursorWrapDebugOverlay: boolean = false;
   showTimedLiveCursorDebugOverlay: boolean = false;
+  timedLiveEarlyLateFeedbackUsesCursorAnchor: boolean = true;
   cursorWrapDebugEvents: string[] = [];
   cursorWrapDebugSnapshot: CursorWrapDebugSnapshot | null = null;
   private cursorDebugRefreshTimeout: number | null = null;
@@ -614,6 +619,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.playVersion = packageJson.version;
+    this.playBuildLabel = `${this.playVersion}+${PlayPageComponent.PLAY_SCREEN_BUILD_MARKER}`;
     this.installMuseDebugApi();
     this.openSheetMusicDisplay = new OpenSheetMusicDisplay('osmdContainer');
     this.openSheetMusicDisplay.setOptions({
@@ -3054,6 +3060,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
+    // OSMD owns the cursor element's base `left`/`top`. Timed playback only
+    // adds a transform so the rendered green cursor lines up with the current
+    // playable notehead. That rendered position is the visual ground truth for
+    // live playback and for feedback note placement.
     const currentPosition = this.getPlayCursorPosition();
     if (!currentPosition) {
       cursorElement.style.transform = '';
@@ -3231,6 +3241,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     boundaryDurationMs: number,
     onBoundaryReached: () => void
   ): boolean {
+    // Loop wraps are intentionally split into two forward-only motions with an
+    // instantaneous teleport in the middle:
+    // 1. finish the current loop pass by travelling from the final playable
+    //    note to the loop-closing barline;
+    // 2. teleport to the loop-opening barline, then travel to the first
+    //    playable note in the restarted loop.
+    // This prevents the green cursor from animating backwards or through bars
+    // that are outside the active loop selection.
     if (
       !this.shouldAnimatePlayCursor() ||
       boundaryDurationMs < 0 ||
@@ -3457,6 +3475,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     nextTimestamp: number;
     nextTargetX: number;
   }): boolean {
+    // System wraps follow the same visual contract as loop wraps:
+    // 1. travel to the current system's closing barline;
+    // 2. teleport to the next system's opening barline;
+    // 3. continue forward to the next playable note target.
+    // The teleport may jump left, but the cursor must never *animate* backward
+    // or pass through intermediate systems/bars that are not being played.
     const {
       previousPosition,
       nextPosition,
@@ -4025,7 +4049,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     scoreTimestamp: number,
     preferredStaffId: number | null = null
   ): number | null {
-    const renderState = this.resolveTimedLiveCursorRenderAtTimestamp(scoreTimestamp);
+    const renderState = this.getTimedLiveRenderedCursorState(scoreTimestamp);
     if (!renderState || !Number.isFinite(renderState.left)) {
       return null;
     }
@@ -4039,6 +4063,40 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     return Number(renderState.left);
+  }
+
+  private getTimedLiveRenderedCursorState(scoreTimestamp: number): {
+    left: number;
+    top: number;
+    height: number;
+    progress: number | null;
+    segment: TimedLiveCursorSegment | null;
+    event: TimedLiveCursorEvent | null;
+  } | null {
+    // Feedback notes should use the green cursor exactly as it is rendered on
+    // screen. If the animation loop has already produced a visible cursor state
+    // for roughly this timestamp, prefer that state over recomputing from the
+    // timeline. This avoids drift near loop/system boundaries.
+    const activeRenderState = this.timedLiveCursorRenderState;
+    if (
+      activeRenderState?.visible &&
+      Number.isFinite(activeRenderState.left) &&
+      Number.isFinite(activeRenderState.top) &&
+      Number.isFinite(activeRenderState.height) &&
+      activeRenderState.scoreTimestamp !== null &&
+      Math.abs(activeRenderState.scoreTimestamp - scoreTimestamp) <= 1 / 128
+    ) {
+      return {
+        left: activeRenderState.left,
+        top: activeRenderState.top,
+        height: activeRenderState.height,
+        progress: null,
+        segment: null,
+        event: this.getTimedLiveCursorEventAtOrBefore(activeRenderState.scoreTimestamp),
+      };
+    }
+
+    return this.resolveTimedLiveCursorRenderAtTimestamp(scoreTimestamp);
   }
 
   private getTimedLiveStableFeedbackAnchorNotes(
@@ -5905,6 +5963,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           top: timeline.startTop,
           height: timeline.startHeight,
           visible: false,
+          scoreTimestamp: null,
         }
       : null;
     this.syncTimedLiveCursorDebugLoop();
@@ -5914,6 +5973,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     cursor: any,
     container: HTMLElement
   ): TimedLiveCursorTimeline | null {
+    // The timed-live timeline is the canonical visual model for live playback.
+    // We still walk OSMD's cursor to enumerate score events, but once the
+    // timeline exists the rendered green cursor and feedback note placement
+    // should be derived from this structure rather than from raw cursor math.
     const startMeasure = this.getSourceMeasureByNumber(this.inputMeasure.lower);
     const endMeasure = this.getSourceMeasureByNumber(this.inputMeasure.upper);
     const startOverlay = this.getMeasureOverlayByNumber(this.inputMeasure.lower);
@@ -6112,6 +6175,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     startOverlay: MeasureOverlay,
     endOverlay: MeasureOverlay
   ): TimedLiveCursorSegment[] {
+    // Segments describe rendered cursor motion between score timestamps. Wrap
+    // segments deliberately include a discontinuity so the cursor reaches the
+    // exit barline, teleports to the entry barline, and then continues
+    // forward. That teleport is intentional and is what keeps the cursor from
+    // visually traversing skipped bars.
     const segments: TimedLiveCursorSegment[] = [];
     const startHeight = Math.max(startOverlay.bottom - startOverlay.top, 12);
     const endHeight = Math.max(endOverlay.bottom - endOverlay.top, 12);
@@ -6535,6 +6603,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.timedLiveCursorRenderState = {
         ...this.timedLiveCursorRenderState,
         visible: false,
+        scoreTimestamp: null,
       };
     }
   }
@@ -6740,6 +6809,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
+    // The rendered green cursor is the placement source of truth for live
+    // playback feedback. Misses always follow it. Early/late notes default to
+    // the same cursor anchor, with a debug toggle to compare target-note
+    // anchoring without changing the default behavior.
     const cursorLeft = this.getTimedLiveStableFeedbackCursorLeft(
       pendingNote.hitTimestamp,
       pendingNote.note.staffId
@@ -7480,10 +7553,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     const width = Math.max(note.width, 10);
     const height = Math.max(note.height, 8);
-    const leftCenter =
-      timingClass === 'correct' || !Number.isFinite(cursorLeft)
-        ? Number(note.left)
-        : Number(cursorLeft);
+    const leftCenter = this.shouldAnchorTimedLiveTimingFeedbackToCursor(
+      timingClass,
+      cursorLeft
+    )
+      ? Number(cursorLeft)
+      : Number(note.left);
 
     return {
       left: leftCenter - width / 2,
@@ -7491,6 +7566,25 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       width,
       height,
     };
+  }
+
+  private shouldAnchorTimedLiveTimingFeedbackToCursor(
+    timingClass: TimedLiveSimulatedFeedbackTimingClass,
+    cursorLeft: number | null
+  ): cursorLeft is number {
+    if (!Number.isFinite(cursorLeft)) {
+      return false;
+    }
+
+    if (timingClass === 'correct') {
+      return false;
+    }
+
+    if (timingClass === 'miss') {
+      return true;
+    }
+
+    return this.timedLiveEarlyLateFeedbackUsesCursorAnchor;
   }
 
   private updateTimedLiveCursorDebugOverlay(): void {
@@ -7517,6 +7611,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       top: cursorState.top,
       height: cursorState.height,
       visible: true,
+      scoreTimestamp,
     };
 
     if (!this.showTimedLiveCursorDebugOverlay) {
@@ -7864,6 +7959,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       };
     }
 
+    // Wrap segments are piecewise by design: move to the exit barline,
+    // teleport to the entry barline, then continue forward. We never draw a
+    // continuous backward animation through intervening bars.
     const wrapExitX = segment.wrapExitX ?? segment.startLeft;
     const wrapEntryX = segment.wrapEntryX ?? segment.endLeft;
     const firstDistance = Math.max(wrapExitX - segment.startLeft, 0);
