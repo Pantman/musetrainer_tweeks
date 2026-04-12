@@ -9,6 +9,7 @@ export type NoteObject = {
   voice: number;
   fingering: string;
   isGrace: boolean;
+  midiInstrumentId: number | null;
 };
 
 @Injectable({
@@ -125,6 +126,7 @@ export class NotesService {
             const noteString = value.halfTone.toString();
             const noteTimestamp = timestamp + value.Length.RealValue;
             const fingering = value.Fingering ? value.Fingering.value : '';
+            const midiInstrumentId = this.getMidiInstrumentIdForSourceNote(value);
 
             const noteObj = {
               value: 0,
@@ -134,6 +136,7 @@ export class NotesService {
               voice: voice.ParentVoice.VoiceId,
               fingering: fingering,
               isGrace: value.IsGraceNote,
+              midiInstrumentId,
             };
 
             // In case of tie, check that it is a start note
@@ -156,13 +159,17 @@ export class NotesService {
 
   // Update note status for piano keyboard
   playRequiredNotes(
-    notePress: (note: number, velocity: number) => void,
-    noteRelease: (note: number, retrigger?: boolean) => void
+    notePress: (note: number, velocity: number, noteObj: NoteObject) => void,
+    noteRelease: (
+      note: number,
+      noteObj: NoteObject | null,
+      retrigger?: boolean
+    ) => void
   ): void {
     // Release notes no longer required
     for (const [key] of this.mapPressed) {
       if (!this.mapRequired.has(key)) {
-        noteRelease(parseInt(key) + 12);
+        noteRelease(parseInt(key) + 12, this.mapPrevRequired.get(key) ?? null);
       }
     }
 
@@ -171,10 +178,26 @@ export class NotesService {
       if (value.value === 0) {
         // If already pressed, release first
         if (this.mapPressed.has(key)) {
-          noteRelease(parseInt(key) + 12, true);
+          noteRelease(parseInt(key) + 12, value, true);
         }
-        notePress(parseInt(key) + 12, 60);
+        notePress(parseInt(key) + 12, 60, value);
       }
     }
+  }
+
+  private getMidiInstrumentIdForSourceNote(note: any): number | null {
+    const parentInstrument = note?.ParentStaff?.ParentInstrument;
+    const playbackInstrumentId = note?.PlaybackInstrumentId;
+    const matchingSubInstrument = (parentInstrument?.SubInstruments ?? []).find(
+      (subInstrument: any) => subInstrument?.idString === playbackInstrumentId
+    );
+    const candidates = [
+      matchingSubInstrument?.midiInstrumentID,
+      parentInstrument?.MidiInstrumentId,
+      parentInstrument?.SubInstruments?.[0]?.midiInstrumentID,
+    ];
+    const midiInstrumentId = candidates.find((value) => Number.isFinite(value));
+
+    return Number.isFinite(midiInstrumentId) ? Number(midiInstrumentId) : null;
   }
 }

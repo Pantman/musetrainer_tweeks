@@ -11,9 +11,17 @@ import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay';
 import { CapacitorMuseTrainerMidi } from 'capacitor-musetrainer-midi';
 import { ActivatedRoute } from '@angular/router';
 import { KeepAwake } from '@capacitor-community/keep-awake';
-import { now as toneNow, start as startTone, Synth } from 'tone';
+import {
+  AMSynth,
+  FMSynth,
+  Frequency,
+  now as toneNow,
+  PolySynth,
+  start as startTone,
+  Synth,
+} from 'tone';
 
-import { NotesService } from '../notes.service';
+import { NoteObject, NotesService } from '../notes.service';
 import { PianoKeyboardComponent } from '../piano-keyboard/piano-keyboard.component';
 import { Capacitor, PluginListenerHandle } from '@capacitor/core';
 import { Filesystem } from '@capacitor/filesystem';
@@ -63,6 +71,16 @@ type RangeHandle = 'start' | 'end';
 type TransportMode = 'listen' | 'wait' | 'realtime';
 type PlaybackStartReason = 'fresh' | 'loop-restart';
 type FeedbackAccidentalKind = 'sharp' | 'flat' | 'natural';
+type SoftwareInstrumentProfile =
+  | 'piano'
+  | 'organ'
+  | 'guitar'
+  | 'bass'
+  | 'strings'
+  | 'choir'
+  | 'lead'
+  | 'pad'
+  | 'brass';
 
 interface FeedbackAccidentalMarker {
   kind: FeedbackAccidentalKind;
@@ -91,6 +109,11 @@ interface IncorrectPitchSpelling {
   accidentalHalfTones: number;
   diatonicStepIndex: number;
   displayAccidental: FeedbackAccidentalKind | null;
+}
+
+interface ActiveSoftwareOutputRoute {
+  profile: SoftwareInstrumentProfile;
+  pitch: number;
 }
 
 interface MeasureOverlay {
@@ -370,6 +393,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   checkboxColor: boolean = false;
   checkboxKeyboard: boolean = true;
   checkboxMidiOut: boolean = false;
+  checkboxMidiInputAudio: boolean = false;
   checkboxMetronome: boolean = true;
   checkboxWaitMode: boolean = false;
   checkboxFeedback: boolean = true;
@@ -390,6 +414,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   // Initialize maps of notes comming from MIDI Input
   mapNotesAutoPressed = new Map();
+  private autoPressedMidiInstrumentIds = new Map<string, number | null>();
 
   // Play
   timePlayStart: number = 0;
@@ -435,6 +460,16 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   // tonejs/piano
   piano: Piano | null = null;
   metronome: Synth | null = null;
+  private softwareInstrumentBank = new Map<
+    Exclude<SoftwareInstrumentProfile, 'piano'>,
+    PolySynth<any>
+  >();
+  private activeSoftwareOutputCounts = new Map<string, number>();
+  private activeSoftwareOutputRoutes = new Map<string, ActiveSoftwareOutputRoute>();
+  private monitoredMidiInputCounts = new Map<number, number>();
+  private monitoredMidiInputInstruments = new Map<number, number | null>();
+  private monitoredMidiInputRouteKeys = new Map<number, string | null>();
+  private autoPressedSoftwareRouteKeys = new Map<string, string | null>();
   computerPressedNotes = new Map<string, number>();
   computerNotesService: NotesService;
   private correctNoteheadElements = new Map<string, HTMLElement>();
@@ -504,6 +539,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private timedLiveSimulatedProcessedEventNotes = new Map<string, Set<number>>();
   private timedLiveSimulatedHeldNotes = new Map<string, number>();
   private timedLiveSimulatedOutputTokens = new Map<number, number>();
+  private timedLiveSimulatedOutputInstrumentIds = new Map<number, number | null>();
+  private timedLiveSimulatedOutputRouteKeys = new Map<number, string | null>();
   private timedLiveSimulatedOutputTokenSeed = 0;
   private museDebugConsoleRelay = {
     wrap: false,
@@ -606,6 +643,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.osmdReset();
     this.openSheetMusicDisplay.clear();
     // piano
+    this.disposeSoftwareInstrumentBank();
     this.piano = null;
     this.metronome = null;
     // wake
@@ -615,6 +653,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   pianoSetup() {
+    this.disposeSoftwareInstrumentBank();
     let url = '/assets/audio';
     if (Ionic.WebView) {
       url = 'capacitor://localhost/assets/audio';
@@ -629,6 +668,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     //connect it to the speaker output
     this.piano.toDestination();
     this.piano.load();
+    this.initializeSoftwareInstrumentBank();
   }
 
   metronomeSetup() {
@@ -644,6 +684,473 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       },
       volume: -10,
     }).toDestination();
+  }
+
+  private initializeSoftwareInstrumentBank(): void {
+    this.softwareInstrumentBank.set(
+      'organ',
+      this.createPolySynth(AMSynth, {
+        volume: -12,
+        harmonicity: 1.75,
+        oscillator: {
+          type: 'square',
+        },
+        envelope: {
+          attack: 0.01,
+          decay: 0.08,
+          sustain: 0.95,
+          release: 0.12,
+        },
+        modulation: {
+          type: 'square',
+        },
+        modulationEnvelope: {
+          attack: 0.02,
+          decay: 0.05,
+          sustain: 1,
+          release: 0.1,
+        },
+      })
+    );
+    this.softwareInstrumentBank.set(
+      'guitar',
+      this.createPolySynth(FMSynth, {
+        volume: -10,
+        harmonicity: 1.5,
+        modulationIndex: 6,
+        oscillator: {
+          type: 'triangle',
+        },
+        envelope: {
+          attack: 0.005,
+          decay: 0.18,
+          sustain: 0.08,
+          release: 0.2,
+        },
+        modulation: {
+          type: 'sine',
+        },
+        modulationEnvelope: {
+          attack: 0.001,
+          decay: 0.16,
+          sustain: 0.05,
+          release: 0.08,
+        },
+      })
+    );
+    this.softwareInstrumentBank.set(
+      'bass',
+      this.createPolySynth(Synth, {
+        volume: -8,
+        oscillator: {
+          type: 'triangle',
+        },
+        envelope: {
+          attack: 0.01,
+          decay: 0.16,
+          sustain: 0.45,
+          release: 0.22,
+        },
+      })
+    );
+    this.softwareInstrumentBank.set(
+      'strings',
+      this.createPolySynth(Synth, {
+        volume: -14,
+        oscillator: {
+          type: 'sawtooth',
+        },
+        envelope: {
+          attack: 0.06,
+          decay: 0.18,
+          sustain: 0.6,
+          release: 1.1,
+        },
+      })
+    );
+    this.softwareInstrumentBank.set(
+      'choir',
+      this.createPolySynth(AMSynth, {
+        volume: -16,
+        harmonicity: 1.25,
+        oscillator: {
+          type: 'sine',
+        },
+        envelope: {
+          attack: 0.08,
+          decay: 0.25,
+          sustain: 0.9,
+          release: 1.8,
+        },
+        modulation: {
+          type: 'triangle',
+        },
+        modulationEnvelope: {
+          attack: 0.18,
+          decay: 0.22,
+          sustain: 0.8,
+          release: 1.2,
+        },
+      })
+    );
+    this.softwareInstrumentBank.set(
+      'lead',
+      this.createPolySynth(FMSynth, {
+        volume: -12,
+        harmonicity: 1.9,
+        modulationIndex: 8,
+        oscillator: {
+          type: 'sawtooth',
+        },
+        envelope: {
+          attack: 0.01,
+          decay: 0.14,
+          sustain: 0.42,
+          release: 0.22,
+        },
+        modulation: {
+          type: 'square',
+        },
+        modulationEnvelope: {
+          attack: 0.02,
+          decay: 0.12,
+          sustain: 0.3,
+          release: 0.1,
+        },
+      })
+    );
+    this.softwareInstrumentBank.set(
+      'pad',
+      this.createPolySynth(AMSynth, {
+        volume: -18,
+        harmonicity: 1.01,
+        oscillator: {
+          type: 'sine',
+        },
+        envelope: {
+          attack: 0.18,
+          decay: 0.3,
+          sustain: 0.85,
+          release: 1.8,
+        },
+        modulation: {
+          type: 'triangle',
+        },
+        modulationEnvelope: {
+          attack: 0.25,
+          decay: 0.2,
+          sustain: 0.75,
+          release: 1.4,
+        },
+      })
+    );
+    this.softwareInstrumentBank.set(
+      'brass',
+      this.createPolySynth(FMSynth, {
+        volume: -12,
+        harmonicity: 1.4,
+        modulationIndex: 7,
+        oscillator: {
+          type: 'square',
+        },
+        envelope: {
+          attack: 0.015,
+          decay: 0.1,
+          sustain: 0.55,
+          release: 0.28,
+        },
+        modulation: {
+          type: 'sawtooth',
+        },
+        modulationEnvelope: {
+          attack: 0.02,
+          decay: 0.16,
+          sustain: 0.35,
+          release: 0.12,
+        },
+      })
+    );
+  }
+
+  private createPolySynth(voice: any, options: any): PolySynth<any> {
+    return new PolySynth(voice, options).toDestination();
+  }
+
+  private disposeSoftwareInstrumentBank(): void {
+    this.releaseMonitoredMidiInputNotes();
+    this.activeSoftwareOutputCounts.clear();
+    this.activeSoftwareOutputRoutes.clear();
+    this.autoPressedSoftwareRouteKeys.clear();
+    this.timedLiveSimulatedOutputRouteKeys.clear();
+    this.softwareInstrumentBank.forEach((synth) => {
+      synth.releaseAll();
+      synth.dispose();
+    });
+    this.softwareInstrumentBank.clear();
+  }
+
+  private getSoftwareInstrumentProfile(
+    midiInstrumentId: number | null
+  ): SoftwareInstrumentProfile {
+    if (!Number.isFinite(midiInstrumentId)) {
+      return 'piano';
+    }
+
+    const program = Number(midiInstrumentId);
+    if (program <= 7) {
+      return 'piano';
+    }
+    if (program <= 15) {
+      return 'lead';
+    }
+    if (program <= 23) {
+      return 'organ';
+    }
+    if (program <= 31) {
+      return 'guitar';
+    }
+    if (program <= 39) {
+      return 'bass';
+    }
+    if (program <= 51) {
+      return 'strings';
+    }
+    if (program <= 55) {
+      return 'choir';
+    }
+    if (program <= 63) {
+      return 'brass';
+    }
+    if (program <= 79) {
+      return 'lead';
+    }
+    if (program <= 95) {
+      return 'pad';
+    }
+
+    return 'lead';
+  }
+
+  private getProfileOutputRouteKey(
+    pitch: number,
+    profile: SoftwareInstrumentProfile
+  ): string {
+    return `profile:${profile}:${pitch}`;
+  }
+
+  private getMidiPitchNoteName(pitch: number): string {
+    return Frequency(pitch, 'midi').toNote();
+  }
+
+  private getNormalizedVelocity(velocity: number): number {
+    if (!Number.isFinite(velocity)) {
+      return 0.7;
+    }
+
+    return Math.min(Math.max(velocity / 127, 0.2), 1);
+  }
+
+  private sendSoftwareNoteOn(
+    pitch: number,
+    velocity: number,
+    audioTime?: number,
+    midiInstrumentId: number | null = null
+  ): string | null {
+    const profile = this.getSoftwareInstrumentProfile(midiInstrumentId);
+    const routeKey = this.getProfileOutputRouteKey(pitch, profile);
+    const nextCount = (this.activeSoftwareOutputCounts.get(routeKey) ?? 0) + 1;
+    this.activeSoftwareOutputCounts.set(routeKey, nextCount);
+    if (nextCount > 1) {
+      return routeKey;
+    }
+
+    this.activeSoftwareOutputRoutes.set(routeKey, {
+      profile,
+      pitch,
+    });
+    if (profile === 'piano') {
+      this.piano?.keyDown({
+        midi: pitch,
+        time: audioTime,
+        velocity: this.getNormalizedVelocity(velocity),
+      });
+      return routeKey;
+    }
+
+    this.softwareInstrumentBank
+      .get(profile)
+      ?.triggerAttack(
+        this.getMidiPitchNoteName(pitch),
+        audioTime,
+        this.getNormalizedVelocity(velocity)
+      );
+    return routeKey;
+  }
+
+  private sendSoftwareNoteOff(
+    pitch: number,
+    audioTime?: number,
+    midiInstrumentId: number | null = null,
+    routeKey?: string | null
+  ): void {
+    if (routeKey) {
+      this.releaseSoftwareNoteRoute(routeKey, audioTime);
+      return;
+    }
+
+    if (Number.isFinite(midiInstrumentId)) {
+      this.releaseSoftwareNoteRoute(
+        this.getProfileOutputRouteKey(
+          pitch,
+          this.getSoftwareInstrumentProfile(midiInstrumentId)
+        ),
+        audioTime
+      );
+      return;
+    }
+
+    const pitchKeySuffix = `:${pitch}`;
+    Array.from(this.activeSoftwareOutputRoutes.keys())
+      .filter((key) => key.endsWith(pitchKeySuffix))
+      .forEach((activeRouteKey) =>
+        this.releaseSoftwareNoteRoute(activeRouteKey, audioTime)
+      );
+  }
+
+  private releaseSoftwareNoteRoute(routeKey: string, audioTime?: number): void {
+    const currentCount = this.activeSoftwareOutputCounts.get(routeKey) ?? 0;
+    if (currentCount <= 1) {
+      this.activeSoftwareOutputCounts.delete(routeKey);
+      const route = this.activeSoftwareOutputRoutes.get(routeKey);
+      this.activeSoftwareOutputRoutes.delete(routeKey);
+      if (!route) {
+        return;
+      }
+
+      if (route.profile === 'piano') {
+        this.piano?.keyUp({ midi: route.pitch, time: audioTime });
+        return;
+      }
+
+      this.softwareInstrumentBank
+        .get(route.profile)
+        ?.triggerRelease(this.getMidiPitchNoteName(route.pitch), audioTime);
+      return;
+    }
+
+    this.activeSoftwareOutputCounts.set(routeKey, currentCount - 1);
+  }
+
+  private getMidiInstrumentIdForNoteObject(
+    noteObj: NoteObject | null | undefined
+  ): number | null {
+    const midiInstrumentId = noteObj?.midiInstrumentId;
+    return Number.isFinite(midiInstrumentId) ? Number(midiInstrumentId) : null;
+  }
+
+  private getMidiInstrumentIdForStaffId(staffId: number | null): number | null {
+    if (!Number.isFinite(staffId)) {
+      return null;
+    }
+
+    const staff = this.openSheetMusicDisplay?.Sheet?.Staves?.find(
+      (candidate: any) => candidate?.idInMusicSheet === staffId
+    );
+    const parentInstrument = staff?.ParentInstrument;
+    const candidates = [
+      parentInstrument?.MidiInstrumentId,
+      parentInstrument?.SubInstruments?.[0]?.midiInstrumentID,
+    ];
+    const midiInstrumentId = candidates.find((value) => Number.isFinite(value));
+
+    return Number.isFinite(midiInstrumentId) ? Number(midiInstrumentId) : null;
+  }
+
+  private getPreferredPracticeMidiInstrumentId(pitch?: number): number | null {
+    if (Number.isFinite(pitch)) {
+      const noteObj = this.notesService
+        .getMapRequired()
+        .get((Number(pitch) - 12).toFixed());
+      const noteInstrumentId = this.getMidiInstrumentIdForNoteObject(noteObj);
+      if (Number.isFinite(noteInstrumentId)) {
+        return noteInstrumentId;
+      }
+    }
+
+    for (const noteObj of this.notesService.getMapRequired().values()) {
+      const midiInstrumentId = this.getMidiInstrumentIdForNoteObject(noteObj);
+      if (Number.isFinite(midiInstrumentId)) {
+        return midiInstrumentId;
+      }
+    }
+
+    const practiceSelection = this.getPracticeStaffSelection();
+    for (const staffId of this.staffIdList) {
+      if (!practiceSelection[staffId]) {
+        continue;
+      }
+
+      const midiInstrumentId = this.getMidiInstrumentIdForStaffId(staffId);
+      if (Number.isFinite(midiInstrumentId)) {
+        return midiInstrumentId;
+      }
+    }
+
+    return this.getMidiInstrumentIdForStaffId(this.staffIdList[0] ?? null);
+  }
+
+  private monitorMidiInputNoteOn(pitch: number, velocity: number): void {
+    const currentCount = this.monitoredMidiInputCounts.get(pitch) ?? 0;
+    this.monitoredMidiInputCounts.set(pitch, currentCount + 1);
+    if (currentCount > 0) {
+      return;
+    }
+
+    const midiInstrumentId = this.getPreferredPracticeMidiInstrumentId(pitch);
+    this.monitoredMidiInputInstruments.set(pitch, midiInstrumentId);
+    const routeKey = this.sendSoftwareNoteOn(
+      pitch,
+      velocity,
+      undefined,
+      midiInstrumentId
+    );
+    this.monitoredMidiInputRouteKeys.set(pitch, routeKey);
+  }
+
+  private monitorMidiInputNoteOff(pitch: number): void {
+    const currentCount = this.monitoredMidiInputCounts.get(pitch) ?? 0;
+    if (currentCount <= 0) {
+      return;
+    }
+
+    if (currentCount <= 1) {
+      this.monitoredMidiInputCounts.delete(pitch);
+      const midiInstrumentId =
+        this.monitoredMidiInputInstruments.get(pitch) ?? null;
+      const routeKey = this.monitoredMidiInputRouteKeys.get(pitch) ?? null;
+      this.monitoredMidiInputInstruments.delete(pitch);
+      this.monitoredMidiInputRouteKeys.delete(pitch);
+      this.sendSoftwareNoteOff(pitch, undefined, midiInstrumentId, routeKey);
+      return;
+    }
+
+    this.monitoredMidiInputCounts.set(pitch, currentCount - 1);
+  }
+
+  private releaseMonitoredMidiInputNotes(): void {
+    Array.from(this.monitoredMidiInputInstruments.entries()).forEach(
+      ([pitch, midiInstrumentId]) => {
+        this.sendSoftwareNoteOff(
+          pitch,
+          undefined,
+          midiInstrumentId,
+          this.monitoredMidiInputRouteKeys.get(pitch) ?? null
+        );
+      }
+    );
+    this.monitoredMidiInputCounts.clear();
+    this.monitoredMidiInputInstruments.clear();
+    this.monitoredMidiInputRouteKeys.clear();
   }
 
   // GUI Zoom
@@ -971,6 +1478,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return `Staff ${id + 1}`;
   }
 
+  toggleStaffEnabled(id: number): void {
+    this.staffIdEnabled[id] = !this.staffIdEnabled[id];
+    this.refreshTimedLiveCursorTimelineDeferred();
+    this.refreshCursorDebugMarkersDeferred();
+  }
+
   toggleWaitMode(): void {
     this.checkboxWaitMode = !this.checkboxWaitMode;
 
@@ -987,6 +1500,21 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   clearFeedback(): void {
     this.osmdResetFeedback();
+  }
+
+  navigateBackToBrowser(): void {
+    void this.navCtrl.navigateBack('/index/home');
+  }
+
+  handleMidiInputAudioChange(): void {
+    if (this.checkboxMidiInputAudio) {
+      void startTone().catch(() => undefined);
+      return;
+    }
+
+    if (!this.checkboxMidiInputAudio) {
+      this.releaseMonitoredMidiInputNotes();
+    }
   }
 
   toggleCursorDebugOverlay(): void {
@@ -1401,6 +1929,27 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           this.openSheetMusicDisplay.cursors[1].hide();
         }, timeout)
       );
+      if (this.realtimeMode) {
+        if (this.checkboxRepeat) {
+          const startedLoopWrapAnimation = this.startPlayCursorLoopWrapAnimation(
+            timeout,
+            () => this.restartLoopPlayback()
+          );
+          if (!startedLoopWrapAnimation) {
+            this.timeouts.push(
+              setTimeout(() => {
+                this.restartLoopPlayback();
+              }, timeout)
+            );
+          }
+        } else {
+          this.timeouts.push(
+            setTimeout(() => {
+              this.osmdCursorStop();
+            }, timeout)
+          );
+        }
+      }
     } else {
       // Move to Next
       const iter = this.openSheetMusicDisplay.cursors[1].iterator;
@@ -1553,9 +2102,16 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.correctlyHeldPracticeKeys.clear();
 
     Array.from(this.mapNotesAutoPressed.keys()).forEach((key) => {
-      this.keyReleaseNoteInternal(parseInt(key) + 12, undefined, false);
+      this.keyReleaseNoteInternal(
+        parseInt(key) + 12,
+        undefined,
+        false,
+        this.autoPressedMidiInstrumentIds.get(key) ?? null
+      );
     });
     this.mapNotesAutoPressed.clear();
+    this.autoPressedMidiInstrumentIds.clear();
+    this.autoPressedSoftwareRouteKeys.clear();
   }
 
   private syncTempoCursorToPlayCursor(): void {
@@ -1569,7 +2125,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     cursor1.iterator = cursor0Iterator;
     cursor1.update();
-    if (this.listenMode) {
+    if (this.isTimedTransportMode()) {
       cursor1.hide();
     }
   }
@@ -1584,8 +2140,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         cursor.reset();
         cursor.update();
       }
-      if (this.listenMode && index == 1) {
-        // Comment out this to enable debug mode
+      if (this.isTimedTransportMode() && index == 1) {
         cursor.hide();
       }
     });
@@ -1740,9 +2295,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       });
     });
     for (const [key] of this.mapNotesAutoPressed) {
-      this.keyReleaseNote(parseInt(key) + 12);
+      this.keyReleaseNote(
+        parseInt(key) + 12,
+        undefined,
+        this.autoPressedMidiInstrumentIds.get(key) ?? null
+      );
     }
     this.mapNotesAutoPressed.clear();
+    this.autoPressedMidiInstrumentIds.clear();
+    this.autoPressedSoftwareRouteKeys.clear();
     this.computerPressedNotes.clear();
     this.notesService.clear();
     this.computerNotesService.clear();
@@ -1929,18 +2490,26 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         )} req[${this.formatRequiredNoteSummary()}]`
       );
       this.notesService.playRequiredNotes(
-        (note, velocity) => this.keyPressNote(note, velocity, audioTime),
-        (note, retrigger) => {
+        (note, velocity, noteObj) =>
+          this.keyPressNote(
+            note,
+            velocity,
+            audioTime,
+            this.getMidiInstrumentIdForNoteObject(noteObj)
+          ),
+        (note, noteObj, retrigger) => {
+          const midiInstrumentId = this.getMidiInstrumentIdForNoteObject(noteObj);
           if (retrigger) {
             this.keyReleaseNoteInternal(
               note,
               this.getRetriggerReleaseAudioTime(audioTime),
-              false
+              false,
+              midiInstrumentId
             );
             return;
           }
 
-          this.keyReleaseNote(note, audioTime);
+          this.keyReleaseNote(note, audioTime, midiInstrumentId);
         }
       );
     }
@@ -2999,14 +3568,28 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private getPracticeGraphicalNotesForCursor(cursor: any): PracticeGraphicalNote[] {
+    return this.getGraphicalNotesForCursor(cursor, this.getPracticeStaffSelection());
+  }
+
+  private getAllGraphicalNotesForCursor(cursor: any): PracticeGraphicalNote[] {
+    return this.getGraphicalNotesForCursor(cursor);
+  }
+
+  private getGraphicalNotesForCursor(
+    cursor: any,
+    staffSelection?: Record<number, boolean>
+  ): PracticeGraphicalNote[] {
     if (!cursor?.GNotesUnderCursor) {
       return [];
     }
 
-    const practiceSelection = this.getPracticeStaffSelection();
     const graphicalNotes = (cursor.GNotesUnderCursor() ?? []).filter((note: any) => {
       const staffId = note?.sourceNote?.ParentStaff?.idInMusicSheet;
-      return staffId === undefined || practiceSelection[staffId];
+      return (
+        !staffSelection ||
+        staffId === undefined ||
+        staffSelection[staffId]
+      );
     });
 
     const visited = new Set<any>();
@@ -5073,7 +5656,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     const actionableTargets = this.getCursorActionableTargetCenters(cursor, container);
     const allTargets = this.getCursorTargetCenters(cursor, container);
-    const notes = this.getPracticeGraphicalNotesForCursor(cursor)
+    const notes = this.getAllGraphicalNotesForCursor(cursor)
       .map((note) => {
         const placement = this.getRenderedNoteheadPlacement(note);
 
@@ -5267,6 +5850,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return this.showTimedLiveCursorDebugOverlay && this.fileLoaded;
   }
 
+  showTimedLiveCursorOverlay(): boolean {
+    return this.shouldUseTimedLiveCursorVisual();
+  }
+
   getTimedLiveCursorDebugSummaryLines(): string[] {
     const snapshot = this.timedLiveCursorDebugSnapshot;
     if (!snapshot) {
@@ -5382,11 +5969,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private shouldRunTimedLiveCursorDebugLoop(): boolean {
     return (
-      this.showTimedLiveCursorDebugOverlay &&
       this.running &&
-      this.listenMode &&
+      this.isTimedTransportMode() &&
       !!this.timedLiveCursorTimeline
     );
+  }
+
+  private shouldUseTimedLiveCursorVisual(): boolean {
+    return this.running && this.isTimedTransportMode() && !!this.timedLiveCursorTimeline;
   }
 
   private startTimedLiveCursorDebugLoop(): void {
@@ -5567,10 +6157,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    cursorElement.style.opacity = this.shouldUseTimedLiveSimulatedFeedback()
-      ? '0'
-      : this.showTimedLiveCursorDebugOverlay && this.listenMode
-        ? '0.12'
+    cursorElement.style.opacity =
+      this.shouldUseTimedLiveSimulatedFeedback() ||
+      this.shouldUseTimedLiveCursorVisual()
+        ? '0'
         : '';
   }
 
@@ -5729,11 +6319,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.timedLiveSimulatedProcessedEventNotes.clear();
     this.timedLiveSimulatedHeldNotes.clear();
     this.timedLiveSimulatedOutputTokens.clear();
+    this.timedLiveSimulatedOutputInstrumentIds.clear();
+    this.timedLiveSimulatedOutputRouteKeys.clear();
   }
 
   private clearTimedLiveSimulatedReflectedState(noteNames: string[]): void {
     noteNames.forEach((name) => {
       this.mapNotesAutoPressed.delete(name);
+      this.autoPressedMidiInstrumentIds.delete(name);
       this.notesService.release(name);
       this.correctlyHeldPracticeKeys.delete(name);
     });
@@ -5820,6 +6413,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     handoffToListenPlayback: boolean = false
   ): void {
     const activeOutputPitches = Array.from(this.timedLiveSimulatedOutputTokens.keys());
+    const activeOutputInstrumentIds = new Map(
+      this.timedLiveSimulatedOutputInstrumentIds
+    );
+    const activeOutputRouteKeys = new Map(this.timedLiveSimulatedOutputRouteKeys);
     const reflectedNoteNames = Array.from(this.timedLiveSimulatedHeldNotes.keys());
 
     this.clearTimedLiveSimulatedFeedbackTimeouts();
@@ -5853,7 +6450,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         : this.getScheduledAudioTime();
 
     activeOutputPitches.forEach((pitch) => {
-      this.sendOutputNoteOff(pitch, releaseAudioTime);
+      this.sendOutputNoteOff(
+        pitch,
+        releaseAudioTime,
+        activeOutputInstrumentIds.get(pitch) ?? null,
+        activeOutputRouteKeys.get(pitch) ?? null
+      );
     });
 
     if (reflectedNoteNames.length > 0 && this.pianoKeyboard) {
@@ -5903,13 +6505,16 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    this.mapNotesAutoPressed.set((pitch - 12).toFixed(), 1);
+    const key = (pitch - 12).toFixed();
+    this.mapNotesAutoPressed.set(key, 1);
+    this.autoPressedMidiInstrumentIds.set(key, null);
     this.handleTimedLiveSimulatedStateNoteOn(pitch);
   }
 
   private applyTimedLiveSimulatedStateNoteOff(pitch: number): void {
     const name = (pitch - 12).toFixed();
     this.mapNotesAutoPressed.delete(name);
+    this.autoPressedMidiInstrumentIds.delete(name);
     this.releaseTimedLiveSimulatedHeldNote(name);
     if (this.pianoKeyboard) {
       this.pianoKeyboard.updateNotesStatus();
@@ -6154,13 +6759,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         rawDelayMs
       );
       const audioTime = this.getTimedLiveSimulatedAudioTime(hitTimestamp);
+      const midiInstrumentId = this.getMidiInstrumentIdForStaffId(note.staffId);
       this.playTimedLiveSimulatedOutputNote(
         pitch,
         60,
         cueDurationMs,
         cueDurationMs + Math.max(stateDelayMs, 0),
         audioTime,
-        stateDelayMs
+        stateDelayMs,
+        midiInstrumentId
       );
     }
   }
@@ -6213,20 +6820,30 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     durationMs: number,
     releaseDelayMs: number,
     audioTime?: number,
-    stateDelayMs: number = 0
+    stateDelayMs: number = 0,
+    midiInstrumentId: number | null = null
   ): void {
     const previousToken = this.timedLiveSimulatedOutputTokens.get(pitch);
     if (previousToken !== undefined) {
       this.sendOutputNoteOff(
         pitch,
-        this.getRetriggerReleaseAudioTime(audioTime) ?? audioTime
+        this.getRetriggerReleaseAudioTime(audioTime) ?? audioTime,
+        this.timedLiveSimulatedOutputInstrumentIds.get(pitch) ?? null,
+        this.timedLiveSimulatedOutputRouteKeys.get(pitch) ?? null
       );
       this.scheduleTimedLiveSimulatedStateNoteOff(pitch, stateDelayMs);
     }
 
     const token = ++this.timedLiveSimulatedOutputTokenSeed;
     this.timedLiveSimulatedOutputTokens.set(pitch, token);
-    this.sendOutputNoteOn(pitch, velocity, audioTime);
+    this.timedLiveSimulatedOutputInstrumentIds.set(pitch, midiInstrumentId);
+    const routeKey = this.sendOutputNoteOn(
+      pitch,
+      velocity,
+      audioTime,
+      midiInstrumentId
+    );
+    this.timedLiveSimulatedOutputRouteKeys.set(pitch, routeKey);
     this.scheduleTimedLiveSimulatedStateNoteOn(pitch, stateDelayMs);
 
     this.scheduleTimedLiveSimulatedCallback(() => {
@@ -6239,11 +6856,20 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       }
 
       this.timedLiveSimulatedOutputTokens.delete(pitch);
+      this.timedLiveSimulatedOutputInstrumentIds.delete(pitch);
+      const activeRouteKey =
+        this.timedLiveSimulatedOutputRouteKeys.get(pitch) ?? null;
+      this.timedLiveSimulatedOutputRouteKeys.delete(pitch);
       const releaseAudioTime =
         typeof audioTime === 'number' && Number.isFinite(audioTime)
           ? audioTime + durationMs / 1000
           : undefined;
-      this.sendOutputNoteOff(pitch, releaseAudioTime);
+      this.sendOutputNoteOff(
+        pitch,
+        releaseAudioTime,
+        midiInstrumentId,
+        activeRouteKey
+      );
       this.applyTimedLiveSimulatedStateNoteOff(pitch);
     }, releaseDelayMs);
   }
@@ -6357,6 +6983,20 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
+    this.timedLiveCursorRenderState = {
+      left: cursorState.left,
+      top: cursorState.top,
+      height: cursorState.height,
+      visible: true,
+    };
+
+    if (!this.showTimedLiveCursorDebugOverlay) {
+      this.timedLiveCursorThresholdMarkers = [];
+      this.timedLiveCursorWindowRects = [];
+      this.timedLiveCursorDebugSnapshot = null;
+      return;
+    }
+
     this.timedLiveCursorDebugSessionTotals.frames++;
     if (
       cursorState.segment &&
@@ -6379,9 +7019,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const lateThresholdWholeNotes = this.getPlaybackWholeNotesFromMs(
       lateThresholdMs
     );
-    const windowMs = Math.round(
-      this.getPlaybackDelayMs(windowWholeNotes)
-    );
+    const windowMs = Math.round(this.getPlaybackDelayMs(windowWholeNotes));
     const windowStartTimestamp = Math.max(
       timeline.startTimestamp,
       scoreTimestamp - windowWholeNotes
@@ -6399,12 +7037,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       scoreTimestamp + earlyThresholdWholeNotes
     );
 
-    this.timedLiveCursorRenderState = {
-      left: cursorState.left,
-      top: cursorState.top,
-      height: cursorState.height,
-      visible: true,
-    };
     this.timedLiveCursorThresholdMarkers = this.buildTimedLiveCursorThresholdMarkers(
       thresholdStartTimestamp,
       thresholdEndTimestamp
@@ -6623,7 +7255,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private getTimedLiveCursorScoreTimestamp(): number | null {
     const timeline = this.timedLiveCursorTimeline;
-    if (!timeline || !this.running || !this.listenMode) {
+    if (!timeline || !this.running || !this.isTimedTransportMode()) {
       return null;
     }
 
@@ -6938,15 +7570,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     container: HTMLElement,
     actionableOnly: boolean
   ): number[] {
-    const practiceSelection = this.getPracticeStaffSelection();
-    const graphicalNotes = (cursor?.GNotesUnderCursor?.() ?? []).filter((note: any) => {
-      const staffId = note?.sourceNote?.ParentStaff?.idInMusicSheet;
-      const staffSelected = staffId === undefined || practiceSelection[staffId];
-      return (
-        staffSelected &&
-        (!actionableOnly || this.isActionableGraphicalPracticeNote(note))
-      );
-    });
+    const graphicalNotes = this.getAllGraphicalNotesForCursor(cursor)
+      .filter(
+        (note) =>
+          !actionableOnly ||
+          this.isActionableGraphicalPracticeNote(note.graphicalNote)
+      )
+      .map((note) => note.graphicalNote);
 
     return graphicalNotes
       .map((graphicalNote: any) => {
@@ -7583,6 +8213,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     } else {
       this.midiAvailable = false;
       this.midiDevice = 'None';
+      this.releaseMonitoredMidiInputNotes();
       this.notifyMidiDisconnect();
 
       // Stop if needed
@@ -7614,8 +8245,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       'commandReceive',
       (note: any) => {
         if (note.type === 'noteOn') {
+          if (this.checkboxMidiInputAudio) {
+            this.monitorMidiInputNoteOn(note.dataByte1, note.dataByte2 ?? 60);
+          }
           this.keyNoteOn(Date.now(), note.dataByte1);
         } else if (note.type === 'noteOff') {
+          this.monitorMidiInputNoteOff(note.dataByte1);
           this.keyNoteOff(Date.now(), note.dataByte1);
         }
       }
@@ -7628,15 +8263,21 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   // Press note on Ouput MIDI Device
-  keyPressNote(pitch: number, velocity: number, audioTime?: number): void {
-    this.keyPressNoteInternal(pitch, velocity, audioTime, true);
+  keyPressNote(
+    pitch: number,
+    velocity: number,
+    audioTime?: number,
+    midiInstrumentId: number | null = null
+  ): void {
+    this.keyPressNoteInternal(pitch, velocity, audioTime, true, midiInstrumentId);
   }
 
   private sendOutputNoteOn(
     pitch: number,
     velocity: number,
-    audioTime?: number
-  ): void {
+    audioTime?: number,
+    midiInstrumentId: number | null = null
+  ): string | null {
     this.appendScheduledAudioDebugEvent('on', pitch, audioTime);
 
     if (this.midiAvailable && this.checkboxMidiOut) {
@@ -7644,19 +8285,22 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         command: [0x90, pitch, velocity],
         timestamp: performance.now(),
       }).catch((e) => console.error(e));
-      return;
+      return null;
     }
 
-    this.piano?.keyDown({ midi: pitch, time: audioTime });
+    return this.sendSoftwareNoteOn(pitch, velocity, audioTime, midiInstrumentId);
   }
 
   keyPressNoteInternal(
     pitch: number,
     velocity: number,
     audioTime?: number,
-    reflectInput: boolean = true
+    reflectInput: boolean = true,
+    midiInstrumentId: number | null = null
   ): void {
-    this.mapNotesAutoPressed.set((pitch - 12).toFixed(), 1);
+    const key = (pitch - 12).toFixed();
+    this.mapNotesAutoPressed.set(key, 1);
+    this.autoPressedMidiInstrumentIds.set(key, midiInstrumentId);
     if (reflectInput) {
       this.timeouts.push(
         setTimeout(() => {
@@ -7665,15 +8309,30 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       );
     }
 
-    this.sendOutputNoteOn(pitch, velocity, audioTime);
+    const routeKey = this.sendOutputNoteOn(
+      pitch,
+      velocity,
+      audioTime,
+      midiInstrumentId
+    );
+    this.autoPressedSoftwareRouteKeys.set(key, routeKey);
   }
 
   // Release note on Ouput MIDI Device
-  keyReleaseNote(pitch: number, audioTime?: number): void {
-    this.keyReleaseNoteInternal(pitch, audioTime, true);
+  keyReleaseNote(
+    pitch: number,
+    audioTime?: number,
+    midiInstrumentId: number | null = null
+  ): void {
+    this.keyReleaseNoteInternal(pitch, audioTime, true, midiInstrumentId);
   }
 
-  private sendOutputNoteOff(pitch: number, audioTime?: number): void {
+  private sendOutputNoteOff(
+    pitch: number,
+    audioTime?: number,
+    midiInstrumentId: number | null = null,
+    routeKey?: string | null
+  ): void {
     this.appendScheduledAudioDebugEvent('off', pitch, audioTime);
 
     if (this.midiAvailable && this.checkboxMidiOut) {
@@ -7684,15 +8343,20 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    this.piano?.keyUp({ midi: pitch, time: audioTime });
+    this.sendSoftwareNoteOff(pitch, audioTime, midiInstrumentId, routeKey);
   }
 
   keyReleaseNoteInternal(
     pitch: number,
     audioTime?: number,
-    reflectInput: boolean = true
+    reflectInput: boolean = true,
+    midiInstrumentId: number | null = null
   ): void {
-    this.mapNotesAutoPressed.delete((pitch - 12).toFixed());
+    const key = (pitch - 12).toFixed();
+    this.mapNotesAutoPressed.delete(key);
+    this.autoPressedMidiInstrumentIds.delete(key);
+    const routeKey = this.autoPressedSoftwareRouteKeys.get(key) ?? null;
+    this.autoPressedSoftwareRouteKeys.delete(key);
     if (reflectInput) {
       this.timeouts.push(
         setTimeout(() => {
@@ -7701,11 +8365,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       );
     }
 
-    this.sendOutputNoteOff(pitch, audioTime);
+    this.sendOutputNoteOff(pitch, audioTime, midiInstrumentId, routeKey);
   }
 
   // Input note pressed
   keyNoteOn(time: number, pitch: number): void {
+    if (this.isInputCountInActive()) {
+      return;
+    }
+
     const halbTone = pitch - 12;
     const name = halbTone.toFixed();
 
@@ -7783,6 +8451,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   // Input note released
   keyNoteOff(time: number, pitch: number): void {
+    if (this.isInputCountInActive()) {
+      return;
+    }
+
     const halbTone = pitch - 12;
     const name = halbTone.toFixed();
 
@@ -7808,6 +8480,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return this.staffIdList.length > 0
       ? this.staffIdList.every((id) => this.staffIdEnabled[id])
       : true;
+  }
+
+  private isInputCountInActive(): boolean {
+    return this.running && this.startFlashCount > 0;
   }
 
   private getPracticeStaffSelection(): Record<number, boolean> {
@@ -7921,20 +8597,28 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     this.computerNotesService.playRequiredNotes(
-      (note, velocity) => {
+      (note, velocity, noteObj) => {
         const key = (note - 12).toFixed();
         this.computerPressedNotes.set(key, 1);
         this.computerNotesService.press(key);
-        this.keyPressNoteInternal(note, velocity, audioTime, false);
+        this.keyPressNoteInternal(
+          note,
+          velocity,
+          audioTime,
+          false,
+          this.getMidiInstrumentIdForNoteObject(noteObj)
+        );
       },
-      (note, retrigger) => {
+      (note, noteObj, retrigger) => {
         const key = (note - 12).toFixed();
         this.computerPressedNotes.delete(key);
         this.computerNotesService.release(key);
+        const midiInstrumentId = this.getMidiInstrumentIdForNoteObject(noteObj);
         this.keyReleaseNoteInternal(
           note,
           retrigger ? this.getRetriggerReleaseAudioTime(audioTime) : audioTime,
-          false
+          false,
+          midiInstrumentId
         );
       }
     );
@@ -7943,7 +8627,19 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private releaseComputerPressedNotes(): void {
     for (const [key] of this.computerPressedNotes) {
       this.computerNotesService.release(key);
-      this.keyReleaseNoteInternal(parseInt(key) + 12, undefined, false);
+      const midiInstrumentId =
+        this.getMidiInstrumentIdForNoteObject(
+          this.computerNotesService.getMapRequired().get(key)
+        ) ??
+        this.getMidiInstrumentIdForNoteObject(
+          this.computerNotesService.getMapPrevRequired().get(key)
+        );
+      this.keyReleaseNoteInternal(
+        parseInt(key) + 12,
+        undefined,
+        false,
+        midiInstrumentId
+      );
     }
     this.computerPressedNotes.clear();
   }

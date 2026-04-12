@@ -76,8 +76,8 @@ ion-input{
   pointer-events: none;
 }
 
-.score-shell--timed-live-debug #cursorImg-0 {
-  opacity: 0.12 !important;
+.score-shell--timed-live-cursor #cursorImg-0 {
+  opacity: 0 !important;
 }
 
 .score-shell__interaction-blocker {
@@ -292,6 +292,10 @@ ion-input{
   min-width: 2px;
   pointer-events: none;
   position: absolute;
+  transition:
+    left 90ms linear,
+    top 90ms linear,
+    height 90ms linear;
   transform: translateX(-50%);
   width: 2px;
   z-index: 4;

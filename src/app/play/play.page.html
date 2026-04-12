@@ -1,7 +1,7 @@
 <ion-header class="ion-no-border" [translucent]="true">
   <ion-toolbar>
     <ion-buttons slot="start">
-      <ion-button (click)="navCtrl.back()">
+      <ion-button (click)="navigateBackToBrowser()">
         <ion-icon color="medium" name="chevron-back-outline"></ion-icon>
       </ion-button>
     </ion-buttons>
@@ -75,7 +75,7 @@
             [disabled]="running || !fileLoaded"
             size="small"
             [fill]="staffIdEnabled[id] ? 'solid' : 'outline'"
-            (click)="staffIdEnabled[id] = !staffIdEnabled[id]"
+            (click)="toggleStaffEnabled(id)"
             [attr.aria-label]="getStaffToolbarLabel(id)"
           >
             <ion-icon [name]="getStaffToolbarIcon(id)"></ion-icon>
@@ -110,7 +110,7 @@
     class="score-shell"
     id="scoreOverlayHost"
     [class.score-shell--locked]="running"
-    [class.score-shell--timed-live-debug]="showTimedLiveCursorDebugPanel()"
+    [class.score-shell--timed-live-cursor]="showTimedLiveCursorOverlay()"
   >
     <ion-row style="background-color: white;" id="osmdContainer"></ion-row>
     <div class="score-shell__interaction-blocker" *ngIf="running"></div>
@@ -212,7 +212,7 @@
     </div>
 
     <div
-      *ngIf="timedLiveCursorRenderState?.visible && showTimedLiveCursorDebugPanel()"
+      *ngIf="timedLiveCursorRenderState?.visible && showTimedLiveCursorOverlay()"
       class="score-timed-live-cursor"
       [ngStyle]="getTimedLiveCursorStyle()"
     ></div>
@@ -301,6 +301,17 @@
     <ion-item>
       <ion-label color="dark">Listen on MIDI</ion-label>
       <ion-toggle [disabled]="running || !midiAvailable" [(ngModel)]="checkboxMidiOut"  color="dark" slot="end" [enableOnOffLabels]="true"></ion-toggle>
+    </ion-item>
+    <ion-item>
+      <ion-label color="dark">Software Synth</ion-label>
+      <ion-toggle
+        [disabled]="!midiAvailable"
+        [(ngModel)]="checkboxMidiInputAudio"
+        (ngModelChange)="handleMidiInputAudioChange()"
+        color="dark"
+        slot="end"
+        [enableOnOffLabels]="true"
+      ></ion-toggle>
     </ion-item>
     <ion-item>
       <ion-label color="dark">Show feedback</ion-label>
