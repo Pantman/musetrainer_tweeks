@@ -1,4 +1,11 @@
-import { Component, HostListener, OnDestroy, OnInit, ViewChild, isDevMode } from '@angular/core';
+import {
+  Component,
+  HostListener,
+  OnDestroy,
+  OnInit,
+  ViewChild,
+  isDevMode,
+} from '@angular/core';
 import {
   IonContent,
   NavController,
@@ -380,8 +387,22 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly MAX_TIMED_LIVE_SIMULATION_THRESHOLD_MS = 2000;
   private static readonly MAX_TIMED_LIVE_SIMULATION_TIMING_OFFSET_MS = 4000;
   private static readonly MAX_TIMED_LIVE_SIMULATION_PITCH_OFFSET_SEMITONES = 24;
-  private static readonly FEEDBACK_CORRECT_COLOR = '#16a34a';
-  private static readonly FEEDBACK_ERROR_COLOR = '#dc2626';
+  private static readonly FEEDBACK_CORRECT_FILL = '#2f9e7a';
+  private static readonly FEEDBACK_CORRECT_BORDER = '#1f6e55';
+  private static readonly FEEDBACK_CORRECT_HALO =
+    '0 0 0 1px rgb(255 255 255 / 0.18)';
+  private static readonly FEEDBACK_EARLY_FILL = '#3f7cac';
+  private static readonly FEEDBACK_EARLY_BORDER = '#2b5680';
+  private static readonly FEEDBACK_EARLY_HALO =
+    '0 0 0 1px rgb(255 255 255 / 0.22)';
+  private static readonly FEEDBACK_LATE_FILL = '#c38d2c';
+  private static readonly FEEDBACK_LATE_BORDER = '#8a6215';
+  private static readonly FEEDBACK_LATE_HALO =
+    '0 0 0 1px rgb(255 255 255 / 0.22)';
+  private static readonly FEEDBACK_MISS_FILL = '#d1495b';
+  private static readonly FEEDBACK_MISS_BORDER = '#9b2d42';
+  private static readonly FEEDBACK_MISS_HALO =
+    '0 0 0 1px rgb(255 255 255 / 0.25)';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -401,7 +422,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   checkboxColor: boolean = false;
   checkboxKeyboard: boolean = true;
   checkboxMidiOut: boolean = false;
-  checkboxMidiInputAudio: boolean = false;
+  checkboxMidiInputAudio: boolean = true;
   checkboxMetronome: boolean = true;
   checkboxWaitMode: boolean = false;
   checkboxFeedback: boolean = true;
@@ -2711,9 +2732,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     let accidental = element.querySelector<HTMLElement>(
       '.feedback-notehead__accidental'
     );
-    const isCorrect = className.includes('feedback-notehead--correct');
-    const isEarly = className.includes('feedback-notehead--early');
-    const isLate = className.includes('feedback-notehead--late');
+    const colors = this.getFeedbackToneForClassName(className);
     element.style.position = 'absolute';
     element.style.pointerEvents = 'none';
     element.style.borderRadius = '0';
@@ -2729,25 +2748,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     bulb.style.borderRadius = '50% 48% 52% 50%';
     bulb.style.transform = 'rotate(-24deg)';
     bulb.style.transformOrigin = 'center';
-    bulb.style.background = isCorrect
-      ? '#16a34a'
-      : isEarly
-        ? '#f97316'
-        : isLate
-          ? '#7c3aed'
-          : '#dc2626';
-    bulb.style.border = isCorrect
-      ? '1px solid #166534'
-      : isEarly
-        ? '1px solid #c2410c'
-        : isLate
-          ? '1px solid #5b21b6'
-          : '1px solid #991b1b';
-    bulb.style.boxShadow = isCorrect
-      ? '0 0 0 1px rgb(255 255 255 / 0.18)'
-      : isEarly || isLate
-        ? '0 0 0 1px rgb(255 255 255 / 0.22)'
-        : '0 0 0 1px rgb(255 255 255 / 0.25)';
+    bulb.style.background = colors.fill;
+    bulb.style.border = `1px solid ${colors.border}`;
+    bulb.style.boxShadow = colors.halo;
 
     element.style.left = `${placement.left}px`;
     element.style.top = `${placement.top}px`;
@@ -2778,7 +2781,44 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
   }
 
-  private getRenderedNoteheadPlacement(note: PracticeGraphicalNote): {
+  private getFeedbackToneForClassName(className: string): {
+    fill: string;
+    border: string;
+    halo: string;
+  } {
+    if (className.includes('feedback-notehead--correct')) {
+      return {
+        fill: PlayPageComponent.FEEDBACK_CORRECT_FILL,
+        border: PlayPageComponent.FEEDBACK_CORRECT_BORDER,
+        halo: PlayPageComponent.FEEDBACK_CORRECT_HALO,
+      };
+    }
+    if (className.includes('feedback-notehead--early')) {
+      return {
+        fill: PlayPageComponent.FEEDBACK_EARLY_FILL,
+        border: PlayPageComponent.FEEDBACK_EARLY_BORDER,
+        halo: PlayPageComponent.FEEDBACK_EARLY_HALO,
+      };
+    }
+    if (className.includes('feedback-notehead--late')) {
+      return {
+        fill: PlayPageComponent.FEEDBACK_LATE_FILL,
+        border: PlayPageComponent.FEEDBACK_LATE_BORDER,
+        halo: PlayPageComponent.FEEDBACK_LATE_HALO,
+      };
+    }
+
+    return {
+      fill: PlayPageComponent.FEEDBACK_MISS_FILL,
+      border: PlayPageComponent.FEEDBACK_MISS_BORDER,
+      halo: PlayPageComponent.FEEDBACK_MISS_HALO,
+    };
+  }
+
+  private getRenderedNoteheadPlacement(
+    note: PracticeGraphicalNote,
+    allowCursorFallback: boolean = true
+  ): {
     left: number;
     top: number;
     width: number;
@@ -2799,7 +2839,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       const horizontalRect = anchorRect ?? noteRect;
       const verticalRect = noteRect ?? anchorRect;
       if (!horizontalRect || !verticalRect) {
-        return this.getCursorFallbackNoteheadPlacement();
+        return allowCursorFallback
+          ? this.getCursorFallbackNoteheadPlacement()
+          : null;
       }
 
       const width = Math.max(horizontalRect.width * 0.95, 10);
@@ -2811,7 +2853,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return { left, top, width, height };
     }
 
-    return this.getCursorFallbackNoteheadPlacement();
+    return allowCursorFallback ? this.getCursorFallbackNoteheadPlacement() : null;
   }
 
   private getAnchorDomRect(
@@ -3745,6 +3787,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       width,
       height,
       centerX:
+        this.getTimedLiveCurrentFeedbackCursorLeft(anchor.staffId) ??
         this.getPlayCursorOverlayCenterX(container) ??
         anchorRect.left + anchorRect.width / 2,
       stepHeight:
@@ -3803,6 +3846,72 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         params.height
       ),
     };
+  }
+
+  private getTimedLiveCurrentFeedbackCursorLeft(
+    preferredStaffId: number | null = null
+  ): number | null {
+    if (!this.shouldUseTimedLiveRealtimeClassification()) {
+      return null;
+    }
+
+    const scoreTimestamp = this.getTimedLiveCursorScoreTimestamp();
+    if (!Number.isFinite(scoreTimestamp)) {
+      return null;
+    }
+
+    return this.getTimedLiveStableFeedbackCursorLeft(
+      Number(scoreTimestamp),
+      preferredStaffId
+    );
+  }
+
+  private getTimedLiveStableFeedbackCursorLeft(
+    scoreTimestamp: number,
+    preferredStaffId: number | null = null
+  ): number | null {
+    const renderState = this.resolveTimedLiveCursorRenderAtTimestamp(scoreTimestamp);
+    if (!renderState || !Number.isFinite(renderState.left)) {
+      return null;
+    }
+
+    const anchorNotes = this.getTimedLiveStableFeedbackAnchorNotes(
+      renderState.event,
+      preferredStaffId
+    );
+    if (anchorNotes.length === 0) {
+      return null;
+    }
+
+    return Number(renderState.left);
+  }
+
+  private getTimedLiveStableFeedbackAnchorNotes(
+    event: TimedLiveCursorEvent | null,
+    preferredStaffId: number | null = null
+  ): TimedLiveCursorNote[] {
+    if (!event) {
+      return [];
+    }
+
+    const selectedNotes = this.getTimedLiveSelectedEventNotes(event)
+      .map(({ note }) => note)
+      .filter(
+        (note) =>
+          Number.isFinite(note.left) &&
+          Number.isFinite(note.top) &&
+          (preferredStaffId === null || note.staffId === preferredStaffId)
+      );
+    if (selectedNotes.length > 0) {
+      return selectedNotes;
+    }
+
+    return event.notes.filter(
+      (note) =>
+        Number.isFinite(note.left) &&
+        Number.isFinite(note.top) &&
+        (preferredStaffId === null || note.staffId === preferredStaffId)
+    );
   }
 
   private resolveIncorrectPitchSpelling(
@@ -5669,7 +5778,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const allTargets = this.getCursorTargetCenters(cursor, container);
     const notes = this.getAllGraphicalNotesForCursor(cursor)
       .map((note) => {
-        const placement = this.getRenderedNoteheadPlacement(note);
+        const placement = this.getRenderedNoteheadPlacement(note, false);
 
         return {
           halfTone: note.halfTone,
@@ -6363,13 +6472,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    const renderState = this.resolveTimedLiveCursorRenderAtTimestamp(
-      pendingNote.hitTimestamp
+    const cursorLeft = this.getTimedLiveStableFeedbackCursorLeft(
+      pendingNote.hitTimestamp,
+      pendingNote.note.staffId
     );
     const placement = this.getTimedLiveSimulatedFeedbackPlacement(
       pendingNote.note,
       pendingNote.timingClass,
-      renderState?.left ?? null
+      cursorLeft
     );
 
     if (!placement) {
@@ -6580,10 +6690,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private getTimedLiveSimulatedIncorrectPlacement(
     pendingNote: TimedLiveSimulatedPendingNote
   ): FeedbackNoteheadPlacement | null {
-    const renderState = this.resolveTimedLiveCursorRenderAtTimestamp(
-      pendingNote.hitTimestamp
-    );
-    const noteCenterX = renderState?.left ?? pendingNote.note.left;
+    const noteCenterX =
+      this.getTimedLiveStableFeedbackCursorLeft(
+        pendingNote.hitTimestamp,
+        pendingNote.note.staffId
+      ) ?? pendingNote.note.left;
     const noteCenterY = pendingNote.note.top;
     if (!Number.isFinite(noteCenterX) || !Number.isFinite(noteCenterY)) {
       return null;
@@ -8520,7 +8631,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   // Input note pressed
   keyNoteOn(time: number, pitch: number): void {
-    if (this.isInputCountInActive()) {
+    if (this.shouldIgnoreUserInputUntilPlaybackStart()) {
       return;
     }
 
@@ -8646,7 +8757,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   // Input note released
   keyNoteOff(time: number, pitch: number): void {
-    if (this.isInputCountInActive()) {
+    if (this.shouldIgnoreUserInputUntilPlaybackStart()) {
       return;
     }
 
@@ -8686,6 +8797,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private isInputCountInActive(): boolean {
     return this.running && this.startFlashCount > 0;
+  }
+
+  private shouldIgnoreUserInputUntilPlaybackStart(): boolean {
+    return this.isInputCountInActive() || (this.running && this.timePlayStart <= 0);
   }
 
   private getPracticeStaffSelection(): Record<number, boolean> {
