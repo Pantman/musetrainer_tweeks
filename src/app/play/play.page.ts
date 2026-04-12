@@ -8800,7 +8800,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private shouldIgnoreUserInputUntilPlaybackStart(): boolean {
-    return this.isInputCountInActive() || (this.running && this.timePlayStart <= 0);
+    return !this.running || this.isInputCountInActive() || this.timePlayStart <= 0;
   }
 
   private getPracticeStaffSelection(): Record<number, boolean> {
