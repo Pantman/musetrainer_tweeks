@@ -275,6 +275,7 @@ interface TimedLiveCursorRenderState {
   height: number;
   visible: boolean;
   scoreTimestamp: number | null;
+  transitionMode: 'smooth' | 'teleport';
 }
 
 interface TimedLiveCursorWindowRect {
@@ -415,7 +416,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.4';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.6';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -5981,6 +5982,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           height: timeline.startHeight,
           visible: false,
           scoreTimestamp: null,
+          transitionMode: 'smooth',
         }
       : null;
     this.syncTimedLiveCursorDebugLoop();
@@ -6280,6 +6282,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       left: `${cursor.left}px`,
       top: `${cursor.top}px`,
       height: `${Math.max(cursor.height, 12)}px`,
+      transition:
+        cursor.transitionMode === 'teleport'
+          ? 'none'
+          : 'left 90ms linear, top 90ms linear, height 90ms linear',
     };
   }
 
@@ -6480,6 +6486,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       height: startRenderState.height,
       visible: true,
       scoreTimestamp: timeline.startTimestamp,
+      transitionMode: 'teleport',
     };
   }
 
@@ -6652,6 +6659,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         ...this.timedLiveCursorRenderState,
         visible: false,
         scoreTimestamp: null,
+        transitionMode: 'smooth',
       };
     }
   }
@@ -7654,12 +7662,18 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
+    const previousRenderState = this.timedLiveCursorRenderState;
     this.timedLiveCursorRenderState = {
       left: cursorState.left,
       top: cursorState.top,
       height: cursorState.height,
       visible: true,
       scoreTimestamp,
+      transitionMode: this.resolveTimedLiveCursorTransitionMode(
+        previousRenderState,
+        cursorState,
+        scoreTimestamp
+      ),
     };
 
     if (!this.showTimedLiveCursorDebugOverlay) {
@@ -8047,6 +8061,47 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       segment,
       event: this.getTimedLiveCursorEventAtOrBefore(clampedTimestamp),
     };
+  }
+
+  private resolveTimedLiveCursorTransitionMode(
+    previousRenderState: TimedLiveCursorRenderState | null,
+    cursorState: {
+      left: number;
+      top: number;
+      height: number;
+      progress: number | null;
+      segment: TimedLiveCursorSegment | null;
+      event: TimedLiveCursorEvent | null;
+    },
+    scoreTimestamp: number
+  ): 'smooth' | 'teleport' {
+    // Live cursor behavior must be identical in timed mode regardless of
+    // whether notes are driven by autoplay or by human input. We therefore
+    // decide whether the rendered cursor should animate or teleport solely from
+    // the timeline geometry and the previously rendered cursor state.
+    const previousTimestamp = previousRenderState?.scoreTimestamp;
+    if (
+      previousTimestamp !== null &&
+      previousTimestamp !== undefined &&
+      scoreTimestamp + Number.EPSILON < previousTimestamp
+    ) {
+      return 'teleport';
+    }
+
+    // Wrap segments model a "portal" at the end of the current bar/system: the
+    // cursor moves forward normally until it reaches that portal, then it
+    // reappears instantly at the corresponding position in the destination
+    // bar/system. Any rendered left/top discontinuity across that boundary must
+    // therefore be an instantaneous jump with CSS transitions disabled.
+    if (
+      previousRenderState?.visible &&
+      (cursorState.left < previousRenderState.left - 8 ||
+        Math.abs(cursorState.top - previousRenderState.top) > 8)
+    ) {
+      return 'teleport';
+    }
+
+    return 'smooth';
   }
 
   private findTimedLiveCursorSegmentAtTimestamp(
