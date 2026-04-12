@@ -131,6 +131,15 @@ interface MeasureOverlay {
   bottom: number;
 }
 
+interface IncorrectFeedbackStaffGeometry {
+  measureNumber: number;
+  staffId: number;
+  topLineY: number;
+  bottomLineY: number;
+  lineSpacing: number;
+  middleCY: number;
+}
+
 interface MeasureRange {
   lower: number;
   upper: number;
@@ -387,6 +396,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly MAX_TIMED_LIVE_SIMULATION_THRESHOLD_MS = 2000;
   private static readonly MAX_TIMED_LIVE_SIMULATION_TIMING_OFFSET_MS = 4000;
   private static readonly MAX_TIMED_LIVE_SIMULATION_PITCH_OFFSET_SEMITONES = 24;
+  private static readonly MIDDLE_C_HALF_TONE = 48;
   private static readonly FEEDBACK_CORRECT_FILL = '#2f9e7a';
   private static readonly FEEDBACK_CORRECT_BORDER = '#1f6e55';
   private static readonly FEEDBACK_CORRECT_HALO =
@@ -430,6 +440,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   inputMeasure = { lower: 0, upper: 0 };
   inputMeasureRange = { lower: 0, upper: 0 };
   measureOverlays: MeasureOverlay[] = [];
+  private incorrectFeedbackStaffGeometry = new Map<
+    string,
+    IncorrectFeedbackStaffGeometry
+  >();
   checkboxRepeat: boolean = false;
   savedLoopRange: MeasureRange | null = null;
   loopPass: number = 0;
@@ -483,6 +497,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private lastPlayCursorTransitionDurationMs: number = 0;
   private pendingDeferredTieStepAdvance: boolean = false;
   private pendingTimedStartBootstrapAdvance: boolean = false;
+  private heldTieContinuationRenderTimeout: number | null = null;
   private activeRangeHandle: RangeHandle | null = null;
   private activeRangeSelectionStart: number | null = null;
 
@@ -504,6 +519,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private correctNoteheadElements = new Map<string, HTMLElement>();
   private incorrectNoteheadElements = new Map<string, HTMLElement>();
   private timingFeedbackNoteheadElements = new Map<string, HTMLElement>();
+  private feedbackInstanceSequence = 0;
   private activePracticeNoteElements: SVGElement[] = [];
   private activePracticeGraphicalNotes: PracticeGraphicalNote[] = [];
   private correctlyHeldPracticeKeys = new Set<string>();
@@ -2104,7 +2120,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     this.activePracticeGraphicalNotes = this.getCurrentPracticeGraphicalNotes();
     this.activePracticeNoteElements = this.getCurrentPracticeNoteElements();
-    this.renderHeldTieContinuationNotesIfMatched();
+    this.scheduleHeldTieContinuationNotesRenderIfMatched();
 
     if (this.realtimeMode) {
       this.computerNotesService.calculateRequired(
@@ -2351,6 +2367,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.lastPlayCursorTransitionDurationMs = 0;
     this.pendingDeferredTieStepAdvance = false;
     this.pendingTimedStartBootstrapAdvance = false;
+    if (this.heldTieContinuationRenderTimeout !== null) {
+      window.clearTimeout(this.heldTieContinuationRenderTimeout);
+      this.heldTieContinuationRenderTimeout = null;
+    }
     this.clearRealtimeCurrentStepMatches();
     this.clearRealtimeToleranceWindow();
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
@@ -2670,6 +2690,39 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       heldTieNotes,
       this.getCurrentPracticeTimestamp()
     );
+  }
+
+  private scheduleHeldTieContinuationNotesRenderIfMatched(): void {
+    if (this.heldTieContinuationRenderTimeout !== null) {
+      window.clearTimeout(this.heldTieContinuationRenderTimeout);
+      this.heldTieContinuationRenderTimeout = null;
+    }
+
+    const hasTieContinuationNotes = this.activePracticeGraphicalNotes.some((note) =>
+      this.isTieContinuationGraphicalPracticeNote(note)
+    );
+    const delayMs =
+      hasTieContinuationNotes &&
+      this.running &&
+      this.shouldAnimatePlayCursor() &&
+      this.lastPlayCursorTransitionDurationMs > 0
+        ? this.lastPlayCursorTransitionDurationMs
+        : 0;
+
+    if (delayMs <= 0) {
+      this.renderHeldTieContinuationNotesIfMatched();
+      return;
+    }
+
+    const expectedTimestamp = this.getCurrentPracticeTimestamp();
+    this.heldTieContinuationRenderTimeout = window.setTimeout(() => {
+      this.heldTieContinuationRenderTimeout = null;
+      if (this.getCurrentPracticeTimestamp() !== expectedTimestamp) {
+        return;
+      }
+
+      this.renderHeldTieContinuationNotesIfMatched();
+    }, delayMs);
   }
 
   private isTieContinuationGraphicalPracticeNote(
@@ -3724,84 +3777,54 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return null;
     }
 
-    const candidates = this.activePracticeGraphicalNotes.length
-      ? this.activePracticeGraphicalNotes
-      : this.getCurrentPracticeGraphicalNotes();
-
-    if (!candidates.length) {
-      return null;
-    }
-
-    const anchor = candidates.reduce(
-      (best: PracticeGraphicalNote | null, current: PracticeGraphicalNote) => {
-        if (!best) {
-          return current;
-        }
-
-        const bestDistance = Math.abs(best.halfTone - halfTone);
-        const currentDistance = Math.abs(current.halfTone - halfTone);
-        return currentDistance < bestDistance ? current : best;
-      },
-      null
-    );
-    if (!anchor) {
-      return null;
-    }
-
-    const anchorNoteRect = this.getGraphicalNoteDomRect(anchor.graphicalNote, container);
-    const anchorRect =
-      anchorNoteRect ??
-      (() => {
-        const renderableRect = this.getRenderableRect(
-          anchor.anchorElement,
-          anchor.groupElement
-        );
-        if (!renderableRect) {
-          return null;
-        }
-
-        const containerRect = container.getBoundingClientRect();
-        return {
-          left: renderableRect.left - containerRect.left,
-          top: renderableRect.top - containerRect.top,
-          width: renderableRect.width,
-          height: renderableRect.height,
-        };
-      })();
-
-    if (!anchorRect) {
-      return null;
-    }
-
-    const width = Math.max(anchorRect.width * 0.9, 10);
-    const height = Math.max(anchorRect.height * 0.75, 8);
-    const timestamp = this.getCurrentPracticeTimestamp();
     const measureNumber =
       (this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasureIndex ?? -1) +
       1;
-    const placement = this.buildIncorrectFeedbackPlacement({
+    const measureOverlay = this.getMeasureOverlayByNumber(measureNumber);
+    if (!measureOverlay) {
+      return null;
+    }
+
+    const timestamp = this.getCurrentPracticeTimestamp();
+    const staffId = this.getIncorrectFeedbackStaffId(halfTone);
+    const geometry = this.getIncorrectFeedbackStaffGeometryEntry(
+      measureNumber,
+      staffId,
+      measureOverlay
+    );
+    const width = this.getIncorrectFeedbackWidth(geometry);
+    const height = this.getIncorrectFeedbackHeight(geometry);
+    const centerX =
+      this.getTimedLiveCurrentFeedbackCursorLeft(staffId) ??
+      this.getPlayCursorOverlayCenterX(container);
+    if (!Number.isFinite(centerX)) {
+      return null;
+    }
+
+    const placement = this.buildFloatingIncorrectFeedbackPlacement({
       playedHalfTone: halfTone,
-      anchorHalfTone: anchor.halfTone,
-      anchorPitchInfo: anchor.pitchInfo,
-      anchorCenterY: anchorRect.top + anchorRect.height / 2,
+      middleCY: this.getIncorrectFeedbackMiddleCY(geometry, measureOverlay),
       width,
       height,
-      centerX:
-        this.getTimedLiveCurrentFeedbackCursorLeft(anchor.staffId) ??
-        this.getPlayCursorOverlayCenterX(container) ??
-        anchorRect.left + anchorRect.width / 2,
-      stepHeight:
-        this.getRedNoteStepHeight(anchor) ?? Math.max(anchorRect.height * 0.55, 4),
+      centerX: Number(centerX),
+      stepHeight: this.getIncorrectFeedbackStepHeight(geometry, measureOverlay),
       measureNumber,
       scoreTimestamp: timestamp,
-      staffId: anchor.staffId,
+      staffId,
     });
     if (!placement) {
       return null;
     }
 
-    const id = `wrong-${this.loopPass}-${timestamp}-${halfTone}`;
+    const id = `wrong-${this.loopPass}-${timestamp}-${halfTone}-${++this.feedbackInstanceSequence}`;
     return { id, ...placement };
+  }
+
+  private isTrebleClefFeedbackPitch(halfTone: number): boolean {
+    return (
+      Number.isFinite(halfTone) &&
+      halfTone >= PlayPageComponent.MIDDLE_C_HALF_TONE
+    );
   }
 
   private buildIncorrectFeedbackPlacement(params: {
@@ -3845,6 +3868,138 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         spelling?.displayAccidental ?? null,
         params.height
       ),
+    };
+  }
+
+  private buildFloatingIncorrectFeedbackPlacement(params: {
+    playedHalfTone: number;
+    middleCY: number;
+    width: number;
+    height: number;
+    centerX: number;
+    stepHeight: number;
+    measureNumber: number;
+    scoreTimestamp: number;
+    staffId: number | null;
+  }): FeedbackNoteheadPlacement | null {
+    const spelling = this.resolveIncorrectPitchSpelling(
+      params.playedHalfTone,
+      params.measureNumber,
+      params.scoreTimestamp,
+      params.staffId,
+      this.getDiatonicStepIndex(PlayPageComponent.MIDDLE_C_HALF_TONE)
+    );
+    const targetStepIndex =
+      spelling?.diatonicStepIndex ?? this.getDiatonicStepIndex(params.playedHalfTone);
+    const middleCStepIndex = this.getDiatonicStepIndex(
+      PlayPageComponent.MIDDLE_C_HALF_TONE
+    );
+    const centerY =
+      params.middleCY - (targetStepIndex - middleCStepIndex) * params.stepHeight;
+
+    return {
+      left: params.centerX - params.width / 2,
+      top: centerY - params.height / 2,
+      width: params.width,
+      height: params.height,
+      accidental: this.getFeedbackAccidentalMarker(
+        spelling?.displayAccidental ?? null,
+        params.height
+      ),
+    };
+  }
+
+  private getIncorrectFeedbackMiddleCY(
+    geometry: IncorrectFeedbackStaffGeometry | null,
+    measureOverlay: MeasureOverlay
+  ): number {
+    if (geometry) {
+      return geometry.middleCY;
+    }
+
+    return measureOverlay.top + (measureOverlay.bottom - measureOverlay.top) * 0.5;
+  }
+
+  private getIncorrectFeedbackWidth(
+    geometry: IncorrectFeedbackStaffGeometry | null
+  ): number {
+    const height = this.getIncorrectFeedbackHeight(geometry);
+    return Math.max(height * 1.33, 10);
+  }
+
+  private getIncorrectFeedbackHeight(
+    geometry: IncorrectFeedbackStaffGeometry | null
+  ): number {
+    return Math.max((geometry?.lineSpacing ?? 10) * 0.9, 8);
+  }
+
+  private getIncorrectFeedbackStepHeight(
+    geometry: IncorrectFeedbackStaffGeometry | null,
+    measureOverlay: MeasureOverlay
+  ): number {
+    if (geometry) {
+      return Math.max(geometry.lineSpacing / 2, 4);
+    }
+
+    return Math.max((measureOverlay.bottom - measureOverlay.top) / 32, 4);
+  }
+
+  private getIncorrectFeedbackStaffId(playedHalfTone: number): number | null {
+    if (!Number.isFinite(playedHalfTone)) {
+      return null;
+    }
+
+    return this.isTrebleClefFeedbackPitch(playedHalfTone) ? 0 : 1;
+  }
+
+  private getIncorrectFeedbackStaffGeometryEntry(
+    measureNumber: number,
+    staffId: number | null,
+    measureOverlay: MeasureOverlay
+  ): IncorrectFeedbackStaffGeometry | null {
+    if (!Number.isFinite(measureNumber) || staffId === null) {
+      return null;
+    }
+
+    const direct =
+      this.incorrectFeedbackStaffGeometry.get(`${measureNumber}:${staffId}`) ?? null;
+    if (direct) {
+      return direct;
+    }
+
+    let nearest: IncorrectFeedbackStaffGeometry | null = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    this.incorrectFeedbackStaffGeometry.forEach((entry) => {
+      if (entry.staffId !== staffId) {
+        return;
+      }
+
+      const distance = Math.abs(entry.measureNumber - measureNumber);
+      if (distance < nearestDistance) {
+        nearest = entry;
+        nearestDistance = distance;
+      }
+    });
+
+    if (nearest) {
+      return nearest;
+    }
+
+    const overlayHeight = Math.max(measureOverlay.bottom - measureOverlay.top, 1);
+    const fallbackLineSpacing = Math.max(overlayHeight / 14, 8);
+    const isTreble = staffId === 0;
+    const topLineY = isTreble
+      ? measureOverlay.top + fallbackLineSpacing
+      : measureOverlay.bottom - fallbackLineSpacing * 5;
+    const bottomLineY = topLineY + fallbackLineSpacing * 4;
+
+    return {
+      measureNumber,
+      staffId,
+      topLineY,
+      bottomLineY,
+      lineSpacing: fallbackLineSpacing,
+      middleCY: isTreble ? bottomLineY + fallbackLineSpacing : topLineY - fallbackLineSpacing,
     };
   }
 
@@ -4337,7 +4492,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return this.getDiatonicStepIndex(12 * (octave + 3) + fundamentalNote);
     }
 
-    return octave * 7 + diatonicOrder;
+    return (octave + 3) * 7 + diatonicOrder;
   }
 
   private getDiatonicOrderFromFundamentalNote(
@@ -5524,6 +5679,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private refreshMeasureOverlays(): void {
     if (!this.fileLoaded) {
       this.measureOverlays = [];
+      this.incorrectFeedbackStaffGeometry.clear();
       this.timedLiveCursorTimeline = null;
       this.timedLiveCursorRenderState = null;
       return;
@@ -5535,6 +5691,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     if (!sheet || !graphicSheet || !container) {
       this.measureOverlays = [];
+      this.incorrectFeedbackStaffGeometry.clear();
       this.timedLiveCursorTimeline = null;
       this.timedLiveCursorRenderState = null;
       return;
@@ -5591,8 +5748,119 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     });
 
     this.measureOverlays = overlays;
+    this.incorrectFeedbackStaffGeometry =
+      this.buildIncorrectFeedbackStaffGeometry();
     this.refreshTimedLiveCursorTimelineDeferred();
     this.refreshCursorDebugMarkersDeferred();
+  }
+
+  private buildIncorrectFeedbackStaffGeometry(): Map<
+    string,
+    IncorrectFeedbackStaffGeometry
+  > {
+    const geometry = new Map<string, IncorrectFeedbackStaffGeometry>();
+    const sheet: any = this.openSheetMusicDisplay?.Sheet;
+    const graphicSheet: any = this.openSheetMusicDisplay?.GraphicSheet;
+    const container = document.getElementById('scoreOverlayHost');
+    if (!sheet || !graphicSheet || !container) {
+      return geometry;
+    }
+
+    const containerRect = container.getBoundingClientRect();
+
+    sheet.SourceMeasures.forEach((sourceMeasure: any, index: number) => {
+      const measureNumber = index + 1;
+      const graphicalMeasures = this.getGraphicalMeasuresForSourceMeasure(
+        sourceMeasure,
+        index,
+        graphicSheet
+      );
+
+      graphicalMeasures.forEach((measure: any) => {
+        const staffId = measure?.ParentStaff?.idInMusicSheet;
+        const staffLine = measure?.ParentStaffLine;
+        const staffLines = staffLine?.StaffLines ?? [];
+        if (!Number.isFinite(staffId) || staffLines.length < 5) {
+          return;
+        }
+
+        const lineYs = staffLines
+          .slice(0, 5)
+          .map((line: any) =>
+            this.getIncorrectFeedbackStaffLineY(
+              line,
+              staffLine,
+              containerRect
+            )
+          )
+          .filter((lineY: number | null): lineY is number => Number.isFinite(lineY));
+        if (lineYs.length < 5) {
+          return;
+        }
+
+        const lineSpacing = Math.max(this.getAverageAdjacentDistance(lineYs), 8);
+        const topLineY = lineYs[0];
+        const bottomLineY = lineYs[lineYs.length - 1];
+        const isTreble = staffId === 0;
+
+        geometry.set(`${measureNumber}:${staffId}`, {
+          measureNumber,
+          staffId,
+          topLineY,
+          bottomLineY,
+          lineSpacing,
+          middleCY: isTreble
+            ? bottomLineY + lineSpacing
+            : topLineY - lineSpacing,
+        });
+      });
+    });
+
+    return geometry;
+  }
+
+  private getIncorrectFeedbackStaffLineY(
+    line: any,
+    staffLine: any,
+    containerRect: DOMRect
+  ): number | null {
+    const staffAbsoluteY = staffLine?.PositionAndShape?.AbsolutePosition?.y;
+    const lineY =
+      line?.Start?.y ??
+      line?.start?.y ??
+      line?.End?.y ??
+      line?.end?.y;
+    if (!Number.isFinite(staffAbsoluteY) || !Number.isFinite(lineY)) {
+      return null;
+    }
+
+    const domRect = this.convertSvgRectToDomRect({
+      x: 0,
+      y: (staffAbsoluteY + lineY) * PlayPageComponent.OSMD_UNIT_IN_PIXELS,
+      width: 0,
+      height: 0,
+    });
+    if (!domRect) {
+      return null;
+    }
+
+    return domRect.top - containerRect.top;
+  }
+
+  private getAverageAdjacentDistance(values: number[]): number {
+    if (values.length < 2) {
+      return 0;
+    }
+
+    const deltas = values
+      .slice(1)
+      .map((value, index) => value - values[index])
+      .filter((delta) => Number.isFinite(delta) && delta > 0);
+    if (deltas.length === 0) {
+      return 0;
+    }
+
+    return deltas.reduce((total, delta) => total + delta, 0) / deltas.length;
   }
 
   private refreshTimedLiveCursorTimelineDeferred(): void {
