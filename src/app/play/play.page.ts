@@ -416,7 +416,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.6';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.7';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -3019,7 +3019,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     width: number;
     height: number;
   } | null {
-    const cursorPosition = this.getPlayCursorPosition();
+    // Feedback fallbacks must use the cursor the user can actually see. In
+    // timed live mode that is the overlay cursor, not the hidden legacy OSMD
+    // cursor element. Reading only the legacy cursor's base `left/top` causes
+    // red bulbs to disappear or drift during animated states such as wraps and
+    // tie transitions.
+    const cursorPosition = this.getCurrentVisibleCursorPosition();
     if (!cursorPosition) {
       return null;
     }
@@ -3030,6 +3035,26 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       width: 14,
       height: 11,
     };
+  }
+
+  private getCurrentVisibleCursorPosition(): { left: number; top: number } | null {
+    // Single source of truth for any feature that needs the *rendered* cursor
+    // position. If live playback is showing the timed overlay, use that overlay
+    // directly. Otherwise fall back to the rendered legacy cursor position,
+    // which accounts for DOM transforms/animation instead of raw base styles.
+    if (
+      this.shouldUseTimedLiveCursorVisual() &&
+      this.timedLiveCursorRenderState?.visible &&
+      Number.isFinite(this.timedLiveCursorRenderState.left) &&
+      Number.isFinite(this.timedLiveCursorRenderState.top)
+    ) {
+      return {
+        left: this.timedLiveCursorRenderState.left,
+        top: this.timedLiveCursorRenderState.top,
+      };
+    }
+
+    return this.getTraceRenderedPlayCursorPosition();
   }
 
   private getRenderableRect(
@@ -3814,11 +3839,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private getIncorrectNotePlacement(
     halfTone: number
   ): (FeedbackNoteheadPlacement & { id: string }) | null {
-    const container = document.getElementById('scoreOverlayHost');
-    if (!container) {
-      return null;
-    }
-
     const measureNumber =
       (this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasureIndex ?? -1) +
       1;
@@ -3837,8 +3857,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const width = this.getIncorrectFeedbackWidth(geometry);
     const height = this.getIncorrectFeedbackHeight(geometry);
     const centerX =
-      this.getTimedLiveCurrentFeedbackCursorLeft(staffId) ??
-      this.getPlayCursorOverlayCenterX(container);
+      this.getCurrentVisibleCursorCenterX(staffId) ??
+      this.getMeasureOverlayCursorFallbackCenterX(measureOverlay);
     if (!Number.isFinite(centerX)) {
       return null;
     }
@@ -3860,6 +3880,40 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     const id = `wrong-${this.loopPass}-${timestamp}-${halfTone}-${++this.feedbackInstanceSequence}`;
     return { id, ...placement };
+  }
+
+  private getCurrentVisibleCursorCenterX(
+    preferredStaffId: number | null = null
+  ): number | null {
+    // Red bulbs should follow the same rendered cursor that the player sees on
+    // screen, including while the cursor is animating through ties or across a
+    // system/loop boundary. In timed live mode the overlay cursor is the
+    // authoritative visual position for both autoplay and human-driven input.
+    if (this.shouldUseTimedLiveCursorVisual()) {
+      const scoreTimestamp = this.getTimedLiveCursorScoreTimestamp();
+      if (Number.isFinite(scoreTimestamp)) {
+        const timedLiveLeft = this.getTimedLiveStableFeedbackCursorLeft(
+          Number(scoreTimestamp),
+          preferredStaffId
+        );
+        if (Number.isFinite(timedLiveLeft)) {
+          return timedLiveLeft;
+        }
+      }
+    }
+
+    const visiblePosition = this.getCurrentVisibleCursorPosition();
+    if (!visiblePosition || !Number.isFinite(visiblePosition.left)) {
+      return null;
+    }
+
+    return visiblePosition.left + 1;
+  }
+
+  private getMeasureOverlayCursorFallbackCenterX(
+    measureOverlay: MeasureOverlay
+  ): number {
+    return measureOverlay.left + (measureOverlay.right - measureOverlay.left) / 2;
   }
 
   private isTrebleClefFeedbackPitch(halfTone: number): boolean {
