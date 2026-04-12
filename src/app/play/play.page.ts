@@ -415,7 +415,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.2';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.4';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -2434,16 +2434,33 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
+    if (this.startFlashCount > 0) {
+      this.showTimedLiveCursorAtStartTimestamp();
+      this.updateLegacyPlayCursorDebugVisibility();
+    }
+
     this.refreshCursorWrapDebugSnapshot();
     this.osmdCursorStart2(startContext);
   }
 
   osmdCursorStart2(startContext: PlaybackStartContext): void {
     if (this.startFlashCount > 0) {
+      // Count-in contract for transport starts:
+      // - the cursor is already aligned to the first playable timestamp by
+      //   `osmdCursorStart()`;
+      // - during the countdown it must remain visible and stationary at that
+      //   first timestamp so the user can see exactly where playback will
+      //   begin;
+      // - only after the count-in completes do we arm audio scheduling and let
+      //   the cursor advance.
+      //
+      // Do not blink or hide the cursor here. Using the cursor itself as a
+      // countdown indicator makes the start position ambiguous and has caused
+      // regressions where the cursor appears to jump or disappear before the
+      // first beat.
       this.playCountInClick();
-      if (this.openSheetMusicDisplay.cursors[0].hidden)
-        this.openSheetMusicDisplay.cursors[0].show();
-      else this.openSheetMusicDisplay.cursors[0].hide();
+      this.openSheetMusicDisplay.cursors[0].show();
+      this.showTimedLiveCursorAtStartTimestamp();
       this.startFlashCount--;
       const countInDelay = this.getCountInDelayMs();
       this.timeouts.push(
@@ -6433,6 +6450,37 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private shouldUseTimedLiveCursorVisual(): boolean {
     return this.running && this.isTimedTransportMode() && !!this.timedLiveCursorTimeline;
+  }
+
+  private showTimedLiveCursorAtStartTimestamp(): void {
+    const timeline = this.timedLiveCursorTimeline;
+    if (!timeline || !this.isTimedTransportMode()) {
+      return;
+    }
+
+    // Pre-roll contract for timed playback:
+    // while the count-in is active, the timed-live cursor must already be
+    // visible at the first playable timestamp, but it must not advance yet.
+    // Importantly, this is the first rendered musical timestamp, not the raw
+    // left barline of the measure. Parking on the barline sends the cursor
+    // through the clef/key-signature area and also makes beat one late when
+    // the first note starts exactly at the measure timestamp.
+    //
+    // We therefore resolve the cursor's rendered position at the start
+    // timestamp itself instead of seeding from `timeline.startLeft`.
+    const startRenderState =
+      this.resolveTimedLiveCursorRenderAtTimestamp(timeline.startTimestamp);
+    if (!startRenderState) {
+      return;
+    }
+
+    this.timedLiveCursorRenderState = {
+      left: startRenderState.left,
+      top: startRenderState.top,
+      height: startRenderState.height,
+      visible: true,
+      scoreTimestamp: timeline.startTimestamp,
+    };
   }
 
   private startTimedLiveCursorDebugLoop(): void {
