@@ -92,43 +92,69 @@ The intended mental model is:
 
 Treat these as separate concepts:
 
-- whether a note can be accepted for progression
+- whether a note is allowed to satisfy or advance the current realtime step
 - how that note is timing-classified
-- whether that note or step is allowed to render green
+- whether that note or step is allowed to render a green hit
 
 They are intentionally not equivalent.
+
+When this file says "step advance", it means:
+
+- the app is allowed to treat the current score step as complete enough to move the live/play cursor on to the next step
+- this can happen even when the visual feedback is not a green hit
+- this is why "accepted for step advance" and "green hit" must stay separate in the code
+
+The intended classification model is symmetric:
+
+- `early` and `late` should follow the same basic rules
+- the main conceptual difference is the sign of the time offset relative to the target timestamp
+- they should otherwise behave like mirror-image timing classes, with different colors and different stats buckets
+
+If the implementation behaves asymmetrically, that is usually because of step-advance mechanics around "previous step" versus "next step", not because the classification contract itself is supposed to be different.
 
 #### `correct`
 
 - A note is `correct` only when it lands inside the accepted on-time window for its target timestamp.
+- `correct` is the same thing as an on-time green hit.
 - `correct` notes may count toward satisfying the current realtime step.
 - `correct` notes may render green note feedback.
 - A chord/step should only render green when every required note for that step was matched as `correct`.
 
 #### `early`
 
-- A note is `early` when it matches expected pitch material but arrives before the accepted on-time window.
-- `early` notes should render their timing feedback, not green hit feedback.
-- `early` notes must never become green just because the required pitch set is physically down.
+- A note is `early` when it matches the expected pitch material for a target note, but arrives before the on-time hit window.
+- `early` and `late` share the same rule shape:
+  - they match an expected target note
+  - they are outside the on-time hit window
+  - they render timing feedback instead of a green hit
+  - they must not be turned into green later by step-advance logic
+- `early` uses the early-side timing window and early color.
+- An `early` note may or may not count toward step advance depending on the live-mode tolerance rules, but it must never render as a green hit.
 
 #### `late`
 
-- A note is `late` when it matches expected pitch material but arrives after the accepted on-time window.
-- `late` notes may still be accepted for progression/tolerance purposes in realtime mode.
+- A note is `late` when it matches the expected pitch material for a target note, but arrives after the on-time hit window.
+- `late` uses the late-side timing window and late color.
+- A `late` note may still be accepted for step advance/tolerance purposes in realtime mode.
 - `late` notes should render late timing feedback, not green hit feedback.
 - `late` notes must never cause either the current step or the previous step to paint green during a later cursor advance.
 
 #### `miss`
 
-- A note is `miss` when it falls outside the accepted timing window badly enough to no longer count as an accepted timing variation, or when expected notes were still unmatched when the cursor advanced.
+- `miss` covers the red-bulb cases.
+- A note is `miss` when any of the following is true:
+  - the played pitch does not match any currently expected note and is therefore just wrong
+  - the note is so early or so late that it falls outside the accepted early/late tolerance windows and should no longer be treated as an accepted timing variation
+  - the cursor advances and one or more expected notes for that step were never matched on time
 - `miss` feedback must never render as green.
-- Miss evaluation at step advance should compare the step's required-note set against the notes that were actually matched on time.
+- Miss evaluation at step advance should compare the step's required-note set against the notes that were actually matched as `correct`.
+- Wrong-pitch unmatched notes should stay in the red/miss family. They should not be reinterpreted as early, late, or green unless they are explicitly matched to an expected target note by the classification logic.
 
 #### Green-hit source of truth
 
 - In realtime mode, "all required keys are currently down" is not sufficient to justify green success rendering.
 - Green success must be based on the subset of required notes that were actually classified as `correct` for the current step.
-- This distinction protects against regressions where early/late notes advance the step correctly but are still rendered as green hits.
+- This distinction protects against regressions where early/late notes can still allow step advance but are incorrectly rendered as green hits.
 
 ## Progress So Far
 

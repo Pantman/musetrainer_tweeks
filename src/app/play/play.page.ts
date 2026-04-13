@@ -416,7 +416,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.12';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.14';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
