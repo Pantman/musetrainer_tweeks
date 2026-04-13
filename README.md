@@ -6,6 +6,12 @@ Source code of https://musetrainer.github.io.
 
 Unmaintained. Fork this to fix bugs or add new features.
 
+## Codex context
+
+If you are working on this repository with Codex, read `CODEX_PROMPT.md` first.
+It contains project-specific context, current cursor/playback goals, recent progress,
+and known gotchas that are important for avoiding regressions.
+
 
 ## Local web development
 
