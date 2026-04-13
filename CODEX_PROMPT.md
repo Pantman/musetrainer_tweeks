@@ -88,6 +88,48 @@ The intended mental model is:
   - tie transitions
   - any animated cursor movement using transforms or overlay state
 
+### Realtime feedback classification
+
+Treat these as separate concepts:
+
+- whether a note can be accepted for progression
+- how that note is timing-classified
+- whether that note or step is allowed to render green
+
+They are intentionally not equivalent.
+
+#### `correct`
+
+- A note is `correct` only when it lands inside the accepted on-time window for its target timestamp.
+- `correct` notes may count toward satisfying the current realtime step.
+- `correct` notes may render green note feedback.
+- A chord/step should only render green when every required note for that step was matched as `correct`.
+
+#### `early`
+
+- A note is `early` when it matches expected pitch material but arrives before the accepted on-time window.
+- `early` notes should render their timing feedback, not green hit feedback.
+- `early` notes must never become green just because the required pitch set is physically down.
+
+#### `late`
+
+- A note is `late` when it matches expected pitch material but arrives after the accepted on-time window.
+- `late` notes may still be accepted for progression/tolerance purposes in realtime mode.
+- `late` notes should render late timing feedback, not green hit feedback.
+- `late` notes must never cause either the current step or the previous step to paint green during a later cursor advance.
+
+#### `miss`
+
+- A note is `miss` when it falls outside the accepted timing window badly enough to no longer count as an accepted timing variation, or when expected notes were still unmatched when the cursor advanced.
+- `miss` feedback must never render as green.
+- Miss evaluation at step advance should compare the step's required-note set against the notes that were actually matched on time.
+
+#### Green-hit source of truth
+
+- In realtime mode, "all required keys are currently down" is not sufficient to justify green success rendering.
+- Green success must be based on the subset of required notes that were actually classified as `correct` for the current step.
+- This distinction protects against regressions where early/late notes advance the step correctly but are still rendered as green hits.
+
 ## Progress So Far
 
 These fixes have already been made and committed:

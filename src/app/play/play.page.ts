@@ -416,7 +416,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.7';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.12';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -480,6 +480,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   timeouts: NodeJS.Timeout[] = [];
   realtimeMode: boolean = false;
   currentStepSatisfied: boolean = false;
+  private currentStepSatisfiedAsCorrect: boolean = false;
+  private realtimeCurrentStepCorrectKeys = new Set<string>();
   debugRealtimeStats: RealtimeDebugStats = {
     playedTotal: 0,
     acceptedOnTime: 0,
@@ -1722,6 +1724,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.playbackStartAudioTimeSec = null;
     this.loopPass = 0;
     this.currentStepSatisfied = false;
+    this.currentStepSatisfiedAsCorrect = false;
     this.resetPlayCursorTransition();
     this.osmdCursorStop();
     this.timeouts.map((to) => clearTimeout(to));
@@ -1781,6 +1784,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.setTransportMode('realtime');
     this.stopTimedLiveCursorDebugLoop(true);
     this.currentStepSatisfied = false;
+    this.currentStepSatisfiedAsCorrect = false;
     this.startFlashCount = 4;
     this.osmdCursorStart();
   }
@@ -2139,6 +2143,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       const hasCurrentRequiredPressKeys = this.hasCurrentRequiredPressKeys();
       this.currentStepSatisfied =
         !hasCurrentRequiredPressKeys || this.notesService.isRequiredNotesPressed();
+      // A realtime step may already be "satisfied" because the required keys
+      // are physically down, but that does not mean it was satisfied on time.
+      // This flag is set only by the note-on classification path when the step
+      // should later be rendered as a true green hit.
+      this.currentStepSatisfiedAsCorrect = !hasCurrentRequiredPressKeys;
       this.refreshRealtimeNextStepKeys();
     } else {
       this.tempoInBPM = this.notesService.tempoInBPM;
@@ -2341,6 +2350,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.running = false;
     this.loopPass = 0;
     this.currentStepSatisfied = false;
+    this.currentStepSatisfiedAsCorrect = false;
 
     this.withCursorFollowSuppressed(() => {
       this.openSheetMusicDisplay.cursors.forEach((cursor) => {
@@ -4664,6 +4674,18 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private clearRealtimeCurrentStepMatches(): void {
     this.realtimeCurrentStepMatchedKeys.clear();
+    this.realtimeCurrentStepCorrectKeys.clear();
+  }
+
+  private allRequiredCurrentStepKeysWereCorrectlyMatched(
+    requiredKeys: Set<string>
+  ): boolean {
+    return (
+      requiredKeys.size > 0 &&
+      Array.from(requiredKeys).every((key) =>
+        this.realtimeCurrentStepCorrectKeys.has(key)
+      )
+    );
   }
 
   private getCurrentRequiredPressKeys(notesService = this.notesService): Set<string> {
@@ -4823,7 +4845,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private acceptLateRealtimeNote(name: string): void {
     this.realtimePreviousStepMatchedKeys.add(name);
-    this.markPreviousStepNoteCorrect(name);
     this.debugRealtimeStats.acceptedLate++;
     this.debugRealtimeStats.lastPitch = this.noteKeyToLabel(name);
     this.debugRealtimeStats.lastResult = 'accepted late';
@@ -4835,10 +4856,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.realtimePreviousStepMatchedKeys.size >=
         this.realtimePreviousStepKeys.size
     ) {
-      this.renderCorrectPracticeNotes(
-        this.realtimePreviousStepGraphicalNotes,
-        this.realtimePreviousStepTimestamp
-      );
+      // Late notes may be accepted for progression/tolerance purposes, but
+      // they must not be rendered as green hits. Their timing feedback is the
+      // source of truth, so clearing the late window here must not paint the
+      // previous step as correct.
       this.clearRealtimeToleranceWindow();
     }
   }
@@ -9172,6 +9193,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const suppressAutoplayFeedback =
       this.shouldSuppressListenAutoplayFeedbackForName(name);
     const matchesCurrentStep = requiredPressKeys.has(name);
+    let shouldRenderCurrentStepAsCorrect = true;
     this.updateRealtimeDebugWindow();
     this.debugRealtimeStats.playedTotal++;
 
@@ -9182,8 +9204,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     if (timedLiveRealtimeClassification && scoreTimestamp !== null) {
       const match = this.handleTimedLiveRealtimeNoteOn(halbTone, scoreTimestamp);
       if (match) {
-        if (!this.realtimeCurrentStepMatchedKeys.has(name) && matchesCurrentStep) {
+        if (
+          match.timingClass === 'correct' &&
+          !this.realtimeCurrentStepMatchedKeys.has(name) &&
+          matchesCurrentStep
+        ) {
           this.realtimeCurrentStepMatchedKeys.add(name);
+          this.realtimeCurrentStepCorrectKeys.add(name);
         }
 
         const timingClass = match.timingClass;
@@ -9191,12 +9218,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           this.debugRealtimeStats.acceptedOnTime++;
           this.debugRealtimeStats.lastResult = 'on-time';
         } else if (timingClass === 'early') {
+          shouldRenderCurrentStepAsCorrect = false;
           this.debugRealtimeStats.early++;
           this.debugRealtimeStats.lastResult = 'early';
         } else if (timingClass === 'late') {
+          shouldRenderCurrentStepAsCorrect = false;
           this.debugRealtimeStats.acceptedLate++;
           this.debugRealtimeStats.lastResult = 'late';
         } else {
+          shouldRenderCurrentStepAsCorrect = false;
           this.debugRealtimeStats.rejected++;
           this.debugRealtimeStats.lastResult = 'miss';
         }
@@ -9205,6 +9235,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           `${pitchLabel} ${this.debugRealtimeStats.lastResult}`
         );
         this.updateRealtimeDebugWindow();
+
+        if (
+          timingClass === 'correct' &&
+          this.notesService.isRequiredNotesPressed()
+        ) {
+          this.currentStepSatisfiedAsCorrect = true;
+        }
       } else if (
         !matchesCurrentStep &&
         this.isPracticing() &&
@@ -9250,6 +9287,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         !this.realtimeCurrentStepMatchedKeys.has(name)
       ) {
         this.realtimeCurrentStepMatchedKeys.add(name);
+        this.realtimeCurrentStepCorrectKeys.add(name);
         if (!suppressAutoplayFeedback) {
           this.markCurrentNoteCorrect(name);
           this.debugRealtimeStats.acceptedOnTime++;
@@ -9259,11 +9297,24 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           this.updateRealtimeDebugWindow();
         }
       }
+
+      if (!acceptedLateRealtimeNote && this.notesService.isRequiredNotesPressed()) {
+        this.currentStepSatisfiedAsCorrect = true;
+      }
     }
 
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
     if (!acceptedLateRealtimeNote && this.notesService.isRequiredNotesPressed()) {
-      if (!suppressAutoplayFeedback) {
+      // Timing-classified notes can still make the required pitch set "pressed"
+      // in realtime mode, but only on-time notes should be rendered as green
+      // hits. Early/late notes already get their own amber/blue timing
+      // feedback. Green success is therefore keyed off the per-step set of
+      // required notes that were actually matched as `correct`, not merely the
+      // broader "accepted for progression" state.
+      this.currentStepSatisfiedAsCorrect =
+        shouldRenderCurrentStepAsCorrect &&
+        this.allRequiredCurrentStepKeysWereCorrectlyMatched(requiredPressKeys);
+      if (!suppressAutoplayFeedback && this.currentStepSatisfiedAsCorrect) {
         this.debugRealtimeStats.lastPitch = pitchLabel;
         this.debugRealtimeStats.lastResult = 'step satisfied';
         this.appendRealtimeDebugEvent(`${pitchLabel} step satisfied`);
@@ -9404,7 +9455,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     const currentRequiredPressKeys = this.getCurrentRequiredPressKeys();
 
-    if (this.currentStepSatisfied && currentRequiredPressKeys.size > 0) {
+    if (
+      this.currentStepSatisfied &&
+      this.allRequiredCurrentStepKeysWereCorrectlyMatched(currentRequiredPressKeys) &&
+      currentRequiredPressKeys.size > 0
+    ) {
       this.markCurrentNotesCorrect();
     } else if (currentRequiredPressKeys.size > 0) {
       const missedKeys = Array.from(currentRequiredPressKeys).filter(
