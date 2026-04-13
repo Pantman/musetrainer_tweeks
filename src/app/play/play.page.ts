@@ -362,6 +362,40 @@ interface RealtimeDebugStats {
   lateWindowRemainingMs: number;
 }
 
+type RunOutcomeClass = 'correct' | 'early' | 'late' | 'missed';
+type CompletionGrade = 'S' | 'A' | 'B' | 'C' | 'D' | 'Try again';
+
+interface CompletedRunHistoryEntry {
+  attempt: number;
+  scorePercent: number;
+  grade: CompletionGrade;
+}
+
+interface CompletedRunSummary extends CompletedRunHistoryEntry {
+  hits: number;
+  misses: number;
+  early: number;
+  late: number;
+  longestHitStreak: number;
+  earnedPoints: number;
+  maxPoints: number;
+  startedAt: number;
+  finishedAt: number;
+  durationMs: number;
+}
+
+interface ActiveRunPerformanceTracker {
+  totalExpectedNotes: number;
+  resolvedExpectedNotes: Set<string>;
+  hits: number;
+  misses: number;
+  early: number;
+  late: number;
+  currentHitStreak: number;
+  longestHitStreak: number;
+  startedAt: number;
+}
+
 @Component({
   selector: 'app-home',
   templateUrl: 'play.page.html',
@@ -399,7 +433,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.6';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.11';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -550,6 +584,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private timedLiveCursorDebugPanelSize: { width: number; height: number } | null =
     null;
   timedLiveSimulatedInputEnabled: boolean = false;
+  timedLiveCompletionDebugEnabled: boolean = false;
+  timedLiveCompletionDebugAutoRunsEnabled: boolean = false;
+  timedLiveCompletionDebugBarCount: number = 2;
   timedLiveSimulatedTimingOffsetMs: number = 0;
   timedLiveSimulatedPitchOffsetSemitones: number = 0;
   timedLiveSimulationEarlyThresholdMs: number =
@@ -584,6 +621,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private timedLiveSimulatedOutputInstrumentIds = new Map<number, number | null>();
   private timedLiveSimulatedOutputRouteKeys = new Map<number, string | null>();
   private timedLiveSimulatedOutputTokenSeed = 0;
+  completedRunSummary: CompletedRunSummary | null = null;
+  completedRunHistory: CompletedRunHistoryEntry[] = [];
+  private activeRunPerformanceTracker: ActiveRunPerformanceTracker | null = null;
   private museDebugConsoleRelay = {
     wrap: false,
     realtime: false,
@@ -650,6 +690,25 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.clampTimedLiveCursorDebugPanelPosition();
     if (this.fileLoaded) {
       this.refreshMeasureOverlaysDeferred();
+    }
+  }
+
+  @HostListener('window:keydown', ['$event'])
+  onWindowKeyDown(event: KeyboardEvent): void {
+    if (!this.completedRunSummary) {
+      return;
+    }
+
+    const key = event.key.toLowerCase();
+    if (key === 'enter' || key === 'c') {
+      event.preventDefault();
+      this.retryCompletedRun();
+      return;
+    }
+
+    if (key === 'escape' || key === 'd') {
+      event.preventDefault();
+      this.dismissCompletedRunSummary();
     }
   }
 
@@ -1447,6 +1506,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   startTransport(): void {
     void startTone().catch(() => undefined);
+    this.completedRunSummary = null;
     this.updateRepeat();
     this.osmdStop();
     this.refreshTimedLiveCursorTimeline();
@@ -1479,6 +1539,17 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     return this.isRealtimePlaybackOnly() || this.midiAvailable;
+  }
+
+  retryCompletedRun(): void {
+    this.completedRunSummary = null;
+    if (this.canStartTransport()) {
+      this.startTransport();
+    }
+  }
+
+  dismissCompletedRunSummary(): void {
+    this.completedRunSummary = null;
   }
 
   getTransportLabel(): string {
@@ -1622,6 +1693,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.syncTimedLiveSimulationControls();
   }
 
+  handleTimedLiveCompletionDebugChange(): void {
+    this.timedLiveCompletionDebugBarCount = this.normalizeTimedLiveCompletionDebugBarCount(
+      this.timedLiveCompletionDebugBarCount
+    );
+  }
+
   // Reset selection on measures and set the cursor to the origin
   osmdReset(): void {
     this.osmdStop();
@@ -1692,6 +1769,278 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.playbackClock.pendingLoopRestartAudioTimeSec = null;
   }
 
+  private shouldShowCompletedRunSummary(): boolean {
+    if (this.checkboxRepeat) {
+      return false;
+    }
+
+    return (
+      this.realtimeMode ||
+      (this.timedLiveCompletionDebugAutoRunsEnabled &&
+        (this.listenMode || this.shouldUseTimedLiveSimulatedFeedback()))
+    );
+  }
+
+  private normalizeTimedLiveCompletionDebugBarCount(value: number): number {
+    if (!Number.isFinite(value)) {
+      return 2;
+    }
+
+    return Math.min(Math.max(Math.round(value), 1), 64);
+  }
+
+  private getTimedLiveCompletionDebugBarCount(): number {
+    return this.normalizeTimedLiveCompletionDebugBarCount(
+      this.timedLiveCompletionDebugBarCount
+    );
+  }
+
+  private getCompletedRunDebugTargetUpperMeasure(): number | null {
+    if (!this.timedLiveCompletionDebugEnabled) {
+      return null;
+    }
+
+    const barCount = this.getTimedLiveCompletionDebugBarCount();
+    return Math.min(
+      this.inputMeasure.lower + barCount - 1,
+      this.inputMeasure.upper
+    );
+  }
+
+  private shouldCompleteDebugRunBeforeMeasure(nextMeasureNumber: number | null): boolean {
+    const targetUpperMeasure = this.getCompletedRunDebugTargetUpperMeasure();
+    if (targetUpperMeasure === null || !Number.isFinite(nextMeasureNumber)) {
+      return false;
+    }
+
+    return Number(nextMeasureNumber) > targetUpperMeasure;
+  }
+
+  private shouldCompleteDebugRunAtCurrentStep(): boolean {
+    const currentMeasureNumber =
+      (this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasureIndex ?? -1) + 1;
+    const nextIter = this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.clone?.();
+    if (!nextIter) {
+      return false;
+    }
+
+    nextIter.moveToNext();
+    const nextMeasureNumber = nextIter.EndReached
+      ? currentMeasureNumber + 1
+      : (nextIter.CurrentMeasureIndex ?? -1) + 1;
+
+    return this.shouldCompleteDebugRunBeforeMeasure(nextMeasureNumber);
+  }
+
+  private beginCompletedRunTracking(): void {
+    if (!this.shouldShowCompletedRunSummary()) {
+      this.activeRunPerformanceTracker = null;
+      return;
+    }
+
+    // Completion scoring is defined per expected score note, not per raw key
+    // press. We therefore track outcomes against the timeline's actionable note
+    // ids so a note can contribute exactly once as hit / early / late / missed.
+    this.activeRunPerformanceTracker = {
+      totalExpectedNotes: this.getCompletedRunExpectedNoteCount(),
+      resolvedExpectedNotes: new Set<string>(),
+      hits: 0,
+      misses: 0,
+      early: 0,
+      late: 0,
+      currentHitStreak: 0,
+      longestHitStreak: 0,
+      startedAt: Date.now(),
+    };
+  }
+
+  private getCompletedRunExpectedNoteCount(): number {
+    const timeline = this.timedLiveCursorTimeline;
+    if (!timeline) {
+      return 0;
+    }
+
+    return this.getCompletedRunScoredEvents().reduce(
+      (count, event) => count + this.getTimedLiveSelectedEventNotes(event).length,
+      0
+    );
+  }
+
+  private getCompletedRunScoredEvents(): TimedLiveCursorEvent[] {
+    const timeline = this.timedLiveCursorTimeline;
+    if (!timeline) {
+      return [];
+    }
+
+    const targetUpperMeasure = this.getCompletedRunDebugTargetUpperMeasure();
+    if (targetUpperMeasure === null) {
+      return timeline.events;
+    }
+
+    return timeline.events.filter(
+      (event) =>
+        event.measureNumber >= this.inputMeasure.lower &&
+        event.measureNumber <= targetUpperMeasure
+    );
+  }
+
+  private getCompletedRunExpectedNoteKey(
+    event: TimedLiveCursorEvent,
+    index: number
+  ): string {
+    return `${event.id}:${index}`;
+  }
+
+  private recordCompletedRunOutcome(
+    event: TimedLiveCursorEvent,
+    index: number,
+    outcome: RunOutcomeClass
+  ): void {
+    const tracker = this.activeRunPerformanceTracker;
+    if (!tracker) {
+      return;
+    }
+
+    const targetUpperMeasure = this.getCompletedRunDebugTargetUpperMeasure();
+    if (
+      targetUpperMeasure !== null &&
+      (event.measureNumber < this.inputMeasure.lower ||
+        event.measureNumber > targetUpperMeasure)
+    ) {
+      return;
+    }
+
+    const key = this.getCompletedRunExpectedNoteKey(event, index);
+    if (tracker.resolvedExpectedNotes.has(key)) {
+      return;
+    }
+
+    tracker.resolvedExpectedNotes.add(key);
+    if (outcome === 'correct') {
+      tracker.hits++;
+      tracker.currentHitStreak++;
+      tracker.longestHitStreak = Math.max(
+        tracker.longestHitStreak,
+        tracker.currentHitStreak
+      );
+      return;
+    }
+
+    tracker.currentHitStreak = 0;
+    if (outcome === 'early') {
+      tracker.early++;
+      return;
+    }
+    if (outcome === 'late') {
+      tracker.late++;
+      return;
+    }
+
+    tracker.misses++;
+  }
+
+  private buildCompletedRunSummary(): CompletedRunSummary | null {
+    const tracker = this.activeRunPerformanceTracker;
+    if (!tracker) {
+      return null;
+    }
+
+    const maxPoints = tracker.totalExpectedNotes * 2;
+    const earnedPoints = tracker.hits * 2 + tracker.early + tracker.late;
+    const rawPercent =
+      maxPoints > 0 ? (earnedPoints / maxPoints) * 100 : 0;
+    const scorePercent = Math.round(rawPercent * 10) / 10;
+    const finishedAt = Date.now();
+    const attempt = this.completedRunHistory.length + 1;
+
+    return {
+      attempt,
+      hits: tracker.hits,
+      misses: tracker.misses,
+      early: tracker.early,
+      late: tracker.late,
+      longestHitStreak: tracker.longestHitStreak,
+      earnedPoints,
+      maxPoints,
+      scorePercent,
+      grade: this.getCompletedRunGrade(scorePercent),
+      startedAt: tracker.startedAt,
+      finishedAt,
+      durationMs: Math.max(finishedAt - tracker.startedAt, 0),
+    };
+  }
+
+  private getCompletedRunGrade(scorePercent: number): CompletionGrade {
+    if (scorePercent >= 100) {
+      return 'S';
+    }
+    if (scorePercent >= 90) {
+      return 'A';
+    }
+    if (scorePercent >= 80) {
+      return 'B';
+    }
+    if (scorePercent >= 70) {
+      return 'C';
+    }
+    if (scorePercent >= 60) {
+      return 'D';
+    }
+
+    return 'Try again';
+  }
+
+  getCompletedRunGradeLabel(summary: CompletedRunSummary | null): string {
+    if (!summary || summary.grade !== 'S') {
+      return '';
+    }
+
+    return 'perfect';
+  }
+
+  private openCompletedRunSummary(): void {
+    const summary = this.buildCompletedRunSummary();
+    this.activeRunPerformanceTracker = null;
+    if (!summary) {
+      return;
+    }
+
+    this.completedRunSummary = summary;
+    this.completedRunHistory = [
+      ...this.completedRunHistory,
+      {
+        attempt: summary.attempt,
+        scorePercent: summary.scorePercent,
+        grade: summary.grade,
+      },
+    ];
+  }
+
+  getCompletedRunHistoryBarStyle(entry: CompletedRunHistoryEntry): Record<string, string> {
+    const heightPercent = Math.max(10, Math.min(100, Math.round(entry.scorePercent)));
+    return {
+      height: `${heightPercent}%`,
+    };
+  }
+
+  private handleCompletedRunPianoCommand(pitch: number): boolean {
+    if (!this.completedRunSummary) {
+      return false;
+    }
+
+    const pitchClass = ((pitch % 12) + 12) % 12;
+    if (pitchClass === 0) {
+      this.retryCompletedRun();
+      return true;
+    }
+    if (pitchClass === 2) {
+      this.dismissCompletedRunSummary();
+      return true;
+    }
+
+    return false;
+  }
+
   private buildPlaybackStartContext(): PlaybackStartContext {
     const audioSeedTimeSec = this.takePendingLoopRestartAudioTime();
     return {
@@ -1745,6 +2094,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.resetTimedLiveCursorDebugSession();
     this.resetTimedLiveSimulatedFeedbackStats();
     this.syncTimedLiveCursorDebugLoop();
+    this.beginCompletedRunTracking();
     this.startFlashCount = 0;
     this.osmdCursorStart();
   }
@@ -1773,6 +2123,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.stopTimedLiveCursorDebugLoop(true);
     this.currentStepSatisfied = false;
     this.currentStepSatisfiedAsCorrect = false;
+    this.beginCompletedRunTracking();
     this.startFlashCount = 4;
     this.osmdCursorStart();
   }
@@ -1995,6 +2346,17 @@ export class PlayPageComponent implements OnInit, OnDestroy {
             }, timeout)
           );
         }
+      } else if (this.shouldShowCompletedRunSummary()) {
+        // Debug short-run mode lets us stop after a small bar slice without
+        // requiring a full playthrough. We still wait until the next bar
+        // boundary so the user can play naturally and the scorecard appears
+        // hands-free instead of on a manual button press.
+        this.timeouts.push(
+          setTimeout(() => {
+            this.openCompletedRunSummary();
+            this.osmdCursorStop();
+          }, timeout)
+        );
       }
     } else {
       // Move to Next
@@ -2016,6 +2378,27 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         timeout = this.getPlaybackDelayMs(
           nextTimestamp - iter.CurrentSourceTimestamp.RealValue
         );
+      }
+
+      const nextMeasureNumber = (it2.CurrentMeasureIndex ?? -1) + 1;
+      if (
+        this.listenMode &&
+        this.shouldShowCompletedRunSummary() &&
+        this.shouldCompleteDebugRunBeforeMeasure(nextMeasureNumber)
+      ) {
+        this.timeouts.push(
+          setTimeout(() => {
+            this.openCompletedRunSummary();
+            this.osmdCursorStop();
+          }, timeout)
+        );
+        this.scheduleMetronomeWindow(currentTimestamp, nextTimestamp, audioTime);
+        this.advanceScheduledPlaybackAudioTime(timeout);
+        if (this.listenMode) {
+          this.advanceTimedStartBootstrapCursorIfNeeded();
+          this.playNote(audioTime);
+        }
+        return;
       }
 
       this.timeouts.push(
@@ -2382,6 +2765,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
     this.clearRealtimeCurrentStepMatches();
     this.clearRealtimeToleranceWindow();
+    this.activeRunPerformanceTracker = null;
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
     this.activeRangeHandle = null;
     this.activeRangeSelectionStart = null;
@@ -6498,6 +6882,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       `consider e ${snapshot.earlyConsiderationMs}ms l ${snapshot.lateConsiderationMs}ms`,
       `thr e ${snapshot.earlyThresholdVisible ? 'on' : 'off'} l ${snapshot.lateThresholdVisible ? 'on' : 'off'} win e ${snapshot.earlyConsiderationVisible ? 'on' : 'off'} l ${snapshot.lateConsiderationVisible ? 'on' : 'off'} wrap ${snapshot.wrapsSystem ? 'yes' : 'no'}`,
       `sim stats g ${this.timedLiveSimulatedFeedbackStats.onTime} e ${this.timedLiveSimulatedFeedbackStats.early} l ${this.timedLiveSimulatedFeedbackStats.late} m ${this.timedLiveSimulatedFeedbackStats.missed}`,
+      `congrats dbg ${this.timedLiveCompletionDebugEnabled ? 'on' : 'off'} auto ${this.timedLiveCompletionDebugAutoRunsEnabled ? 'on' : 'off'} bars ${this.getTimedLiveCompletionDebugBarCount()}`,
       `frames ${this.timedLiveCursorDebugSessionTotals.frames} seg ${this.timedLiveCursorDebugSessionTotals.segmentTransitions} wraps ${this.timedLiveCursorDebugSessionTotals.wrapTransitions}`,
       `timeline ${this.timedLiveCursorTimeline?.events.length ?? 0} events ${this.timedLiveCursorTimeline?.segments.length ?? 0} segments`,
     ];
@@ -7008,6 +7393,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.timedLiveSimulatedFeedbackStats.late++;
     } else {
       this.timedLiveSimulatedFeedbackStats.missed++;
+    }
+
+    if (this.timedLiveCompletionDebugAutoRunsEnabled) {
+      this.recordCompletedRunOutcome(
+        pendingNote.event,
+        pendingNote.index,
+        pendingNote.timingClass
+      );
     }
 
     if (!renderNotehead) {
@@ -7617,6 +8010,32 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return `${this.loopPass}:${event.id}`;
   }
 
+  private getTimedLiveEventAtTimestamp(
+    timestamp: number
+  ): {
+    event: TimedLiveCursorEvent;
+    selectedNotes: Array<{ note: TimedLiveCursorNote; index: number }>;
+  } | null {
+    const timeline = this.timedLiveCursorTimeline;
+    if (!timeline || !Number.isFinite(timestamp)) {
+      return null;
+    }
+
+    const timestampEpsilon = 1e-7;
+    const event =
+      timeline.events.find(
+        (candidate) => Math.abs(candidate.timestamp - timestamp) <= timestampEpsilon
+      ) ?? null;
+    if (!event) {
+      return null;
+    }
+
+    return {
+      event,
+      selectedNotes: this.getTimedLiveSelectedEventNotes(event),
+    };
+  }
+
   private isTimedLiveRealtimeNoteMatched(
     event: TimedLiveCursorEvent,
     index: number
@@ -7759,6 +8178,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       match.index,
       match.timingClass
     );
+    this.recordCompletedRunOutcome(match.event, match.index, match.timingClass);
     this.commitTimedLiveSimulatedFeedbackNote(
       this.buildTimedLiveRealtimePendingNote(match, playedHalfTone, scoreTimestamp),
       true
@@ -9174,6 +9594,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   // Input note pressed
   keyNoteOn(time: number, pitch: number): void {
+    if (this.handleCompletedRunPianoCommand(pitch)) {
+      return;
+    }
+
     if (this.shouldIgnoreUserInputUntilPlaybackStart()) {
       return;
     }
@@ -9434,27 +9858,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.realtimeNextStepKeys = this.getCurrentRequiredPressKeys(debugNotesService);
   }
 
-  private advanceRealtimePractice(audioTime: number): void {
-    if (!this.realtimeMode) {
-      return;
-    }
-
-    if (this.osmdEndReached(0)) {
-      if (this.checkboxRepeat) {
-        const startedLoopWrapAnimation = this.startPlayCursorLoopWrapAnimation(
-          this.getCursorStepDelayMs(0),
-          () => this.restartLoopPlayback()
-        );
-        if (!startedLoopWrapAnimation) {
-          this.restartLoopPlayback();
-        }
-      } else {
-        this.openSheetMusicDisplay.cursors[0].hide();
-        this.osmdCursorStop();
-      }
-      return;
-    }
-
+  private finalizeCurrentRealtimeStepFeedback(): void {
+    // Finish the current score step before advancing or stopping. The final
+    // step of the piece must run through the same hit/miss bookkeeping as any
+    // interior step, otherwise the congratulations screen would undercount the
+    // last notes.
     const currentRequiredPressKeys = this.getCurrentRequiredPressKeys();
 
     if (
@@ -9464,6 +9872,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     ) {
       this.markCurrentNotesCorrect();
     } else if (currentRequiredPressKeys.size > 0) {
+      const currentEvent = this.getTimedLiveEventAtTimestamp(
+        this.getCurrentPracticeTimestamp()
+      );
+      const missedTimedLiveNotes =
+        currentEvent?.selectedNotes.filter(
+          ({ index }) =>
+            !this.isTimedLiveRealtimeNoteMatched(currentEvent.event, index)
+        ) ?? [];
       const missedKeys = Array.from(currentRequiredPressKeys).filter(
         (key) => !this.realtimeCurrentStepMatchedKeys.has(key)
       );
@@ -9486,6 +9902,47 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           this.getCurrentPracticeTimestamp()
         );
       }
+      if (currentEvent) {
+        missedTimedLiveNotes.forEach(({ index }) => {
+          this.recordCompletedRunOutcome(currentEvent.event, index, 'missed');
+        });
+      }
+    }
+  }
+
+  private advanceRealtimePractice(audioTime: number): void {
+    if (!this.realtimeMode) {
+      return;
+    }
+
+    if (this.osmdEndReached(0)) {
+      if (this.checkboxRepeat) {
+        const startedLoopWrapAnimation = this.startPlayCursorLoopWrapAnimation(
+          this.getCursorStepDelayMs(0),
+          () => this.restartLoopPlayback()
+        );
+        if (!startedLoopWrapAnimation) {
+          this.restartLoopPlayback();
+        }
+      } else {
+        this.finalizeCurrentRealtimeStepFeedback();
+        this.openSheetMusicDisplay.cursors[0].hide();
+        this.openCompletedRunSummary();
+        this.osmdCursorStop();
+      }
+      return;
+    }
+
+    this.finalizeCurrentRealtimeStepFeedback();
+
+    if (
+      this.shouldShowCompletedRunSummary() &&
+      this.shouldCompleteDebugRunAtCurrentStep()
+    ) {
+      this.openSheetMusicDisplay.cursors[0].hide();
+      this.openCompletedRunSummary();
+      this.osmdCursorStop();
+      return;
     }
 
     this.snapshotRealtimePreviousStep();

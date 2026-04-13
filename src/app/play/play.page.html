@@ -238,6 +238,30 @@
           />
           <span>simulate input</span>
         </label>
+        <label class="realtime-debug-panel__control">
+          <input
+            type="checkbox"
+            [(ngModel)]="timedLiveCompletionDebugEnabled"
+          />
+          <span>debug congrats</span>
+        </label>
+        <label class="realtime-debug-panel__control">
+          <input
+            type="checkbox"
+            [(ngModel)]="timedLiveCompletionDebugAutoRunsEnabled"
+          />
+          <span>auto-run stats</span>
+        </label>
+        <label class="realtime-debug-panel__control realtime-debug-panel__control--stacked">
+          <span>congrats bars</span>
+          <input
+            type="number"
+            [(ngModel)]="timedLiveCompletionDebugBarCount"
+            (ngModelChange)="handleTimedLiveCompletionDebugChange()"
+            min="1"
+            step="1"
+          />
+        </label>
         <label class="realtime-debug-panel__control realtime-debug-panel__control--stacked">
           <span>timing ms +/-</span>
           <input
@@ -298,6 +322,89 @@
         </label>
       </div>
       <div *ngFor="let line of getTimedLiveCursorDebugSummaryLines()">{{ line }}</div>
+    </div>
+
+    <div
+      *ngIf="completedRunSummary"
+      class="completion-dialog-backdrop"
+      (click)="dismissCompletedRunSummary()"
+    >
+      <section
+        class="completion-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Performance summary"
+        (click)="$event.stopPropagation()"
+      >
+        <div class="completion-dialog__eyebrow">Congratulations</div>
+        <h2 class="completion-dialog__title">
+          {{ completedRunSummary.grade }}
+          <span *ngIf="getCompletedRunGradeLabel(completedRunSummary)">
+            {{ getCompletedRunGradeLabel(completedRunSummary) }}
+          </span>
+        </h2>
+        <div class="completion-dialog__score">
+          {{ completedRunSummary.scorePercent | number:'1.0-1' }}%
+        </div>
+        <div class="completion-dialog__points">
+          {{ completedRunSummary.earnedPoints }} / {{ completedRunSummary.maxPoints }} points
+        </div>
+
+        <div class="completion-dialog__stats">
+          <div class="completion-dialog__stat">
+            <span>Hits</span>
+            <strong>{{ completedRunSummary.hits }}</strong>
+          </div>
+          <div class="completion-dialog__stat">
+            <span>Misses</span>
+            <strong>{{ completedRunSummary.misses }}</strong>
+          </div>
+          <div class="completion-dialog__stat">
+            <span>Early</span>
+            <strong>{{ completedRunSummary.early }}</strong>
+          </div>
+          <div class="completion-dialog__stat">
+            <span>Late</span>
+            <strong>{{ completedRunSummary.late }}</strong>
+          </div>
+          <div class="completion-dialog__stat">
+            <span>Best streak</span>
+            <strong>{{ completedRunSummary.longestHitStreak }}</strong>
+          </div>
+        </div>
+
+        <div class="completion-dialog__history" *ngIf="completedRunHistory.length > 0">
+          <div class="completion-dialog__history-title">Session progress</div>
+          <div class="completion-dialog__history-chart">
+            <div
+              *ngFor="let entry of completedRunHistory"
+              class="completion-dialog__history-entry"
+            >
+              <div
+                class="completion-dialog__history-bar"
+                [ngStyle]="getCompletedRunHistoryBarStyle(entry)"
+              ></div>
+              <div class="completion-dialog__history-label">{{ entry.attempt }}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="completion-dialog__actions">
+          <button class="completion-dialog__button completion-dialog__button--primary" (click)="retryCompletedRun()">
+            Retry
+          </button>
+          <button class="completion-dialog__button" (click)="dismissCompletedRunSummary()">
+            Close
+          </button>
+        </div>
+
+        <div class="completion-dialog__shortcut-hint">
+          Retry: keyboard <strong>Enter</strong> or <strong>C</strong>, piano <strong>C</strong>
+        </div>
+        <div class="completion-dialog__shortcut-hint">
+          Close: keyboard <strong>Esc</strong> or <strong>D</strong>, piano <strong>D</strong>
+        </div>
+      </section>
     </div>
   </div>
 </ion-content>

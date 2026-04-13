@@ -88,6 +88,48 @@ The intended mental model is:
   - tie transitions
   - any animated cursor movement using transforms or overlay state
 
+### Completion scorecard
+
+- When a non-loop live run finishes, the app should show a congratulations / scorecard dialog.
+- The first-pass scorecard shows:
+  - number of hits
+  - number of misses
+  - number of early notes
+  - number of late notes
+  - longest streak of hits
+- Scoring currently uses:
+  - `hit` = `2` points
+  - `early` = `1` point
+  - `late` = `1` point
+  - `miss` = `0` points
+- Percentage score is `earnedPoints / maxPoints`.
+- Current grade mapping is:
+  - `100%` => `S` (`perfect`)
+  - `90%+` => `A`
+  - `80%+` => `B`
+  - `70%+` => `C`
+  - `60%+` => `D`
+  - below `60%` => `Try again`
+- The scorecard also records run history during the current page session and renders a simple progress chart.
+- Retry / close controls currently support:
+  - mouse buttons in the dialog
+  - computer keyboard shortcuts
+  - piano-key shortcuts
+
+### Completion scorecard debug mode
+
+- There is now a debug-only short-run mode for the scorecard in the timed-live debug panel.
+- The important controls are:
+  - `debug congrats`
+  - `auto-run stats`
+  - `congrats bars`
+- Intended behavior:
+  - `debug congrats` enables short-run scorecard testing
+  - `congrats bars` sets how many bars should be played before the scorecard auto-opens
+  - the scorecard should appear automatically at a clean bar boundary, not from a manual button press
+  - `auto-run stats` allows listen/simulated notes to feed the same scorecard pipeline for faster UI/debug iteration
+- In debug short-run mode, `maxPoints` and all scorecard stats must be scoped only to the notes inside the configured debug bar slice, not the entire selected range.
+
 ### Realtime feedback classification
 
 Treat these as separate concepts:
@@ -205,6 +247,8 @@ That stash represents an alternate wrap implementation that was intentionally se
 - The green cursor count-in positioning has been improved.
 - Portal-style wraps are restored.
 - Incorrect feedback placement has been updated to use the visible cursor path.
+- A first-pass congratulations scorecard exists for non-loop live runs.
+- Debug short-run scorecard testing exists via the timed-live debug panel.
 
 ## Known Gotchas
 
