@@ -416,7 +416,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.14';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.15';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -9236,12 +9236,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         );
         this.updateRealtimeDebugWindow();
 
-        if (
-          timingClass === 'correct' &&
-          this.notesService.isRequiredNotesPressed()
-        ) {
-          this.currentStepSatisfiedAsCorrect = true;
-        }
       } else if (
         !matchesCurrentStep &&
         this.isPracticing() &&
@@ -9298,13 +9292,16 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         }
       }
 
-      if (!acceptedLateRealtimeNote && this.notesService.isRequiredNotesPressed()) {
-        this.currentStepSatisfiedAsCorrect = true;
-      }
     }
 
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
-    if (!acceptedLateRealtimeNote && this.notesService.isRequiredNotesPressed()) {
+    // `isRequiredNotesPressed()` is stateful: a successful call marks the
+    // current required notes as no longer "new". Call it exactly once per
+    // note-on path, otherwise listen/autoplay can consume the success state
+    // before cursor advancement runs and replay the same chord on later ticks.
+    const currentStepPressedNow =
+      !acceptedLateRealtimeNote && this.notesService.isRequiredNotesPressed();
+    if (currentStepPressedNow) {
       // Timing-classified notes can still make the required pitch set "pressed"
       // in realtime mode, but only on-time notes should be rendered as green
       // hits. Early/late notes already get their own amber/blue timing
