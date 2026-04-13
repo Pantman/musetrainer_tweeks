@@ -278,19 +278,6 @@ interface TimedLiveCursorRenderState {
   transitionMode: 'smooth' | 'teleport';
 }
 
-interface TimedLiveCursorWindowRect {
-  id: string;
-  staffId: number | null;
-  systemId: number | null;
-  label: string;
-  noteCount: number;
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-  color: string;
-}
-
 interface TimedLiveCursorThresholdMarker {
   id: string;
   label: string;
@@ -308,10 +295,6 @@ interface TimedLiveCursorDebugSnapshot {
   currentSegmentLabel: string;
   progressPercent: number | null;
   wrapsSystem: boolean;
-  windowStartTimestamp: number | null;
-  windowEndTimestamp: number | null;
-  windowMs: number;
-  windowNoteCountByStaff: Record<string, number>;
   earlyThresholdMs: number;
   lateThresholdMs: number;
   earlyConsiderationMs: number;
@@ -416,7 +399,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.5';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.6';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -550,7 +533,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private cursorDebugRefreshTimeout: number | null = null;
   timedLiveCursorTimeline: TimedLiveCursorTimeline | null = null;
   timedLiveCursorRenderState: TimedLiveCursorRenderState | null = null;
-  timedLiveCursorWindowRects: TimedLiveCursorWindowRect[] = [];
   timedLiveCursorThresholdMarkers: TimedLiveCursorThresholdMarker[] = [];
   timedLiveCursorDebugSnapshot: TimedLiveCursorDebugSnapshot | null = null;
   timedLiveCursorDebugSessionTotals: TimedLiveCursorDebugSessionTotals = {
@@ -5067,7 +5049,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       getCursorTrace: () => [...this.cursorTraceEvents],
       getTimedLiveCursorDebug: () => ({
         renderState: this.timedLiveCursorRenderState,
-        windows: [...this.timedLiveCursorWindowRects],
         thresholds: [...this.timedLiveCursorThresholdMarkers],
         snapshot: this.timedLiveCursorDebugSnapshot,
         sessionTotals: { ...this.timedLiveCursorDebugSessionTotals },
@@ -5188,7 +5169,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       traceLogSize: this.cursorTraceEvents.length,
       timedLiveCursorDebugEnabled: this.showTimedLiveCursorDebugOverlay,
       timedLiveCursorRenderState: this.timedLiveCursorRenderState,
-      timedLiveCursorWindowCount: this.timedLiveCursorWindowRects.length,
       timedLiveCursorThresholdCount: this.timedLiveCursorThresholdMarkers.length,
       timedLiveCursorSnapshot: this.timedLiveCursorDebugSnapshot,
       timedLiveSimulatedInputEnabled: this.timedLiveSimulatedInputEnabled,
@@ -6450,18 +6430,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     };
   }
 
-  getTimedLiveCursorWindowStyle(
-    windowRect: TimedLiveCursorWindowRect
-  ): Record<string, string> {
-    return {
-      left: `${windowRect.left}px`,
-      top: `${windowRect.top}px`,
-      width: `${windowRect.width}px`,
-      height: `${windowRect.height}px`,
-      '--timed-live-window-color': windowRect.color,
-    };
-  }
-
   getTimedLiveCursorThresholdStyle(
     marker: TimedLiveCursorThresholdMarker
   ): Record<string, string> {
@@ -6517,10 +6485,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       snapshot.progressPercent !== null
         ? `${Math.round(snapshot.progressPercent)}%`
         : 'na';
-    const windowNoteSummary = Object.entries(snapshot.windowNoteCountByStaff)
-      .map(([staff, count]) => `${staff}:${count}`)
-      .join(' ');
-
     return [
       `${this.transportMode ?? 'idle'} loop ${this.loopPass} score ${currentScoreLabel}`,
       `sim ${
@@ -6530,8 +6494,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       } hits ${this.timedLiveSimulatedFeedbackStats.triggered}/${this.timedLiveSimulatedFeedbackStats.scheduled}`,
       `event ${snapshot.currentEventLabel}`,
       `segment ${snapshot.currentSegmentLabel} prog ${progressLabel}`,
-      `window ${this.formatScoreTimestamp(snapshot.windowStartTimestamp)} -> ${this.formatScoreTimestamp(snapshot.windowEndTimestamp)}`,
-      `notes ${windowNoteSummary || 'none'} win ${snapshot.windowMs}ms thr e ${snapshot.earlyThresholdMs}ms l ${snapshot.lateThresholdMs}ms`,
+      `thr e ${snapshot.earlyThresholdMs}ms l ${snapshot.lateThresholdMs}ms`,
       `consider e ${snapshot.earlyConsiderationMs}ms l ${snapshot.lateConsiderationMs}ms`,
       `thr e ${snapshot.earlyThresholdVisible ? 'on' : 'off'} l ${snapshot.lateThresholdVisible ? 'on' : 'off'} win e ${snapshot.earlyConsiderationVisible ? 'on' : 'off'} l ${snapshot.lateConsiderationVisible ? 'on' : 'off'} wrap ${snapshot.wrapsSystem ? 'yes' : 'no'}`,
       `sim stats g ${this.timedLiveSimulatedFeedbackStats.onTime} e ${this.timedLiveSimulatedFeedbackStats.early} l ${this.timedLiveSimulatedFeedbackStats.late} m ${this.timedLiveSimulatedFeedbackStats.missed}`,
@@ -6692,7 +6655,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.timedLiveCursorLastSegmentId = null;
     this.timedLiveCursorDebugSnapshot = null;
     this.timedLiveCursorThresholdMarkers = [];
-    this.timedLiveCursorWindowRects = [];
   }
 
   private readonly onTimedLiveCursorDebugPanelPointerMove = (
@@ -6814,7 +6776,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private clearTimedLiveCursorDebugState(): void {
     this.timedLiveCursorLastSegmentId = null;
     this.timedLiveCursorThresholdMarkers = [];
-    this.timedLiveCursorWindowRects = [];
     this.timedLiveCursorDebugSnapshot = null;
     if (this.timedLiveCursorRenderState) {
       this.timedLiveCursorRenderState = {
@@ -7875,7 +7836,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     if (!this.showTimedLiveCursorDebugOverlay) {
       this.timedLiveCursorThresholdMarkers = [];
-      this.timedLiveCursorWindowRects = [];
       this.timedLiveCursorDebugSnapshot = null;
       return;
     }
@@ -7892,8 +7852,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.timedLiveCursorLastSegmentId = cursorState.segment.id;
     }
 
-    const windowWholeNotes =
-      PlayPageComponent.TIMED_LIVE_DEBUG_WINDOW_WHOLE_NOTES;
     const earlyThresholdMs = this.getTimedLiveSimulationEarlyThresholdMs();
     const lateThresholdMs = this.getTimedLiveSimulationLateThresholdMs();
     const earlyConsiderationMs = this.getTimedLiveSimulationEarlyConsiderationMs();
@@ -7909,15 +7867,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     );
     const lateConsiderationWholeNotes = this.getPlaybackWholeNotesFromMs(
       lateConsiderationMs
-    );
-    const windowMs = Math.round(this.getPlaybackDelayMs(windowWholeNotes));
-    const windowStartTimestamp = Math.max(
-      timeline.startTimestamp,
-      scoreTimestamp - windowWholeNotes
-    );
-    const windowEndTimestamp = Math.min(
-      timeline.endTimestamp,
-      scoreTimestamp + windowWholeNotes
     );
     // The inner thresholds bound the green hit window. The outer consideration
     // boundaries define how far away a note may still be considered early/late
@@ -7945,10 +7894,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       considerationStartTimestamp,
       considerationEndTimestamp
     );
-    this.timedLiveCursorWindowRects = this.buildTimedLiveCursorWindowRects(
-      windowStartTimestamp,
-      windowEndTimestamp
-    );
     this.timedLiveCursorDebugSnapshot = {
       scoreTimestamp,
       currentEventId: cursorState.event?.id ?? null,
@@ -7962,13 +7907,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           ? Math.max(0, Math.min(100, cursorState.progress * 100))
           : null,
       wrapsSystem: !!cursorState.segment?.wrapsSystem,
-      windowStartTimestamp,
-      windowEndTimestamp,
-      windowMs,
-      windowNoteCountByStaff: this.summarizeTimedLiveCursorWindowNotes(
-        windowStartTimestamp,
-        windowEndTimestamp
-      ),
       earlyThresholdMs,
       lateThresholdMs,
       earlyConsiderationMs,
@@ -8053,126 +7991,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     return markers;
-  }
-
-  private buildTimedLiveCursorWindowRects(
-    windowStartTimestamp: number,
-    windowEndTimestamp: number
-  ): TimedLiveCursorWindowRect[] {
-    const timeline = this.timedLiveCursorTimeline;
-    if (!timeline) {
-      return [];
-    }
-
-    const notesByStaffAndSystem = new Map<
-      string,
-      {
-        staffId: number | null;
-        systemId: number | null;
-        notes: TimedLiveCursorNote[];
-      }
-    >();
-    timeline.events
-      .filter(
-        (event) =>
-          event.timestamp >= windowStartTimestamp - Number.EPSILON &&
-          event.timestamp <= windowEndTimestamp + Number.EPSILON
-      )
-      .forEach((event) => {
-        const preferredNotes = event.notes.filter((note) => note.actionable);
-        const notes = preferredNotes.length > 0 ? preferredNotes : event.notes;
-        notes.forEach((note) => {
-          if (!Number.isFinite(note.left) || !Number.isFinite(note.top)) {
-            return;
-          }
-
-          const groupKey = `${note.staffId ?? 'all'}:${event.systemId ?? 'na'}`;
-          const existing = notesByStaffAndSystem.get(groupKey) ?? {
-            staffId: note.staffId,
-            systemId: event.systemId ?? null,
-            notes: [],
-          };
-          existing.notes.push(note);
-          notesByStaffAndSystem.set(groupKey, existing);
-        });
-      });
-
-    return Array.from(notesByStaffAndSystem.values())
-      .map(({ staffId, systemId, notes }) => {
-        if (!notes.length) {
-          return null;
-        }
-
-        const lefts = notes
-          .map((note) => note.left)
-          .filter((value): value is number => Number.isFinite(value));
-        const tops = notes
-          .map((note) => note.top)
-          .filter((value): value is number => Number.isFinite(value));
-        if (!lefts.length || !tops.length) {
-          return null;
-        }
-
-        const paddingX = 18;
-        const paddingY = 18;
-        const left = Math.min(...lefts) - paddingX;
-        const right = Math.max(...lefts) + paddingX;
-        const top = Math.min(...tops) - paddingY;
-        const bottom = Math.max(...tops) + paddingY;
-
-        return {
-          id: `timed-live-window-${staffId ?? 'all'}-${systemId ?? 'na'}`,
-          staffId,
-          systemId,
-          label: `${this.getTimedLiveCursorStaffLabel(staffId)} ${notes.length}`,
-          noteCount: notes.length,
-          left,
-          top,
-          width: Math.max(right - left, 24),
-          height: Math.max(bottom - top, 24),
-          color: this.getTimedLiveCursorStaffColor(staffId),
-        };
-      })
-      .filter((windowRect): windowRect is TimedLiveCursorWindowRect => !!windowRect);
-  }
-
-  private summarizeTimedLiveCursorWindowNotes(
-    windowStartTimestamp: number,
-    windowEndTimestamp: number
-  ): Record<string, number> {
-    const summary: Record<string, number> = {};
-    this.buildTimedLiveCursorWindowRects(windowStartTimestamp, windowEndTimestamp).forEach(
-      (windowRect) => {
-        const label = this.getTimedLiveCursorStaffLabel(windowRect.staffId);
-        summary[label] = (summary[label] ?? 0) + windowRect.noteCount;
-      }
-    );
-    return summary;
-  }
-
-  private getTimedLiveCursorStaffLabel(staffId: number | null): string {
-    if (staffId === 0) {
-      return 'RH';
-    }
-    if (staffId === 1) {
-      return 'LH';
-    }
-    if (Number.isFinite(staffId)) {
-      return `S${Number(staffId) + 1}`;
-    }
-
-    return 'All';
-  }
-
-  private getTimedLiveCursorStaffColor(staffId: number | null): string {
-    if (staffId === 0) {
-      return '#0ea5e9';
-    }
-    if (staffId === 1) {
-      return '#ec4899';
-    }
-
-    return '#64748b';
   }
 
   private formatTimedLiveCursorEventLabel(

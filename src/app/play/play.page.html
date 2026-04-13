@@ -203,13 +203,6 @@
       class="score-timed-live-debug-overlay"
     >
       <div
-        *ngFor="let windowRect of timedLiveCursorWindowRects"
-        class="score-timed-live-window"
-        [ngStyle]="getTimedLiveCursorWindowStyle(windowRect)"
-      >
-        <div class="score-timed-live-window__label">{{ windowRect.label }}</div>
-      </div>
-      <div
         *ngFor="let marker of timedLiveCursorThresholdMarkers"
         class="score-timed-live-threshold"
         [ngStyle]="getTimedLiveCursorThresholdStyle(marker)"

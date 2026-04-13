@@ -259,25 +259,6 @@ ion-input{
   z-index: 4;
 }
 
-.score-timed-live-window {
-  background: color-mix(in srgb, var(--timed-live-window-color) 16%, transparent);
-  border: 1px solid color-mix(in srgb, var(--timed-live-window-color) 70%, white 10%);
-  border-radius: 0.5rem;
-  position: absolute;
-}
-
-.score-timed-live-window__label {
-  background: color-mix(in srgb, var(--timed-live-window-color) 85%, black 12%);
-  border-radius: 999px;
-  color: #f8fafc;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.65rem;
-  left: 0.35rem;
-  padding: 0.08rem 0.38rem;
-  position: absolute;
-  top: 0.35rem;
-}
-
 .score-timed-live-threshold {
   position: absolute;
   transform: translateX(-50%);
