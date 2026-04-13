@@ -283,6 +283,26 @@
             step="10"
           />
         </label>
+        <label class="realtime-debug-panel__control realtime-debug-panel__control--stacked">
+          <span>early win ms</span>
+          <input
+            type="number"
+            [(ngModel)]="timedLiveSimulationEarlyConsiderationMs"
+            (ngModelChange)="handleTimedLiveSimulationThresholdChange()"
+            min="0"
+            step="10"
+          />
+        </label>
+        <label class="realtime-debug-panel__control realtime-debug-panel__control--stacked">
+          <span>late win ms</span>
+          <input
+            type="number"
+            [(ngModel)]="timedLiveSimulationLateConsiderationMs"
+            (ngModelChange)="handleTimedLiveSimulationThresholdChange()"
+            min="0"
+            step="10"
+          />
+        </label>
       </div>
       <div *ngFor="let line of getTimedLiveCursorDebugSummaryLines()">{{ line }}</div>
     </div>

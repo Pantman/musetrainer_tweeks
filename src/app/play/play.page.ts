@@ -314,8 +314,12 @@ interface TimedLiveCursorDebugSnapshot {
   windowNoteCountByStaff: Record<string, number>;
   earlyThresholdMs: number;
   lateThresholdMs: number;
+  earlyConsiderationMs: number;
+  lateConsiderationMs: number;
   earlyThresholdVisible: boolean;
   lateThresholdVisible: boolean;
+  earlyConsiderationVisible: boolean;
+  lateConsiderationVisible: boolean;
 }
 
 interface TimedLiveCursorDebugSessionTotals {
@@ -389,12 +393,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly AUDIO_SCHEDULE_AHEAD_SEC = 0.05;
   private static readonly REALTIME_ACCEPT_TOLERANCE_WHOLE_NOTES = 1 / 4;
   private static readonly TIMED_LIVE_DEBUG_WINDOW_WHOLE_NOTES = 1 / 4;
-  private static readonly TIMED_LIVE_DEBUG_THRESHOLD_WHOLE_NOTES = 1 / 8;
-  private static readonly DEFAULT_TIMED_LIVE_SIMULATION_THRESHOLD_MS =
-    Math.round(
-      (PlayPageComponent.TIMED_LIVE_DEBUG_THRESHOLD_WHOLE_NOTES * 4 * 60000) /
-        PlayPageComponent.DEFAULT_TEMPO_BPM
-    );
+  private static readonly DEFAULT_TIMED_LIVE_SIMULATION_THRESHOLD_MS = 50;
+  private static readonly DEFAULT_TIMED_LIVE_SIMULATION_CONSIDERATION_MS = 100;
   private static readonly MAX_TIMED_LIVE_SIMULATION_THRESHOLD_MS = 2000;
   private static readonly MAX_TIMED_LIVE_SIMULATION_TIMING_OFFSET_MS = 4000;
   private static readonly MAX_TIMED_LIVE_SIMULATION_PITCH_OFFSET_SEMITONES = 24;
@@ -416,7 +416,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.3';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.5';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -574,6 +574,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     PlayPageComponent.DEFAULT_TIMED_LIVE_SIMULATION_THRESHOLD_MS;
   timedLiveSimulationLateThresholdMs: number =
     PlayPageComponent.DEFAULT_TIMED_LIVE_SIMULATION_THRESHOLD_MS;
+  timedLiveSimulationEarlyConsiderationMs: number =
+    PlayPageComponent.DEFAULT_TIMED_LIVE_SIMULATION_CONSIDERATION_MS;
+  timedLiveSimulationLateConsiderationMs: number =
+    PlayPageComponent.DEFAULT_TIMED_LIVE_SIMULATION_CONSIDERATION_MS;
   timedLiveSimulatedFeedbackStats: TimedLiveSimulatedFeedbackStats = {
     scheduled: 0,
     triggered: 0,
@@ -5072,6 +5076,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         simulatedPitchOffsetSemitones: this.timedLiveSimulatedPitchOffsetSemitones,
         simulationEarlyThresholdMs: this.getTimedLiveSimulationEarlyThresholdMs(),
         simulationLateThresholdMs: this.getTimedLiveSimulationLateThresholdMs(),
+        simulationEarlyConsiderationMs:
+          this.getTimedLiveSimulationEarlyConsiderationMs(),
+        simulationLateConsiderationMs:
+          this.getTimedLiveSimulationLateConsiderationMs(),
         simulatedFeedbackStats: { ...this.timedLiveSimulatedFeedbackStats },
       }),
       clearWrapLog: () => {
@@ -5191,6 +5199,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         this.getTimedLiveSimulationEarlyThresholdMs(),
       timedLiveSimulationLateThresholdMs:
         this.getTimedLiveSimulationLateThresholdMs(),
+      timedLiveSimulationEarlyConsiderationMs:
+        this.getTimedLiveSimulationEarlyConsiderationMs(),
+      timedLiveSimulationLateConsiderationMs:
+        this.getTimedLiveSimulationLateConsiderationMs(),
       timedLiveSimulatedFeedbackStats: this.timedLiveSimulatedFeedbackStats,
     };
   }
@@ -6520,7 +6532,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       `segment ${snapshot.currentSegmentLabel} prog ${progressLabel}`,
       `window ${this.formatScoreTimestamp(snapshot.windowStartTimestamp)} -> ${this.formatScoreTimestamp(snapshot.windowEndTimestamp)}`,
       `notes ${windowNoteSummary || 'none'} win ${snapshot.windowMs}ms thr e ${snapshot.earlyThresholdMs}ms l ${snapshot.lateThresholdMs}ms`,
-      `early ${snapshot.earlyThresholdVisible ? 'on' : 'off'} late ${snapshot.lateThresholdVisible ? 'on' : 'off'} wrap ${snapshot.wrapsSystem ? 'yes' : 'no'}`,
+      `consider e ${snapshot.earlyConsiderationMs}ms l ${snapshot.lateConsiderationMs}ms`,
+      `thr e ${snapshot.earlyThresholdVisible ? 'on' : 'off'} l ${snapshot.lateThresholdVisible ? 'on' : 'off'} win e ${snapshot.earlyConsiderationVisible ? 'on' : 'off'} l ${snapshot.lateConsiderationVisible ? 'on' : 'off'} wrap ${snapshot.wrapsSystem ? 'yes' : 'no'}`,
       `sim stats g ${this.timedLiveSimulatedFeedbackStats.onTime} e ${this.timedLiveSimulatedFeedbackStats.early} l ${this.timedLiveSimulatedFeedbackStats.late} m ${this.timedLiveSimulatedFeedbackStats.missed}`,
       `frames ${this.timedLiveCursorDebugSessionTotals.frames} seg ${this.timedLiveCursorDebugSessionTotals.segmentTransitions} wraps ${this.timedLiveCursorDebugSessionTotals.wrapTransitions}`,
       `timeline ${this.timedLiveCursorTimeline?.events.length ?? 0} events ${this.timedLiveCursorTimeline?.segments.length ?? 0} segments`,
@@ -6851,6 +6864,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.normalizeTimedLiveSimulationThresholdMs(
         this.timedLiveSimulationLateThresholdMs
       );
+    this.timedLiveSimulationEarlyConsiderationMs =
+      this.normalizeTimedLiveSimulationThresholdMs(
+        this.timedLiveSimulationEarlyConsiderationMs
+      );
+    this.timedLiveSimulationLateConsiderationMs =
+      this.normalizeTimedLiveSimulationThresholdMs(
+        this.timedLiveSimulationLateConsiderationMs
+      );
   }
 
   private normalizeTimedLiveSimulatedTimingOffsetMs(value: number): number {
@@ -6900,6 +6921,24 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private getTimedLiveSimulationLateThresholdMs(): number {
     return this.normalizeTimedLiveSimulationThresholdMs(
       this.timedLiveSimulationLateThresholdMs
+    );
+  }
+
+  private getTimedLiveSimulationEarlyConsiderationMs(): number {
+    return this.normalizeTimedLiveSimulationThresholdMs(
+      Math.max(
+        this.timedLiveSimulationEarlyConsiderationMs,
+        this.getTimedLiveSimulationEarlyThresholdMs()
+      )
+    );
+  }
+
+  private getTimedLiveSimulationLateConsiderationMs(): number {
+    return this.normalizeTimedLiveSimulationThresholdMs(
+      Math.max(
+        this.timedLiveSimulationLateConsiderationMs,
+        this.getTimedLiveSimulationLateThresholdMs()
+      )
     );
   }
 
@@ -7568,31 +7607,25 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private classifyTimedLiveSimulatedFeedback(
     offsetMs: number
   ): 'correct' | 'early' | 'late' | 'missed' {
-    // Timing classes are ordered by distance from the target event:
-    // `correct` inside the hit window, `early` / `late` just outside it,
-    // and `missed` beyond the outer match window.
     const earlyThresholdMs = this.getTimedLiveSimulationEarlyThresholdMs();
     const lateThresholdMs = this.getTimedLiveSimulationLateThresholdMs();
+    const earlyConsiderationMs = this.getTimedLiveSimulationEarlyConsiderationMs();
+    const lateConsiderationMs = this.getTimedLiveSimulationLateConsiderationMs();
     if (offsetMs >= -earlyThresholdMs && offsetMs <= lateThresholdMs) {
       return 'correct';
     }
 
-    const matchWindowMs = this.getTimedLiveSimulationMatchWindowMs();
-    if (offsetMs < -matchWindowMs || offsetMs > matchWindowMs) {
+    if (offsetMs < -earlyConsiderationMs || offsetMs > lateConsiderationMs) {
       return 'missed';
     }
 
     return offsetMs < 0 ? 'early' : 'late';
   }
 
-  private getTimedLiveSimulationMatchWindowMs(): number {
-    // The hit thresholds define the green on-time window. Early/late live in
-    // the band just outside that window, and only become `missed` once they
-    // exceed this wider match window.
-    return Math.max(
-      this.getPlaybackDelayMs(PlayPageComponent.TIMED_LIVE_DEBUG_WINDOW_WHOLE_NOTES),
-      this.getTimedLiveSimulationEarlyThresholdMs(),
-      this.getTimedLiveSimulationLateThresholdMs()
+  private isTimedLiveOffsetWithinConsiderationWindow(offsetMs: number): boolean {
+    return (
+      offsetMs >= -this.getTimedLiveSimulationEarlyConsiderationMs() &&
+      offsetMs <= this.getTimedLiveSimulationLateConsiderationMs()
     );
   }
 
@@ -7647,52 +7680,92 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.timedLiveRealtimeMatchedEventNotes.set(key, matchedIndexes);
   }
 
-  private findTimedLiveRealtimeMatch(
-    playedHalfTone: number,
-    scoreTimestamp: number
-  ): TimedLiveMatchedRealtimeNote | null {
+  private getTimedLiveSamePitchRealtimeCandidates(
+    playedHalfTone: number
+  ): TimedLiveMatchedRealtimeNote[] {
     const timeline = this.timedLiveCursorTimeline;
     if (!timeline) {
-      return null;
+      return [];
     }
 
-    const matchWindowMs = this.getTimedLiveSimulationMatchWindowMs();
-    let bestMatch: TimedLiveMatchedRealtimeNote | null = null;
-
+    const candidates: TimedLiveMatchedRealtimeNote[] = [];
     timeline.events.forEach((event) => {
-      const offsetMs = this.getPlaybackSignedDurationMs(
-        scoreTimestamp - event.timestamp
-      );
-      if (Math.abs(offsetMs) > matchWindowMs) {
-        return;
-      }
-
       this.getTimedLiveSelectedEventNotes(event).forEach(({ note, index }) => {
         if (note.halfTone !== playedHalfTone) {
           return;
         }
-        if (this.isTimedLiveRealtimeNoteMatched(event, index)) {
-          return;
-        }
 
-        const candidate: TimedLiveMatchedRealtimeNote = {
+        candidates.push({
           event,
           note,
           index,
-          timingClass: this.classifyTimedLiveSimulatedFeedback(offsetMs),
-          offsetMs,
-        };
-
-        if (
-          !bestMatch ||
-          Math.abs(candidate.offsetMs) < Math.abs(bestMatch.offsetMs)
-        ) {
-          bestMatch = candidate;
-        }
+          timingClass: 'missed',
+          offsetMs: 0,
+        });
       });
     });
 
-    return bestMatch;
+    return candidates;
+  }
+
+  private findTimedLiveRealtimeMatch(
+    playedHalfTone: number,
+    scoreTimestamp: number
+  ): TimedLiveMatchedRealtimeNote | null {
+    const candidates = this.getTimedLiveSamePitchRealtimeCandidates(playedHalfTone);
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const lateConsiderationMs = this.getTimedLiveSimulationLateConsiderationMs();
+    const earlyConsiderationMs = this.getTimedLiveSimulationEarlyConsiderationMs();
+    const timestampEpsilon = 1e-7;
+
+    const previousCandidates = candidates
+      .filter((candidate) => candidate.event.timestamp <= scoreTimestamp + timestampEpsilon)
+      .sort((left, right) => right.event.timestamp - left.event.timestamp);
+
+    for (const candidate of previousCandidates) {
+      const offsetMs = this.getPlaybackSignedDurationMs(
+        scoreTimestamp - candidate.event.timestamp
+      );
+      if (offsetMs > lateConsiderationMs) {
+        break;
+      }
+      if (this.isTimedLiveRealtimeNoteMatched(candidate.event, candidate.index)) {
+        continue;
+      }
+
+      return {
+        ...candidate,
+        offsetMs,
+        timingClass: this.classifyTimedLiveSimulatedFeedback(offsetMs),
+      };
+    }
+
+    const nextCandidates = candidates
+      .filter((candidate) => candidate.event.timestamp > scoreTimestamp + timestampEpsilon)
+      .sort((left, right) => left.event.timestamp - right.event.timestamp);
+
+    for (const candidate of nextCandidates) {
+      const offsetMs = this.getPlaybackSignedDurationMs(
+        scoreTimestamp - candidate.event.timestamp
+      );
+      if (offsetMs < -earlyConsiderationMs) {
+        break;
+      }
+      if (this.isTimedLiveRealtimeNoteMatched(candidate.event, candidate.index)) {
+        continue;
+      }
+
+      return {
+        ...candidate,
+        offsetMs,
+        timingClass: this.classifyTimedLiveSimulatedFeedback(offsetMs),
+      };
+    }
+
+    return null;
   }
 
   private buildTimedLiveRealtimePendingNote(
@@ -7823,11 +7896,19 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       PlayPageComponent.TIMED_LIVE_DEBUG_WINDOW_WHOLE_NOTES;
     const earlyThresholdMs = this.getTimedLiveSimulationEarlyThresholdMs();
     const lateThresholdMs = this.getTimedLiveSimulationLateThresholdMs();
+    const earlyConsiderationMs = this.getTimedLiveSimulationEarlyConsiderationMs();
+    const lateConsiderationMs = this.getTimedLiveSimulationLateConsiderationMs();
     const earlyThresholdWholeNotes = this.getPlaybackWholeNotesFromMs(
       earlyThresholdMs
     );
     const lateThresholdWholeNotes = this.getPlaybackWholeNotesFromMs(
       lateThresholdMs
+    );
+    const earlyConsiderationWholeNotes = this.getPlaybackWholeNotesFromMs(
+      earlyConsiderationMs
+    );
+    const lateConsiderationWholeNotes = this.getPlaybackWholeNotesFromMs(
+      lateConsiderationMs
     );
     const windowMs = Math.round(this.getPlaybackDelayMs(windowWholeNotes));
     const windowStartTimestamp = Math.max(
@@ -7838,9 +7919,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       timeline.endTimestamp,
       scoreTimestamp + windowWholeNotes
     );
-    // With the current realtime sign convention, an `early` note is one played
-    // before the target event arrives, so the early threshold sits ahead of the
-    // current cursor position. The late threshold sits behind it.
+    // The inner thresholds bound the green hit window. The outer consideration
+    // boundaries define how far away a note may still be considered early/late
+    // before it becomes missed.
     const thresholdStartTimestamp = Math.max(
       timeline.startTimestamp,
       scoreTimestamp - lateThresholdWholeNotes
@@ -7849,10 +7930,20 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       timeline.endTimestamp,
       scoreTimestamp + earlyThresholdWholeNotes
     );
+    const considerationStartTimestamp = Math.max(
+      timeline.startTimestamp,
+      scoreTimestamp - lateConsiderationWholeNotes
+    );
+    const considerationEndTimestamp = Math.min(
+      timeline.endTimestamp,
+      scoreTimestamp + earlyConsiderationWholeNotes
+    );
 
     this.timedLiveCursorThresholdMarkers = this.buildTimedLiveCursorThresholdMarkers(
       thresholdStartTimestamp,
-      thresholdEndTimestamp
+      thresholdEndTimestamp,
+      considerationStartTimestamp,
+      considerationEndTimestamp
     );
     this.timedLiveCursorWindowRects = this.buildTimedLiveCursorWindowRects(
       windowStartTimestamp,
@@ -7880,46 +7971,84 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       ),
       earlyThresholdMs,
       lateThresholdMs,
+      earlyConsiderationMs,
+      lateConsiderationMs,
       earlyThresholdVisible: this.timedLiveCursorThresholdMarkers.some(
         (marker) => marker.id === 'timed-live-threshold-early'
       ),
       lateThresholdVisible: this.timedLiveCursorThresholdMarkers.some(
         (marker) => marker.id === 'timed-live-threshold-late'
       ),
+      earlyConsiderationVisible: this.timedLiveCursorThresholdMarkers.some(
+        (marker) => marker.id === 'timed-live-consideration-early'
+      ),
+      lateConsiderationVisible: this.timedLiveCursorThresholdMarkers.some(
+        (marker) => marker.id === 'timed-live-consideration-late'
+      ),
     };
   }
 
   private buildTimedLiveCursorThresholdMarkers(
-    windowStartTimestamp: number,
-    windowEndTimestamp: number
+    thresholdStartTimestamp: number,
+    thresholdEndTimestamp: number,
+    considerationStartTimestamp: number,
+    considerationEndTimestamp: number
   ): TimedLiveCursorThresholdMarker[] {
     const markers: TimedLiveCursorThresholdMarker[] = [];
-    const lateState = this.resolveTimedLiveCursorRenderAtTimestamp(
-      windowStartTimestamp
+    const lateConsiderationState = this.resolveTimedLiveCursorRenderAtTimestamp(
+      considerationStartTimestamp
     );
-    const earlyState = this.resolveTimedLiveCursorRenderAtTimestamp(
-      windowEndTimestamp
+    const lateThresholdState = this.resolveTimedLiveCursorRenderAtTimestamp(
+      thresholdStartTimestamp
+    );
+    const earlyThresholdState = this.resolveTimedLiveCursorRenderAtTimestamp(
+      thresholdEndTimestamp
+    );
+    const earlyConsiderationState = this.resolveTimedLiveCursorRenderAtTimestamp(
+      considerationEndTimestamp
     );
 
-    if (lateState) {
+    if (lateConsiderationState) {
+      markers.push({
+        id: 'timed-live-consideration-late',
+        label: 'late window',
+        left: lateConsiderationState.left,
+        top: lateConsiderationState.top,
+        height: lateConsiderationState.height,
+        color: '#a78bfa',
+      });
+    }
+
+    if (lateThresholdState) {
       markers.push({
         id: 'timed-live-threshold-late',
         label: 'late',
-        left: lateState.left,
-        top: lateState.top,
-        height: lateState.height,
+        left: lateThresholdState.left,
+        top: lateThresholdState.top,
+        height: lateThresholdState.height,
         color: '#7c3aed',
       });
     }
 
-    if (earlyState) {
+    if (earlyThresholdState) {
       markers.push({
         id: 'timed-live-threshold-early',
         label: 'early',
-        left: earlyState.left,
-        top: earlyState.top,
-        height: earlyState.height,
+        left: earlyThresholdState.left,
+        top: earlyThresholdState.top,
+        height: earlyThresholdState.height,
         color: '#f97316',
+      });
+    }
+
+    if (earlyConsiderationState) {
+      markers.push({
+        id: 'timed-live-consideration-early',
+        label: 'early window',
+        left: earlyConsiderationState.left,
+        top: earlyConsiderationState.top,
+        height: earlyConsiderationState.height,
+        color: '#fdba74',
       });
     }
 

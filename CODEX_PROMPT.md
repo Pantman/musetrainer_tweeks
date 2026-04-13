@@ -150,6 +150,28 @@ If the implementation behaves asymmetrically, that is usually because of step-ad
 - Miss evaluation at step advance should compare the step's required-note set against the notes that were actually matched as `correct`.
 - Wrong-pitch unmatched notes should stay in the red/miss family. They should not be reinterpreted as early, late, or green unless they are explicitly matched to an expected target note by the classification logic.
 
+#### Candidate selection rule
+
+- Realtime note matching should be done per pitch stream, not by searching every nearby note in the timeline.
+- When a key is pressed for a given pitch:
+  - first inspect the nearest unresolved previous note of that same pitch
+  - if it is still inside the late consideration window, classify against it first
+  - otherwise scan forward through same-pitch notes until either:
+    - the first unresolved future note inside the early consideration window is found, or
+    - the search leaves the early consideration window
+- If no same-pitch candidate survives those checks, classify the played note as a `mistake`.
+- Resolved same-pitch future notes should be skipped rather than stopping the forward scan, because the player may have played a rapid sequence where earlier same-pitch events were already classified.
+- The previous unresolved same-pitch note should be preferred over a future same-pitch note when both could plausibly match. This biases the matcher toward "you were probably trying to hit the note you just missed" instead of assuming you intentionally skipped ahead.
+
+#### Thresholds vs consideration window
+
+- The inner early/late thresholds bound the green `correct` window.
+- The outer early/late consideration bounds define how far away a note may still be considered `early` or `late`.
+- Default working values are:
+  - threshold: `50ms` on each side
+  - consideration window: `100ms` on each side
+- Outside the consideration window, an expected note should no longer be classified as early/late and should instead become `missed`.
+
 #### Green-hit source of truth
 
 - In realtime mode, "all required keys are currently down" is not sufficient to justify green success rendering.
