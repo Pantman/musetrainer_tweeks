@@ -342,7 +342,7 @@ type TimedLiveSimulatedFeedbackTimingClass =
   | 'correct'
   | 'early'
   | 'late'
-  | 'miss';
+  | 'missed';
 
 interface TimedLiveSimulatedPendingNote {
   event: TimedLiveCursorEvent;
@@ -416,7 +416,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.15';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.18';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -545,7 +545,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   showDebugConsoleOverlay: boolean = false;
   showCursorWrapDebugOverlay: boolean = false;
   showTimedLiveCursorDebugOverlay: boolean = false;
-  timedLiveEarlyLateFeedbackUsesCursorAnchor: boolean = true;
   cursorWrapDebugEvents: string[] = [];
   cursorWrapDebugSnapshot: CursorWrapDebugSnapshot | null = null;
   private cursorDebugRefreshTimeout: number | null = null;
@@ -2894,6 +2893,17 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         halo: PlayPageComponent.FEEDBACK_LATE_HALO,
       };
     }
+    if (
+      className.includes('feedback-notehead--mistake') ||
+      className.includes('feedback-notehead--missed') ||
+      className.includes('feedback-notehead--incorrect')
+    ) {
+      return {
+        fill: PlayPageComponent.FEEDBACK_MISS_FILL,
+        border: PlayPageComponent.FEEDBACK_MISS_BORDER,
+        halo: PlayPageComponent.FEEDBACK_MISS_HALO,
+      };
+    }
 
     return {
       fill: PlayPageComponent.FEEDBACK_MISS_FILL,
@@ -3718,7 +3728,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return null;
   }
 
-  private markIncorrectInputNote(halfTone: number): void {
+  private markMistakeInputNote(halfTone: number): void {
     if (!this.checkboxFeedback && !this.realtimeMode) {
       return;
     }
@@ -3731,10 +3741,30 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const { id, left, top, width, height, accidental } = placement;
     this.renderFeedbackNotehead(
       this.incorrectNoteheadElements,
-      'feedback-notehead feedback-notehead--incorrect',
+      'feedback-notehead feedback-notehead--mistake',
       id,
       { left, top, width, height, accidental }
     );
+  }
+
+  private renderMissedPracticeNotes(
+    graphicalNotes: PracticeGraphicalNote[],
+    timestamp: number
+  ): void {
+    graphicalNotes.forEach((note, index) => {
+      const placement = this.getRenderedNoteheadPlacement(note, false);
+      if (!placement) {
+        return;
+      }
+
+      const id = `missed-${this.loopPass}-${timestamp}-${note.halfTone}-${index}`;
+      this.renderFeedbackNotehead(
+        this.timingFeedbackNoteheadElements,
+        'feedback-notehead feedback-notehead--missed',
+        id,
+        placement
+      );
+    });
   }
 
   private getCurrentPracticeNoteElements(): SVGElement[] {
@@ -6940,18 +6970,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    // The rendered green cursor is the placement source of truth for live
-    // playback feedback. Misses always follow it. Early/late notes default to
-    // the same cursor anchor, with a debug toggle to compare target-note
-    // anchoring without changing the default behavior.
-    const cursorLeft = this.getTimedLiveStableFeedbackCursorLeft(
-      pendingNote.hitTimestamp,
-      pendingNote.note.staffId
-    );
     const placement = this.getTimedLiveSimulatedFeedbackPlacement(
-      pendingNote.note,
-      pendingNote.timingClass,
-      cursorLeft
+      pendingNote.note
     );
 
     if (!placement) {
@@ -6966,7 +6986,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           ? 'feedback-notehead feedback-notehead--early'
           : pendingNote.timingClass === 'late'
             ? 'feedback-notehead feedback-notehead--late'
-            : 'feedback-notehead feedback-notehead--miss';
+            : 'feedback-notehead feedback-notehead--missed';
 
     this.renderFeedbackNotehead(
       this.timingFeedbackNoteheadElements,
@@ -7130,7 +7150,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.commitTimedLiveSimulatedFeedbackNote(pendingNote, matchesCurrentStep);
 
     if (!matchesCurrentStep && this.checkboxFeedback) {
-      this.renderTimedLiveSimulatedIncorrectFeedbackNote(pendingNote);
+      this.renderTimedLiveSimulatedMistakeFeedbackNote(pendingNote);
     }
 
     if (this.markTimedLiveSimulatedEventNoteProcessed(pendingNote)) {
@@ -7142,10 +7162,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
   }
 
-  private renderTimedLiveSimulatedIncorrectFeedbackNote(
+  private renderTimedLiveSimulatedMistakeFeedbackNote(
     pendingNote: TimedLiveSimulatedPendingNote
   ): void {
-    const placement = this.getTimedLiveSimulatedIncorrectPlacement(pendingNote);
+    const placement = this.getTimedLiveSimulatedMistakePlacement(pendingNote);
     if (!placement) {
       return;
     }
@@ -7153,13 +7173,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const id = `sim-wrong-${pendingNote.loopPass}-${pendingNote.event.timestamp}-${pendingNote.playedHalfTone}-${pendingNote.index}`;
     this.renderFeedbackNotehead(
       this.incorrectNoteheadElements,
-      'feedback-notehead feedback-notehead--incorrect',
+      'feedback-notehead feedback-notehead--mistake',
       id,
       placement
     );
   }
 
-  private getTimedLiveSimulatedIncorrectPlacement(
+  private getTimedLiveSimulatedMistakePlacement(
     pendingNote: TimedLiveSimulatedPendingNote
   ): FeedbackNoteheadPlacement | null {
     const noteCenterX =
@@ -7400,7 +7420,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         this.checkboxFeedback &&
         pendingNote.playedHalfTone !== pendingNote.note.halfTone
       ) {
-        this.renderTimedLiveSimulatedIncorrectFeedbackNote(pendingNote);
+        this.renderTimedLiveSimulatedMistakeFeedbackNote(pendingNote);
       }
 
       if (this.markTimedLiveSimulatedEventNoteProcessed(pendingNote)) {
@@ -7503,7 +7523,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private classifyTimedLiveSimulatedFeedback(
     offsetMs: number
-  ): 'correct' | 'early' | 'late' | 'miss' {
+  ): 'correct' | 'early' | 'late' | 'missed' {
+    // Timing classes are ordered by distance from the target event:
+    // `correct` inside the hit window, `early` / `late` just outside it,
+    // and `missed` beyond the outer match window.
     const earlyThresholdMs = this.getTimedLiveSimulationEarlyThresholdMs();
     const lateThresholdMs = this.getTimedLiveSimulationLateThresholdMs();
     if (offsetMs >= -earlyThresholdMs && offsetMs <= lateThresholdMs) {
@@ -7512,7 +7535,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     const matchWindowMs = this.getTimedLiveSimulationMatchWindowMs();
     if (offsetMs < -matchWindowMs || offsetMs > matchWindowMs) {
-      return 'miss';
+      return 'missed';
     }
 
     return offsetMs < 0 ? 'early' : 'late';
@@ -7674,9 +7697,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private getTimedLiveSimulatedFeedbackPlacement(
-    note: TimedLiveCursorNote,
-    timingClass: 'correct' | 'early' | 'late' | 'miss',
-    cursorLeft: number | null
+    note: TimedLiveCursorNote
   ): { left: number; top: number; width: number; height: number } | null {
     if (!Number.isFinite(note.left) || !Number.isFinite(note.top)) {
       return null;
@@ -7684,38 +7705,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     const width = Math.max(note.width, 10);
     const height = Math.max(note.height, 8);
-    const leftCenter = this.shouldAnchorTimedLiveTimingFeedbackToCursor(
-      timingClass,
-      cursorLeft
-    )
-      ? Number(cursorLeft)
-      : Number(note.left);
 
     return {
-      left: leftCenter - width / 2,
+      left: Number(note.left) - width / 2,
       top: Number(note.top) - height / 2,
       width,
       height,
     };
-  }
-
-  private shouldAnchorTimedLiveTimingFeedbackToCursor(
-    timingClass: TimedLiveSimulatedFeedbackTimingClass,
-    cursorLeft: number | null
-  ): cursorLeft is number {
-    if (!Number.isFinite(cursorLeft)) {
-      return false;
-    }
-
-    if (timingClass === 'correct') {
-      return false;
-    }
-
-    if (timingClass === 'miss') {
-      return true;
-    }
-
-    return this.timedLiveEarlyLateFeedbackUsesCursorAnchor;
   }
 
   private updateTimedLiveCursorDebugOverlay(): void {
@@ -9204,13 +9200,19 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     if (timedLiveRealtimeClassification && scoreTimestamp !== null) {
       const match = this.handleTimedLiveRealtimeNoteOn(halbTone, scoreTimestamp);
       if (match) {
+        // `matchedKeys` means the expected note already received a timing
+        // outcome for this step. That includes `early` and `late`, so they do
+        // not get redrawn later as `missed`. `correctKeys` is the stricter set
+        // used only for green-hit eligibility.
         if (
-          match.timingClass === 'correct' &&
+          match.timingClass !== 'missed' &&
           !this.realtimeCurrentStepMatchedKeys.has(name) &&
           matchesCurrentStep
         ) {
           this.realtimeCurrentStepMatchedKeys.add(name);
-          this.realtimeCurrentStepCorrectKeys.add(name);
+          if (match.timingClass === 'correct') {
+            this.realtimeCurrentStepCorrectKeys.add(name);
+          }
         }
 
         const timingClass = match.timingClass;
@@ -9228,7 +9230,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         } else {
           shouldRenderCurrentStepAsCorrect = false;
           this.debugRealtimeStats.rejected++;
-          this.debugRealtimeStats.lastResult = 'miss';
+          this.debugRealtimeStats.lastResult = 'missed';
         }
         this.debugRealtimeStats.lastPitch = pitchLabel;
         this.appendRealtimeDebugEvent(
@@ -9243,10 +9245,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       ) {
         this.debugRealtimeStats.rejected++;
         this.debugRealtimeStats.lastPitch = pitchLabel;
-        this.debugRealtimeStats.lastResult = 'rejected';
-        this.appendRealtimeDebugEvent(`${pitchLabel} rejected`);
+        this.debugRealtimeStats.lastResult = 'mistake';
+        this.appendRealtimeDebugEvent(`${pitchLabel} mistake`);
         this.updateRealtimeDebugWindow();
-        this.markIncorrectInputNote(halbTone);
+        this.markMistakeInputNote(halbTone);
       }
     } else {
       // Key wrong pressed
@@ -9267,10 +9269,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           } else {
             this.debugRealtimeStats.rejected++;
             this.debugRealtimeStats.lastPitch = pitchLabel;
-            this.debugRealtimeStats.lastResult = 'rejected';
-            this.appendRealtimeDebugEvent(`${pitchLabel} rejected`);
+            this.debugRealtimeStats.lastResult = 'mistake';
+            this.appendRealtimeDebugEvent(`${pitchLabel} mistake`);
             this.updateRealtimeDebugWindow();
-            this.markIncorrectInputNote(halbTone);
+            this.markMistakeInputNote(halbTone);
           }
         }
       }
@@ -9463,11 +9465,22 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         (key) => !this.realtimeCurrentStepMatchedKeys.has(key)
       );
       if (missedKeys.length > 0) {
+        const missedGraphicalNotes = this.activePracticeGraphicalNotes.filter((note) =>
+          missedKeys.includes(note.halfTone.toString())
+        );
         this.debugRealtimeStats.missedExpected += missedKeys.length;
         this.appendRealtimeDebugEvent(
           `missed ${missedKeys
             .map((key) => this.noteKeyToLabel(key))
             .join(', ')}`
+        );
+        // Expected notes that were never matched in time belong to the
+        // `missed` family, not the floating `mistake` family. Render them on
+        // top of their target noteheads so the user can see exactly which score
+        // note was missed.
+        this.renderMissedPracticeNotes(
+          missedGraphicalNotes,
+          this.getCurrentPracticeTimestamp()
         );
       }
     }

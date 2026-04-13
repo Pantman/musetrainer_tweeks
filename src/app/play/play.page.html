@@ -346,15 +346,6 @@
         [enableOnOffLabels]="true"
       ></ion-toggle>
     </ion-item>
-    <ion-item *ngIf="showTimedLiveCursorDebugOverlay">
-      <ion-label color="dark">Early/late follow cursor</ion-label>
-      <ion-toggle
-        [(ngModel)]="timedLiveEarlyLateFeedbackUsesCursorAnchor"
-        color="dark"
-        slot="end"
-        [enableOnOffLabels]="true"
-      ></ion-toggle>
-    </ion-item>
     <ion-item>
       <ion-label color="dark">Show keyboard</ion-label>
       <ion-toggle [(ngModel)]="checkboxKeyboard" color="dark" slot="end" [enableOnOffLabels]="true"></ion-toggle>

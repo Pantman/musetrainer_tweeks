@@ -208,6 +208,8 @@ ion-input{
   box-shadow: 0 0 0 1px rgb(255 255 255 / 0.18);
 }
 
+.feedback-notehead--mistake,
+.feedback-notehead--missed,
 .feedback-notehead--incorrect {
   background: #dc2626;
   border: 1px solid #991b1b;
