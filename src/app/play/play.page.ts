@@ -416,7 +416,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.12.18';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.3';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -589,7 +589,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     TimedLiveSimulatedPendingNote[]
   >();
   private timedLiveSimulatedProcessedEventNotes = new Map<string, Set<number>>();
-  private timedLiveRealtimeMatchedEventNotes = new Map<string, Set<number>>();
+  private timedLiveRealtimeMatchedEventNotes = new Map<
+    string,
+    Map<number, TimedLiveSimulatedFeedbackTimingClass>
+  >();
   private timedLiveSimulatedHeldNotes = new Map<string, number>();
   private timedLiveSimulatedOutputTokens = new Map<number, number>();
   private timedLiveSimulatedOutputInstrumentIds = new Map<number, number | null>();
@@ -2133,6 +2136,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.scheduleHeldTieContinuationNotesRenderIfMatched();
 
     if (this.realtimeMode) {
+      // Early/late notes can be classified against a future score step before
+      // that step becomes current. Rehydrate those per-event timing outcomes
+      // here so the step does not forget them and redraw them later as missed.
+      this.rehydrateTimedLiveRealtimeMatchesForCurrentStep();
       this.computerNotesService.calculateRequired(
         this.openSheetMusicDisplay.cursors[0],
         this.getComputerStaffSelection(),
@@ -4705,6 +4712,43 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private clearRealtimeCurrentStepMatches(): void {
     this.realtimeCurrentStepMatchedKeys.clear();
     this.realtimeCurrentStepCorrectKeys.clear();
+  }
+
+  private rehydrateTimedLiveRealtimeMatchesForCurrentStep(): void {
+    if (!this.shouldUseTimedLiveRealtimeClassification()) {
+      return;
+    }
+
+    const timeline = this.timedLiveCursorTimeline;
+    const currentTimestamp = this.getCurrentPracticeTimestamp();
+    if (!timeline || !Number.isFinite(currentTimestamp)) {
+      return;
+    }
+
+    const timestampEpsilon = 1e-7;
+    timeline.events.forEach((event) => {
+      if (Math.abs(event.timestamp - currentTimestamp) > timestampEpsilon) {
+        return;
+      }
+
+      const matchedIndexes =
+        this.timedLiveRealtimeMatchedEventNotes.get(
+          this.getTimedLiveRealtimeMatchKey(event)
+        ) ?? new Map<number, TimedLiveSimulatedFeedbackTimingClass>();
+
+      this.getTimedLiveSelectedEventNotes(event).forEach(({ note, index }) => {
+        const timingClass = matchedIndexes.get(index);
+        if (!timingClass || timingClass === 'missed') {
+          return;
+        }
+
+        const key = note.halfTone.toString();
+        this.realtimeCurrentStepMatchedKeys.add(key);
+        if (timingClass === 'correct') {
+          this.realtimeCurrentStepCorrectKeys.add(key);
+        }
+      });
+    });
   }
 
   private allRequiredCurrentStepKeysWereCorrectlyMatched(
@@ -7542,6 +7586,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private getTimedLiveSimulationMatchWindowMs(): number {
+    // The hit thresholds define the green on-time window. Early/late live in
+    // the band just outside that window, and only become `missed` once they
+    // exceed this wider match window.
     return Math.max(
       this.getPlaybackDelayMs(PlayPageComponent.TIMED_LIVE_DEBUG_WINDOW_WHOLE_NOTES),
       this.getTimedLiveSimulationEarlyThresholdMs(),
@@ -7583,18 +7630,20 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const matchedIndexes =
       this.timedLiveRealtimeMatchedEventNotes.get(
         this.getTimedLiveRealtimeMatchKey(event)
-      ) ?? new Set<number>();
+      ) ?? new Map<number, TimedLiveSimulatedFeedbackTimingClass>();
     return matchedIndexes.has(index);
   }
 
   private markTimedLiveRealtimeNoteMatched(
     event: TimedLiveCursorEvent,
-    index: number
+    index: number,
+    timingClass: TimedLiveSimulatedFeedbackTimingClass
   ): void {
     const key = this.getTimedLiveRealtimeMatchKey(event);
     const matchedIndexes =
-      this.timedLiveRealtimeMatchedEventNotes.get(key) ?? new Set<number>();
-    matchedIndexes.add(index);
+      this.timedLiveRealtimeMatchedEventNotes.get(key) ??
+      new Map<number, TimedLiveSimulatedFeedbackTimingClass>();
+    matchedIndexes.set(index, timingClass);
     this.timedLiveRealtimeMatchedEventNotes.set(key, matchedIndexes);
   }
 
@@ -7671,7 +7720,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return null;
     }
 
-    this.markTimedLiveRealtimeNoteMatched(match.event, match.index);
+    this.markTimedLiveRealtimeNoteMatched(
+      match.event,
+      match.index,
+      match.timingClass
+    );
     this.commitTimedLiveSimulatedFeedbackNote(
       this.buildTimedLiveRealtimePendingNote(match, playedHalfTone, scoreTimestamp),
       true
@@ -7785,6 +7838,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       timeline.endTimestamp,
       scoreTimestamp + windowWholeNotes
     );
+    // With the current realtime sign convention, an `early` note is one played
+    // before the target event arrives, so the early threshold sits ahead of the
+    // current cursor position. The late threshold sits behind it.
     const thresholdStartTimestamp = Math.max(
       timeline.startTimestamp,
       scoreTimestamp - lateThresholdWholeNotes
