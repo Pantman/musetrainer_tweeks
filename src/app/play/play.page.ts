@@ -451,7 +451,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.21';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.29';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -544,6 +544,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private heldTieContinuationRenderTimeout: number | null = null;
   private activeRangeHandle: RangeHandle | null = null;
   private activeRangeSelectionStart: number | null = null;
+  private resizeRefreshTimeout: number | null = null;
 
   // tonejs/piano
   piano: Piano | null = null;
@@ -702,6 +703,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       'pointerup',
       this.onTimedLiveCursorDebugPanelPointerUp
     );
+    if (this.resizeRefreshTimeout !== null) {
+      window.clearTimeout(this.resizeRefreshTimeout);
+      this.resizeRefreshTimeout = null;
+    }
     this.uninstallMuseDebugApi();
   }
 
@@ -709,7 +714,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   onWindowResize(): void {
     this.clampTimedLiveCursorDebugPanelPosition();
     if (this.fileLoaded) {
-      this.refreshMeasureOverlaysDeferred();
+      this.handleWindowResizeLayoutInvalidation();
     }
   }
 
@@ -1732,6 +1737,51 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     if (this.showCursorDebugOverlay || this.cursorDebugMarkers.length > 0) {
       this.refreshCursorDebugMarkersDeferred();
     }
+  }
+
+  private handleWindowResizeLayoutInvalidation(): void {
+    // Resizing invalidates every absolute placement we derive from the score:
+    // measure overlays for range selection, cursor geometry, and feedback
+    // noteheads layered on top of rendered notes. Clear stale overlays
+    // immediately, then rebuild once the browser has settled on the new layout.
+    this.cancelActiveRangeInteractions();
+    this.resetRenderedFeedbackAfterLayoutChange();
+    if (this.resizeRefreshTimeout !== null) {
+      window.clearTimeout(this.resizeRefreshTimeout);
+    }
+    this.resizeRefreshTimeout = window.setTimeout(() => {
+      this.resizeRefreshTimeout = null;
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => this.refreshLayoutAfterResize());
+      });
+    }, 120);
+  }
+
+  private cancelActiveRangeInteractions(): void {
+    this.activeRangeHandle = null;
+    this.activeRangeSelectionStart = null;
+    window.removeEventListener('pointermove', this.onRangeHandlePointerMove);
+    window.removeEventListener('pointerup', this.onRangeHandlePointerUp);
+    window.removeEventListener('pointermove', this.onRangeSelectionPointerMove);
+    window.removeEventListener('pointerup', this.onRangeSelectionPointerUp);
+  }
+
+  private resetRenderedFeedbackAfterLayoutChange(): void {
+    this.resetCorrectNoteheads();
+    this.resetIncorrectNoteheads();
+    this.resetTimingFeedbackNoteheads();
+  }
+
+  private refreshLayoutAfterResize(): void {
+    if (!this.fileLoaded) {
+      return;
+    }
+
+    // Force OSMD to settle on the new viewport before we re-measure score
+    // geometry. Without this rerender pass, range selection and note feedback
+    // can keep using stale coordinates from the pre-resize layout.
+    this.openSheetMusicDisplay.render();
+    this.refreshMeasureOverlays();
   }
 
   // Reset selection on measures and set the cursor to the origin
