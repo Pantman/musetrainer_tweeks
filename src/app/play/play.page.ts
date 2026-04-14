@@ -367,18 +367,21 @@ type CompletionGrade = 'S' | 'A' | 'B' | 'C' | 'D' | 'Try again';
 
 interface CompletedRunHistoryEntry {
   attempt: number;
-  scorePercent: number;
+  accuracyPercent: number;
   grade: CompletionGrade;
 }
 
 interface CompletedRunSummary extends CompletedRunHistoryEntry {
   hits: number;
   misses: number;
+  mistakes: number;
   early: number;
   late: number;
   longestHitStreak: number;
-  earnedPoints: number;
-  maxPoints: number;
+  scorePoints: number;
+  baseScorePoints: number;
+  bonusScorePoints: number;
+  maxAccuracyNotes: number;
   startedAt: number;
   finishedAt: number;
   durationMs: number;
@@ -389,10 +392,14 @@ interface ActiveRunPerformanceTracker {
   resolvedExpectedNotes: Set<string>;
   hits: number;
   misses: number;
+  mistakes: number;
   early: number;
   late: number;
   currentHitStreak: number;
   longestHitStreak: number;
+  scorePoints: number;
+  baseScorePoints: number;
+  bonusScorePoints: number;
   startedAt: number;
 }
 
@@ -433,7 +440,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.11';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.15';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -1846,24 +1853,35 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       resolvedExpectedNotes: new Set<string>(),
       hits: 0,
       misses: 0,
+      mistakes: 0,
       early: 0,
       late: 0,
       currentHitStreak: 0,
       longestHitStreak: 0,
+      scorePoints: 0,
+      baseScorePoints: 0,
+      bonusScorePoints: 0,
       startedAt: Date.now(),
     };
   }
 
   private getCompletedRunExpectedNoteCount(): number {
-    const timeline = this.timedLiveCursorTimeline;
-    if (!timeline) {
-      return 0;
-    }
-
     return this.getCompletedRunScoredEvents().reduce(
-      (count, event) => count + this.getTimedLiveSelectedEventNotes(event).length,
+      (count, event) => count + this.getCompletedRunSelectedEventNotes(event).length,
       0
     );
+  }
+
+  private getCompletedRunSelectedEventNotes(
+    event: TimedLiveCursorEvent
+  ): Array<{ note: TimedLiveCursorNote; index: number }> {
+    // The scorecard denominator must reflect only the notes that were
+    // actually available to the active performer path for this run. In human
+    // realtime runs that means the human-played staves; in simulated/listen
+    // debug runs it means the simulated active staves. Reusing the same
+    // selected-note filter here keeps the scorecard aligned with whichever
+    // hand(s) were actually in play.
+    return this.getTimedLiveSelectedEventNotes(event);
   }
 
   private getCompletedRunScoredEvents(): TimedLiveCursorEvent[] {
@@ -1923,20 +1941,58 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         tracker.longestHitStreak,
         tracker.currentHitStreak
       );
+      const multiplier = this.getCompletedRunScoreMultiplier(
+        tracker.currentHitStreak
+      );
+      const basePoints = 2;
+      const totalPoints = basePoints * multiplier;
+      tracker.baseScorePoints += basePoints;
+      tracker.bonusScorePoints += totalPoints - basePoints;
+      tracker.scorePoints += totalPoints;
       return;
     }
 
     tracker.currentHitStreak = 0;
     if (outcome === 'early') {
       tracker.early++;
+      tracker.baseScorePoints++;
+      tracker.scorePoints++;
       return;
     }
     if (outcome === 'late') {
       tracker.late++;
+      tracker.baseScorePoints++;
+      tracker.scorePoints++;
       return;
     }
 
     tracker.misses++;
+  }
+
+  private recordCompletedRunMistake(): void {
+    const tracker = this.activeRunPerformanceTracker;
+    if (!tracker) {
+      return;
+    }
+
+    tracker.mistakes++;
+    tracker.currentHitStreak = 0;
+  }
+
+  private getCompletedRunScoreMultiplier(streak: number): number {
+    // First-pass score multiplier tuning. This is intentionally simple and can
+    // be rebalanced later without changing the separate accuracy percentage.
+    if (streak >= 100) {
+      return 10;
+    }
+    if (streak >= 50) {
+      return 4;
+    }
+    if (streak >= 10) {
+      return 2;
+    }
+
+    return 1;
   }
 
   private buildCompletedRunSummary(): CompletedRunSummary | null {
@@ -1945,11 +2001,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return null;
     }
 
-    const maxPoints = tracker.totalExpectedNotes * 2;
-    const earnedPoints = tracker.hits * 2 + tracker.early + tracker.late;
-    const rawPercent =
-      maxPoints > 0 ? (earnedPoints / maxPoints) * 100 : 0;
-    const scorePercent = Math.round(rawPercent * 10) / 10;
+    const accuracyNotes = Math.max(
+      tracker.hits + 0.5 * (tracker.early + tracker.late) - tracker.mistakes,
+      0
+    );
+    const rawAccuracyPercent =
+      tracker.totalExpectedNotes > 0
+        ? (accuracyNotes / tracker.totalExpectedNotes) * 100
+        : 0;
+    const accuracyPercent = Math.round(rawAccuracyPercent * 10) / 10;
     const finishedAt = Date.now();
     const attempt = this.completedRunHistory.length + 1;
 
@@ -1957,13 +2017,16 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       attempt,
       hits: tracker.hits,
       misses: tracker.misses,
+      mistakes: tracker.mistakes,
       early: tracker.early,
       late: tracker.late,
       longestHitStreak: tracker.longestHitStreak,
-      earnedPoints,
-      maxPoints,
-      scorePercent,
-      grade: this.getCompletedRunGrade(scorePercent),
+      scorePoints: tracker.scorePoints,
+      baseScorePoints: tracker.baseScorePoints,
+      bonusScorePoints: tracker.bonusScorePoints,
+      maxAccuracyNotes: tracker.totalExpectedNotes,
+      accuracyPercent,
+      grade: this.getCompletedRunGrade(accuracyPercent),
       startedAt: tracker.startedAt,
       finishedAt,
       durationMs: Math.max(finishedAt - tracker.startedAt, 0),
@@ -2010,17 +2073,56 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       ...this.completedRunHistory,
       {
         attempt: summary.attempt,
-        scorePercent: summary.scorePercent,
+        accuracyPercent: summary.accuracyPercent,
         grade: summary.grade,
       },
     ];
   }
 
-  getCompletedRunHistoryBarStyle(entry: CompletedRunHistoryEntry): Record<string, string> {
-    const heightPercent = Math.max(10, Math.min(100, Math.round(entry.scorePercent)));
-    return {
-      height: `${heightPercent}%`,
-    };
+  getCompletedRunHistoryChartPath(): string {
+    if (this.completedRunHistory.length === 0) {
+      return '';
+    }
+
+    const width = 260;
+    const height = 140;
+    const points = this.completedRunHistory.map((entry, index) => {
+      const x =
+        this.completedRunHistory.length === 1
+          ? width / 2
+          : (index / (this.completedRunHistory.length - 1)) * width;
+      const clampedPercent = Math.max(0, Math.min(100, entry.accuracyPercent));
+      const y = height - (clampedPercent / 100) * height;
+      return `${x},${y}`;
+    });
+
+    return points.length > 1 ? `M ${points.join(' L ')}` : `M ${points[0]}`;
+  }
+
+  getCompletedRunHistoryPoints(): Array<{ x: number; y: number; label: string }> {
+    const width = 260;
+    const height = 140;
+    if (this.completedRunHistory.length === 0) {
+      return [];
+    }
+
+    return this.completedRunHistory.map((entry, index) => {
+      const x =
+        this.completedRunHistory.length === 1
+          ? width / 2
+          : (index / (this.completedRunHistory.length - 1)) * width;
+      const clampedPercent = Math.max(0, Math.min(100, entry.accuracyPercent));
+      const y = height - (clampedPercent / 100) * height;
+      return {
+        x,
+        y,
+        label: `${entry.accuracyPercent.toFixed(1)}%`,
+      };
+    });
+  }
+
+  getCompletedRunHistoryXAxis(): CompletedRunHistoryEntry[] {
+    return this.completedRunHistory;
   }
 
   private handleCompletedRunPianoCommand(pitch: number): boolean {
@@ -7586,6 +7688,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const matchesCurrentStep = this.getCurrentRequiredPressKeys().has(name);
     this.commitTimedLiveSimulatedFeedbackNote(pendingNote, matchesCurrentStep);
 
+    if (!matchesCurrentStep) {
+      this.recordCompletedRunMistake();
+    }
+
     if (!matchesCurrentStep && this.checkboxFeedback) {
       this.renderTimedLiveSimulatedMistakeFeedbackNote(pendingNote);
     }
@@ -9675,6 +9781,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         this.debugRealtimeStats.lastResult = 'mistake';
         this.appendRealtimeDebugEvent(`${pitchLabel} mistake`);
         this.updateRealtimeDebugWindow();
+        this.recordCompletedRunMistake();
         this.markMistakeInputNote(halbTone);
       }
     } else {
@@ -9699,6 +9806,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
             this.debugRealtimeStats.lastResult = 'mistake';
             this.appendRealtimeDebugEvent(`${pitchLabel} mistake`);
             this.updateRealtimeDebugWindow();
+            this.recordCompletedRunMistake();
             this.markMistakeInputNote(halbTone);
           }
         }

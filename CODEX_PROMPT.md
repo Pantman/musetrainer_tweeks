@@ -94,15 +94,28 @@ The intended mental model is:
 - The first-pass scorecard shows:
   - number of hits
   - number of misses
+  - number of mistakes
   - number of early notes
   - number of late notes
   - longest streak of hits
-- Scoring currently uses:
+- The scorecard now separates accuracy percentage from score points.
+- Accuracy percentage currently uses:
+  - `hits + 0.5 * (early + late) - mistakes`
+  - divided by the maximum playable note count for the active scorecard note set
+  - clamped to a minimum of `0`
+- The maximum playable note count must be based on the notes actually available to the active performer path:
+  - if only one hand/staff is active, only those notes belong in the denominator
+  - this rule also applies in debug short-run mode
+- Score points currently use:
   - `hit` = `2` points
   - `early` = `1` point
   - `late` = `1` point
   - `miss` = `0` points
-- Percentage score is `earnedPoints / maxPoints`.
+- Score points may also include streak bonuses.
+- Current streak multipliers are:
+  - `x2` at a `10`-hit streak
+  - `x4` at a `50`-hit streak
+  - `x10` at a `100`-hit streak
 - Current grade mapping is:
   - `100%` => `S` (`perfect`)
   - `90%+` => `A`
@@ -110,7 +123,9 @@ The intended mental model is:
   - `70%+` => `C`
   - `60%+` => `D`
   - below `60%` => `Try again`
-- The scorecard also records run history during the current page session and renders a simple progress chart.
+- The scorecard also records run history during the current page session and renders an accuracy-history line graph:
+  - y-axis = percentage
+  - x-axis = run number
 - Retry / close controls currently support:
   - mouse buttons in the dialog
   - computer keyboard shortcuts
@@ -128,7 +143,7 @@ The intended mental model is:
   - `congrats bars` sets how many bars should be played before the scorecard auto-opens
   - the scorecard should appear automatically at a clean bar boundary, not from a manual button press
   - `auto-run stats` allows listen/simulated notes to feed the same scorecard pipeline for faster UI/debug iteration
-- In debug short-run mode, `maxPoints` and all scorecard stats must be scoped only to the notes inside the configured debug bar slice, not the entire selected range.
+- In debug short-run mode, the scorecard denominator, stats, and accuracy calculation must be scoped only to the notes inside the configured debug bar slice, not the entire selected range.
 
 ### Realtime feedback classification
 

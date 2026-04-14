@@ -344,10 +344,17 @@
           </span>
         </h2>
         <div class="completion-dialog__score">
-          {{ completedRunSummary.scorePercent | number:'1.0-1' }}%
+          {{ completedRunSummary.accuracyPercent | number:'1.0-1' }}%
         </div>
         <div class="completion-dialog__points">
-          {{ completedRunSummary.earnedPoints }} / {{ completedRunSummary.maxPoints }} points
+          Accuracy: {{ completedRunSummary.hits }} hits - {{ completedRunSummary.mistakes }} mistakes
+          / {{ completedRunSummary.maxAccuracyNotes }} notes
+        </div>
+        <div class="completion-dialog__points">
+          Score: {{ completedRunSummary.scorePoints }} pts
+          <span *ngIf="completedRunSummary.bonusScorePoints > 0">
+            (base {{ completedRunSummary.baseScorePoints }} + bonus {{ completedRunSummary.bonusScorePoints }})
+          </span>
         </div>
 
         <div class="completion-dialog__stats">
@@ -358,6 +365,10 @@
           <div class="completion-dialog__stat">
             <span>Misses</span>
             <strong>{{ completedRunSummary.misses }}</strong>
+          </div>
+          <div class="completion-dialog__stat">
+            <span>Mistakes</span>
+            <strong>{{ completedRunSummary.mistakes }}</strong>
           </div>
           <div class="completion-dialog__stat">
             <span>Early</span>
@@ -376,15 +387,44 @@
         <div class="completion-dialog__history" *ngIf="completedRunHistory.length > 0">
           <div class="completion-dialog__history-title">Session progress</div>
           <div class="completion-dialog__history-chart">
-            <div
-              *ngFor="let entry of completedRunHistory"
-              class="completion-dialog__history-entry"
-            >
-              <div
-                class="completion-dialog__history-bar"
-                [ngStyle]="getCompletedRunHistoryBarStyle(entry)"
-              ></div>
-              <div class="completion-dialog__history-label">{{ entry.attempt }}</div>
+            <div class="completion-dialog__history-y-axis">
+              <span>100%</span>
+              <span>50%</span>
+              <span>0%</span>
+            </div>
+            <div class="completion-dialog__history-plot">
+              <svg
+                class="completion-dialog__history-svg"
+                viewBox="0 0 260 140"
+                preserveAspectRatio="none"
+                aria-label="Accuracy history"
+              >
+                <line x1="0" y1="0" x2="260" y2="0" class="completion-dialog__history-grid"></line>
+                <line x1="0" y1="70" x2="260" y2="70" class="completion-dialog__history-grid"></line>
+                <line x1="0" y1="140" x2="260" y2="140" class="completion-dialog__history-grid"></line>
+                <path
+                  *ngIf="completedRunHistory.length > 0"
+                  [attr.d]="getCompletedRunHistoryChartPath()"
+                  class="completion-dialog__history-line"
+                ></path>
+                <circle
+                  *ngFor="let point of getCompletedRunHistoryPoints()"
+                  [attr.cx]="point.x"
+                  [attr.cy]="point.y"
+                  r="4"
+                  class="completion-dialog__history-point"
+                >
+                  <title>{{ point.label }}</title>
+                </circle>
+              </svg>
+              <div class="completion-dialog__history-x-axis">
+                <span
+                  *ngFor="let entry of getCompletedRunHistoryXAxis()"
+                  class="completion-dialog__history-label"
+                >
+                  {{ entry.attempt }}
+                </span>
+              </div>
             </div>
           </div>
         </div>
