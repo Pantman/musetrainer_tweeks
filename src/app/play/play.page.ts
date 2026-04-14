@@ -403,6 +403,12 @@ interface ActiveRunPerformanceTracker {
   startedAt: number;
 }
 
+interface StaffToolbarButton {
+  id: number;
+  icon: string;
+  label: string;
+}
+
 @Component({
   selector: 'app-home',
   templateUrl: 'play.page.html',
@@ -440,7 +446,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.15';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.17';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -453,6 +459,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   // Music Sheet GUI
   isMobileLayout = false;
   staffIdList: number[] = [];
+  staffToolbarButtons: StaffToolbarButton[] = [];
   staffIdEnabled: Record<number, boolean> = {};
   listenMode: boolean = false;
   fileLoadError: boolean = false;
@@ -1475,10 +1482,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           .load(event.target?.result?.toString() ?? '')
           .then(
             () => {
-              this.openSheetMusicDisplay.zoom = this.zoomValue;
-              this.openSheetMusicDisplay.render();
+              this.initializeStaffToolbarStateFromSheet();
               this.fileLoaded = true;
               this.fileLoadError = false;
+              this.openSheetMusicDisplay.zoom = this.zoomValue;
+              this.openSheetMusicDisplay.render();
               this.osmdReset();
               this.refreshMeasureOverlaysDeferred();
             },
@@ -1497,10 +1505,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     // Load Music Sheet
     this.openSheetMusicDisplay.load(url).then(
       () => {
-        this.openSheetMusicDisplay.zoom = this.zoomValue;
-        this.openSheetMusicDisplay.render();
+        this.initializeStaffToolbarStateFromSheet();
         this.fileLoaded = true;
         this.fileLoadError = false;
+        this.openSheetMusicDisplay.zoom = this.zoomValue;
+        this.openSheetMusicDisplay.render();
         this.osmdReset();
         this.refreshMeasureOverlaysDeferred();
       },
@@ -1599,10 +1608,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return `Staff ${id + 1}`;
   }
 
+  trackByStaffToolbarButton(_index: number, button: StaffToolbarButton): number {
+    return button.id;
+  }
+
   toggleStaffEnabled(id: number): void {
     this.staffIdEnabled[id] = !this.staffIdEnabled[id];
-    this.refreshTimedLiveCursorTimelineDeferred();
-    this.refreshCursorDebugMarkersDeferred();
+    this.refreshStaffToolbarButtons();
+    this.refreshIdleCursorDerivedStateDeferred();
   }
 
   toggleWaitMode(): void {
@@ -1706,6 +1719,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     );
   }
 
+  private refreshIdleCursorDerivedStateDeferred(): void {
+    if (this.showTimedLiveCursorDebugOverlay || this.timedLiveCursorTimeline) {
+      this.refreshTimedLiveCursorTimelineDeferred();
+    }
+    if (this.showCursorDebugOverlay || this.cursorDebugMarkers.length > 0) {
+      this.refreshCursorDebugMarkersDeferred();
+    }
+  }
+
   // Reset selection on measures and set the cursor to the origin
   osmdReset(): void {
     this.osmdStop();
@@ -1718,16 +1740,31 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.openSheetMusicDisplay.Sheet.SourceMeasures.length;
     this.showRangePicker = false;
 
+    this.initializeStaffToolbarStateFromSheet();
+
+    this.initializeTempoFromScore();
+    this.syncRepeatToMeasureRange();
+    this.refreshMeasureOverlaysDeferred();
+  }
+
+  private initializeStaffToolbarStateFromSheet(): void {
     this.staffIdList = this.openSheetMusicDisplay.Sheet.Staves.map(
       (s) => s.idInMusicSheet
     );
     this.staffIdEnabled = this.staffIdList
       .map((id) => ({ [id]: true }))
       .reduce((a, b) => ({ ...a, ...b }));
+    this.refreshStaffToolbarButtons();
+  }
 
-    this.initializeTempoFromScore();
-    this.syncRepeatToMeasureRange();
-    this.refreshMeasureOverlaysDeferred();
+  private refreshStaffToolbarButtons(): void {
+    this.staffToolbarButtons = [...this.staffIdList]
+      .reverse()
+      .map((id) => ({
+        id,
+        icon: this.getStaffToolbarIcon(id),
+        label: this.getStaffToolbarLabel(id),
+      }));
   }
 
   private setTransportMode(mode: TransportMode | null): void {
@@ -6453,8 +6490,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.measureOverlays = overlays;
     this.incorrectFeedbackStaffGeometry =
       this.buildIncorrectFeedbackStaffGeometry();
-    this.refreshTimedLiveCursorTimelineDeferred();
-    this.refreshCursorDebugMarkersDeferred();
+    this.refreshIdleCursorDerivedStateDeferred();
   }
 
   private buildIncorrectFeedbackStaffGeometry(): Map<

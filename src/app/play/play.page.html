@@ -70,15 +70,15 @@
             <ion-text>Clear</ion-text>
           </ion-button>
           <ion-button
-            *ngFor="let id of staffIdList.slice().reverse()"
+            *ngFor="let button of staffToolbarButtons; trackBy: trackByStaffToolbarButton"
             color="dark"
             [disabled]="running || !fileLoaded"
             size="small"
-            [fill]="staffIdEnabled[id] ? 'solid' : 'outline'"
-            (click)="toggleStaffEnabled(id)"
-            [attr.aria-label]="getStaffToolbarLabel(id)"
+            [fill]="staffIdEnabled[button.id] ? 'solid' : 'outline'"
+            (click)="toggleStaffEnabled(button.id)"
+            [attr.aria-label]="button.label"
           >
-            <ion-icon [name]="getStaffToolbarIcon(id)"></ion-icon>
+            <ion-icon [name]="button.icon"></ion-icon>
           </ion-button>
         </ion-row>
       </ion-col>
