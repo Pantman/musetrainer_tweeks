@@ -59,6 +59,12 @@
             <ion-icon name="musical-notes-outline" slot="start"></ion-icon>
             <ion-text>Metronome</ion-text>
           </ion-button>
+          <ion-button color="dark" [disabled]="!fileLoaded" size="small"
+            [fill]="checkboxBackingTrack ? 'solid' : 'outline'"
+            (click)="checkboxBackingTrack = !checkboxBackingTrack; handleBackingTrackToggleChange()">
+            <ion-icon name="volume-high-outline" slot="start"></ion-icon>
+            <ion-text>Backing</ion-text>
+          </ion-button>
           <ion-button
             color="dark"
             [disabled]="running || !fileLoaded"
@@ -74,7 +80,7 @@
             color="dark"
             [disabled]="running || !fileLoaded"
             size="small"
-            [fill]="staffIdEnabled[button.id] ? 'solid' : 'outline'"
+            [fill]="isHandEnabled(button.id) ? 'solid' : 'outline'"
             (click)="toggleStaffEnabled(button.id)"
             [attr.aria-label]="button.label"
           >
@@ -510,6 +516,10 @@
       <ion-label color="dark">Show keyboard</ion-label>
       <ion-toggle [(ngModel)]="checkboxKeyboard" color="dark" slot="end" [enableOnOffLabels]="true"></ion-toggle>
     </ion-item>
+    <ion-item button [disabled]="running || !fileLoaded" (click)="openTrackAssignmentDialog()">
+      <ion-label color="dark">Track routing</ion-label>
+      <ion-note slot="end">Assign hands</ion-note>
+    </ion-item>
     <ion-item *ngIf="isMobileLayout">
       <ion-label color="dark">Tempo preset</ion-label>
       <select class="tempo-select" slot="end" [(ngModel)]="tempoPreset" (ngModelChange)="updateTempoPreset($event)">
@@ -535,3 +545,55 @@
     </ion-item>
   </ion-content>
 </ion-menu>
+
+<div
+  *ngIf="showTrackAssignmentDialog"
+  class="completion-dialog-backdrop"
+  (click)="closeTrackAssignmentDialog()"
+>
+  <section
+    class="completion-dialog track-routing-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Track routing"
+    (click)="$event.stopPropagation()"
+  >
+    <div class="completion-dialog__eyebrow">Track routing</div>
+    <h2 class="completion-dialog__title">Assign Tracks</h2>
+    <div class="completion-dialog__points">
+      Map score tracks to left hand, right hand, both hands, or backing.
+      Backing tracks stay off the sheet music and follow the Backing track toggle.
+    </div>
+
+    <div class="track-routing-dialog__list">
+      <div
+        *ngFor="let track of trackAssignmentEntries"
+        class="track-routing-dialog__item"
+      >
+        <div class="track-routing-dialog__meta">
+          <strong>{{ track.name }}</strong>
+          <span>
+            {{ track.staffIds.length }} staff{{ track.staffIds.length === 1 ? '' : 's' }}
+            <span *ngIf="track.isPiano"> • piano</span>
+          </span>
+        </div>
+        <select
+          class="tempo-select track-routing-dialog__select"
+          [ngModel]="track.assignment"
+          (ngModelChange)="updateTrackAssignment(track.instrumentIndex, $event)"
+        >
+          <option value="left">Left hand</option>
+          <option value="right">Right hand</option>
+          <option value="both">Both hands</option>
+          <option value="backing">Backing</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="completion-dialog__actions">
+      <button class="completion-dialog__button completion-dialog__button--primary" (click)="closeTrackAssignmentDialog()">
+        Done
+      </button>
+    </div>
+  </section>
+</div>

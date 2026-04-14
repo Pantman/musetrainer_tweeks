@@ -90,7 +90,8 @@ export class NotesService {
   calculateRequired(
     cursor: Cursor,
     staffIdEnabled: Record<number, boolean>,
-    back = false
+    back = false,
+    instruments: any[] | null = null
   ): void {
     // Get current source time stamp
     const timestamp = cursor.iterator.CurrentSourceTimestamp.RealValue;
@@ -110,7 +111,26 @@ export class NotesService {
     }
 
     // Register new notes under the cursor
-    cursor.VoicesUnderCursor().forEach((voice) => {
+    const visibleVoices = cursor.VoicesUnderCursor() ?? [];
+    const extraInstrumentVoices =
+      instruments && instruments.length > 0
+        ? instruments.flatMap((instrument) => {
+            const audibleVoices =
+              cursor?.iterator?.CurrentAudibleVoiceEntries?.(instrument) ?? [];
+            return audibleVoices.length > 0
+              ? audibleVoices
+              : cursor.VoicesUnderCursor(instrument) ?? [];
+          })
+        : [];
+    // Hidden backing tracks still need to contribute audible notes even when
+    // OSMD is only rendering the visible practice tracks. We therefore start
+    // with the normal visible voices under the cursor, then append any
+    // explicitly requested instrument voices for hidden backing parts.
+    const voices = Array.from(
+      new Set([...visibleVoices, ...extraInstrumentVoices])
+    );
+
+    voices.forEach((voice) => {
       voice.Notes.forEach((value) => {
         const tempoInBPM = value.SourceMeasure.TempoInBPM;
         // Imported scores do not always provide a usable tempo on every measure.

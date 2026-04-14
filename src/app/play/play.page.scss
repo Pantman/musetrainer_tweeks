@@ -335,6 +335,40 @@ ion-input{
   margin-top: 0.55rem;
 }
 
+.track-routing-dialog {
+  max-width: 42rem;
+}
+
+.track-routing-dialog__list {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1.1rem;
+}
+
+.track-routing-dialog__item {
+  align-items: center;
+  background: rgb(255 255 255 / 0.82);
+  border: 1px solid rgb(226 232 240 / 0.9);
+  border-radius: 0.9rem;
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 0.8rem 0.9rem;
+}
+
+.track-routing-dialog__meta {
+  display: flex;
+  flex-direction: column;
+}
+
+.track-routing-dialog__meta span {
+  color: #64748b;
+}
+
+.track-routing-dialog__select {
+  min-width: 8.5rem;
+}
+
 @media (max-width: 640px) {
   .completion-dialog {
     padding: 1.1rem 1rem 1rem;
@@ -346,6 +380,10 @@ ion-input{
 
   .completion-dialog__actions {
     flex-direction: column;
+  }
+
+  .track-routing-dialog__item {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

@@ -78,6 +78,8 @@ type RangeHandle = 'start' | 'end';
 type TransportMode = 'listen' | 'wait' | 'realtime';
 type PlaybackStartReason = 'fresh' | 'loop-restart';
 type FeedbackAccidentalKind = 'sharp' | 'flat' | 'natural';
+type HandId = 'left' | 'right';
+type TrackAssignmentMode = 'left' | 'right' | 'both' | 'backing';
 type SoftwareInstrumentProfile =
   | 'piano'
   | 'organ'
@@ -143,6 +145,16 @@ interface IncorrectFeedbackStaffGeometry {
 interface MeasureRange {
   lower: number;
   upper: number;
+}
+
+interface TrackAssignmentEntry {
+  instrumentIndex: number;
+  instrumentId: number | null;
+  name: string;
+  midiInstrumentId: number | null;
+  staffIds: number[];
+  isPiano: boolean;
+  assignment: TrackAssignmentMode;
 }
 
 interface PracticeGraphicalNote {
@@ -404,7 +416,7 @@ interface ActiveRunPerformanceTracker {
 }
 
 interface StaffToolbarButton {
-  id: number;
+  id: HandId;
   icon: string;
   label: string;
 }
@@ -451,7 +463,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.29';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.14.2';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -465,7 +477,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   isMobileLayout = false;
   staffIdList: number[] = [];
   staffToolbarButtons: StaffToolbarButton[] = [];
-  staffIdEnabled: Record<number, boolean> = {};
+  handEnabled: Record<HandId, boolean> = {
+    left: true,
+    right: true,
+  };
+  trackAssignmentEntries: TrackAssignmentEntry[] = [];
+  showTrackAssignmentDialog: boolean = false;
   listenMode: boolean = false;
   fileLoadError: boolean = false;
   fileLoaded: boolean = false;
@@ -475,6 +492,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   checkboxMidiOut: boolean = false;
   checkboxMidiInputAudio: boolean = true;
   checkboxMetronome: boolean = true;
+  checkboxBackingTrack: boolean = true;
   checkboxWaitMode: boolean = false;
   checkboxFeedback: boolean = true;
   showRangePicker: boolean = false;
@@ -1587,60 +1605,58 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return 'PLAY';
   }
 
-  getStaffToggleLabel(id: number): string {
-    if (this.checkboxWaitMode) {
-      return `Staff ${id + 1}`;
-    }
-
-    return `Computer staff ${id + 1}`;
+  getStaffToolbarIcon(id: HandId): string {
+    return id === 'right' ? 'hand-right-outline' : 'hand-left-outline';
   }
 
-  getStaffToolbarIcon(id: number): string {
-    if (id === 0) {
-      return 'hand-right-outline';
-    }
-
-    if (id === 1) {
-      return 'hand-left-outline';
-    }
-
-    return 'musical-note-outline';
+  getStaffToolbarLabel(id: HandId): string {
+    return id === 'right' ? 'Right hand' : 'Left hand';
   }
 
-  getStaffToolbarLabel(id: number): string {
-    if (id === 0) {
-      return 'Staff 1';
-    }
-
-    if (id === 1) {
-      return 'Staff 2';
-    }
-
-    return `Staff ${id + 1}`;
-  }
-
-  trackByStaffToolbarButton(_index: number, button: StaffToolbarButton): number {
+  trackByStaffToolbarButton(_index: number, button: StaffToolbarButton): string {
     return button.id;
   }
 
-  toggleStaffEnabled(id: number): void {
-    this.staffIdEnabled[id] = !this.staffIdEnabled[id];
-    this.refreshStaffToolbarButtons();
+  isHandEnabled(id: HandId): boolean {
+    return this.handEnabled[id];
+  }
+
+  toggleStaffEnabled(id: HandId): void {
+    this.handEnabled[id] = !this.handEnabled[id];
     this.refreshIdleCursorDerivedStateDeferred();
   }
 
   toggleWaitMode(): void {
     this.checkboxWaitMode = !this.checkboxWaitMode;
+  }
 
-    if (this.checkboxWaitMode) {
-      this.staffIdEnabled = this.staffIdList.reduce(
-        (selection, id) => ({
-          ...selection,
-          [id]: true,
-        }),
-        {} as Record<number, boolean>
-      );
+  handleBackingTrackToggleChange(): void {
+    this.refreshIdleCursorDerivedStateDeferred();
+  }
+
+  openTrackAssignmentDialog(): void {
+    if (this.running || !this.fileLoaded) {
+      return;
     }
+
+    this.showTrackAssignmentDialog = true;
+  }
+
+  closeTrackAssignmentDialog(): void {
+    this.showTrackAssignmentDialog = false;
+  }
+
+  updateTrackAssignment(instrumentIndex: number, assignment: string): void {
+    const nextAssignment = assignment as TrackAssignmentMode;
+    const entry = this.trackAssignmentEntries.find(
+      (candidate) => candidate.instrumentIndex === instrumentIndex
+    );
+    if (!entry) {
+      return;
+    }
+
+    entry.assignment = nextAssignment;
+    this.applyTrackAssignmentsToSheet();
   }
 
   clearFeedback(): void {
@@ -1807,20 +1823,251 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.staffIdList = this.openSheetMusicDisplay.Sheet.Staves.map(
       (s) => s.idInMusicSheet
     );
-    this.staffIdEnabled = this.staffIdList
-      .map((id) => ({ [id]: true }))
-      .reduce((a, b) => ({ ...a, ...b }));
+    this.handEnabled = {
+      left: true,
+      right: true,
+    };
+    this.trackAssignmentEntries = this.buildTrackAssignmentEntriesFromSheet();
     this.refreshStaffToolbarButtons();
+    this.applyTrackAssignmentsToSheet(false);
   }
 
   private refreshStaffToolbarButtons(): void {
-    this.staffToolbarButtons = [...this.staffIdList]
-      .reverse()
-      .map((id) => ({
-        id,
-        icon: this.getStaffToolbarIcon(id),
-        label: this.getStaffToolbarLabel(id),
-      }));
+    this.staffToolbarButtons = (['left', 'right'] as HandId[]).map((id) => ({
+      id,
+      icon: this.getStaffToolbarIcon(id),
+      label: this.getStaffToolbarLabel(id),
+    }));
+  }
+
+  private buildTrackAssignmentEntriesFromSheet(): TrackAssignmentEntry[] {
+    const instruments = this.openSheetMusicDisplay?.Sheet?.Instruments ?? [];
+    const primaryInstrumentIndex = this.getDefaultPracticeInstrumentIndex(instruments);
+
+    return instruments.map((instrument: any, instrumentIndex: number) => {
+      const midiInstrumentId = Number.isFinite(instrument?.MidiInstrumentId)
+        ? Number(instrument.MidiInstrumentId)
+        : Number.isFinite(instrument?.SubInstruments?.[0]?.midiInstrumentID)
+          ? Number(instrument.SubInstruments[0].midiInstrumentID)
+          : null;
+      const staffIds = (instrument?.Staves ?? [])
+        .map((staff: any) => staff?.idInMusicSheet)
+        .filter((staffId: number | null) => Number.isFinite(staffId))
+        .map((staffId: number) => Number(staffId));
+      const isPrimary = instrumentIndex === primaryInstrumentIndex;
+      const assignment: TrackAssignmentMode = isPrimary
+        ? staffIds.length > 1
+          ? 'both'
+          : 'right'
+        : 'backing';
+
+      return {
+        instrumentIndex,
+        instrumentId: Number.isFinite(instrument?.Id) ? Number(instrument.Id) : null,
+        name: this.getTrackDisplayName(instrument, instrumentIndex),
+        midiInstrumentId,
+        staffIds,
+        isPiano: this.isPianoLikeInstrument(instrument, midiInstrumentId),
+        assignment,
+      };
+    });
+  }
+
+  private getDefaultPracticeInstrumentIndex(instruments: any[]): number {
+    const pianoIndex = instruments.findIndex((instrument: any) =>
+      this.isPianoLikeInstrument(
+        instrument,
+        Number.isFinite(instrument?.MidiInstrumentId)
+          ? Number(instrument.MidiInstrumentId)
+          : Number.isFinite(instrument?.SubInstruments?.[0]?.midiInstrumentID)
+            ? Number(instrument.SubInstruments[0].midiInstrumentID)
+            : null
+      )
+    );
+
+    return pianoIndex >= 0 ? pianoIndex : 0;
+  }
+
+  private isPianoLikeInstrument(
+    instrument: any,
+    midiInstrumentId: number | null
+  ): boolean {
+    const name = `${instrument?.Name ?? ''} ${instrument?.PartAbbreviation ?? ''}`.toLowerCase();
+    if (name.includes('piano') || name.includes('keyboard')) {
+      return true;
+    }
+
+    return Number.isFinite(midiInstrumentId) && Number(midiInstrumentId) >= 1 && Number(midiInstrumentId) <= 8;
+  }
+
+  private getTrackDisplayName(instrument: any, instrumentIndex: number): string {
+    const nameCandidates = [
+      instrument?.Name,
+      instrument?.PartAbbreviation,
+      instrument?.IdString,
+    ];
+    const name = nameCandidates.find(
+      (candidate) => typeof candidate === 'string' && candidate.trim().length > 0
+    );
+
+    return name?.trim() ?? `Track ${instrumentIndex + 1}`;
+  }
+
+  private getTrackAssignmentEntriesForHand(hand: HandId): TrackAssignmentEntry[] {
+    return this.trackAssignmentEntries.filter((entry) =>
+      entry.assignment === hand || entry.assignment === 'both'
+    );
+  }
+
+  private getTrackEntryStaffIdsForHand(
+    entry: TrackAssignmentEntry,
+    hand: HandId
+  ): number[] {
+    if (entry.assignment === hand) {
+      return entry.staffIds;
+    }
+
+    if (entry.assignment !== 'both') {
+      return [];
+    }
+
+    if (entry.staffIds.length <= 1) {
+      return entry.staffIds;
+    }
+
+    // A two-staff track assigned to both hands should behave like a normal
+    // piano grand staff: the upper staff belongs to the right hand and the
+    // lower staff belongs to the left hand. Without this split, both-hand
+    // tracks leak every staff into both hand toggles, which makes autoplay,
+    // realtime ownership, and cursor math all disagree about who is playing.
+    return hand === 'right'
+      ? entry.staffIds.slice(0, -1)
+      : entry.staffIds.slice(-1);
+  }
+
+  private getVisibleTrackAssignmentEntries(): TrackAssignmentEntry[] {
+    return this.trackAssignmentEntries.filter(
+      (entry) => entry.assignment === 'left' || entry.assignment === 'right' || entry.assignment === 'both'
+    );
+  }
+
+  private getBackingTrackAssignmentEntries(): TrackAssignmentEntry[] {
+    if (!this.checkboxBackingTrack) {
+      return [];
+    }
+
+    return this.trackAssignmentEntries.filter((entry) => entry.assignment === 'backing');
+  }
+
+  private buildStaffSelectionFromTrackEntries(
+    entries: TrackAssignmentEntry[]
+  ): Record<number, boolean> {
+    const selected = new Set(entries.flatMap((entry) => entry.staffIds));
+
+    return this.staffIdList.reduce(
+      (selection, staffId) => ({
+        ...selection,
+        [staffId]: selected.has(staffId),
+      }),
+      {} as Record<number, boolean>
+    );
+  }
+
+  private buildStaffSelectionFromResolvedStaffIds(
+    staffIds: number[]
+  ): Record<number, boolean> {
+    const selected = new Set(staffIds);
+
+    return this.staffIdList.reduce(
+      (selection, staffId) => ({
+        ...selection,
+        [staffId]: selected.has(staffId),
+      }),
+      {} as Record<number, boolean>
+    );
+  }
+
+  private getHandStaffSelection(hand: HandId): Record<number, boolean> {
+    return this.buildStaffSelectionFromResolvedStaffIds(
+      this.getTrackAssignmentEntriesForHand(hand).flatMap((entry) =>
+        this.getTrackEntryStaffIdsForHand(entry, hand)
+      )
+    );
+  }
+
+  private getTrackEntryInstruments(entries: TrackAssignmentEntry[]): any[] {
+    const instruments = this.openSheetMusicDisplay?.Sheet?.Instruments ?? [];
+    const uniqueEntries = Array.from(
+      new Map(entries.map((entry) => [entry.instrumentIndex, entry])).values()
+    );
+
+    return uniqueEntries
+      .map((entry) => instruments[entry.instrumentIndex])
+      .filter((instrument: any) => !!instrument);
+  }
+
+  private getVisiblePracticeStaffSelection(): Record<number, boolean> {
+    return this.buildStaffSelectionFromTrackEntries(
+      this.getVisibleTrackAssignmentEntries()
+    );
+  }
+
+  private getListenPlaybackStaffSelection(): Record<number, boolean> {
+    return this.buildStaffSelectionFromTrackEntries([
+      ...this.getVisibleTrackAssignmentEntries(),
+      ...this.getBackingTrackAssignmentEntries(),
+    ]);
+  }
+
+  private getListenPlaybackInstruments(): any[] {
+    return this.getTrackEntryInstruments(this.getBackingTrackAssignmentEntries());
+  }
+
+  private getComputerPlaybackTrackEntries(): TrackAssignmentEntry[] {
+    return Array.from(
+      new Map(
+        [
+      ...(this.handEnabled.left ? this.getTrackAssignmentEntriesForHand('left') : []),
+      ...(this.handEnabled.right ? this.getTrackAssignmentEntriesForHand('right') : []),
+      ...this.getBackingTrackAssignmentEntries(),
+        ].map((entry) => [entry.instrumentIndex, entry])
+      ).values()
+    );
+  }
+
+  private applyTrackAssignmentsToSheet(reRender: boolean = true): void {
+    const instruments = this.openSheetMusicDisplay?.Sheet?.Instruments ?? [];
+    const visibleIndices = new Set(
+      this.getVisibleTrackAssignmentEntries().map((entry) => entry.instrumentIndex)
+    );
+
+    instruments.forEach((instrument: any, index: number) => {
+      instrument.Visible = visibleIndices.has(index);
+    });
+
+    if (!reRender || !this.fileLoaded) {
+      return;
+    }
+
+    this.osmdResetFeedback();
+    this.openSheetMusicDisplay.render();
+    this.refreshMeasureOverlaysDeferred();
+    this.refreshIdleCursorDerivedStateDeferred();
+  }
+
+  getTrackAssignmentLabel(assignment: TrackAssignmentMode): string {
+    switch (assignment) {
+      case 'left':
+        return 'Left hand';
+      case 'right':
+        return 'Right hand';
+      case 'both':
+        return 'Both hands';
+      case 'backing':
+        return 'Backing';
+    }
+
+    return 'Backing';
   }
 
   private setTransportMode(mode: TransportMode | null): void {
@@ -2724,10 +2971,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   // Single writer for cursor-derived note state. Any cursor0 repositioning
   // should rebuild required notes, practice targets, tempo, and realtime state here.
   private rebuildCurrentPlaybackStepState(back = false): void {
+    const practiceSelection = this.getPracticeStaffSelection();
     this.notesService.calculateRequired(
       this.openSheetMusicDisplay.cursors[0],
-      this.getPracticeStaffSelection(),
-      back
+      this.realtimeMode ? practiceSelection : this.getListenPlaybackStaffSelection(),
+      back,
+      this.realtimeMode ? null : this.getListenPlaybackInstruments()
     );
 
     if (this.realtimeMode) {
@@ -2746,7 +2995,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.computerNotesService.calculateRequired(
         this.openSheetMusicDisplay.cursors[0],
         this.getComputerStaffSelection(),
-        back
+        back,
+        this.getTrackEntryInstruments(this.getBackingTrackAssignmentEntries())
       );
       this.tempoInBPM = this.resolveRealtimeTempo();
       const hasCurrentRequiredPressKeys = this.hasCurrentRequiredPressKeys();
@@ -9201,7 +9451,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     graphicSheet: any
   ): any[] {
     const fromSource = (sourceMeasure?.VerticalMeasureList ?? []).filter(
-      (measure: any) => measure?.PositionAndShape
+      (measure: any) =>
+        measure?.PositionAndShape &&
+        measure?.ParentStaff?.ParentInstrument?.Visible !== false
     );
 
     if (fromSource.length > 0) {
@@ -9209,7 +9461,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     const fromGraphicSheet = (graphicSheet?.MeasureList?.[index] ?? []).filter(
-      (measure: any) => measure?.PositionAndShape
+      (measure: any) =>
+        measure?.PositionAndShape &&
+        measure?.ParentStaff?.ParentInstrument?.Visible !== false
     );
 
     return fromGraphicSheet;
@@ -10026,9 +10280,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private isRealtimePlaybackOnly(): boolean {
-    return this.staffIdList.length > 0
-      ? this.staffIdList.every((id) => this.staffIdEnabled[id])
-      : true;
+    return !Object.values(this.getPracticeStaffSelection()).some(Boolean);
   }
 
   private isInputCountInActive(): boolean {
@@ -10041,26 +10293,39 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private getPracticeStaffSelection(): Record<number, boolean> {
     if (!this.realtimeMode) {
-      return this.staffIdEnabled;
+      return this.getVisiblePracticeStaffSelection();
     }
 
-    return this.staffIdList.reduce(
-      (selection, id) => ({
-        ...selection,
-        [id]: !this.staffIdEnabled[id],
-      }),
-      {} as Record<number, boolean>
-    );
+    const selectedStaffIds = [
+      ...(!this.handEnabled.left ? Object.entries(this.getHandStaffSelection('left')) : []),
+      ...(!this.handEnabled.right ? Object.entries(this.getHandStaffSelection('right')) : []),
+    ]
+      .filter(([, enabled]) => enabled)
+      .map(([staffId]) => Number(staffId));
+
+    return this.buildStaffSelectionFromResolvedStaffIds(selectedStaffIds);
   }
 
   private getComputerStaffSelection(): Record<number, boolean> {
-    return this.staffIdList.reduce(
-      (selection, id) => ({
-        ...selection,
-        [id]: this.realtimeMode ? this.staffIdEnabled[id] : false,
-      }),
-      {} as Record<number, boolean>
-    );
+    if (!this.realtimeMode) {
+      return this.buildStaffSelectionFromResolvedStaffIds([]);
+    }
+
+    const selectedStaffIds = [
+      ...(this.handEnabled.left
+        ? Object.entries(this.getHandStaffSelection('left'))
+        : []),
+      ...(this.handEnabled.right
+        ? Object.entries(this.getHandStaffSelection('right'))
+        : []),
+      ...Object.entries(
+        this.buildStaffSelectionFromTrackEntries(this.getBackingTrackAssignmentEntries())
+      ),
+    ]
+      .filter(([, enabled]) => enabled)
+      .map(([staffId]) => Number(staffId));
+
+    return this.buildStaffSelectionFromResolvedStaffIds(selectedStaffIds);
   }
 
   private refreshRealtimeNextStepKeys(): void {
