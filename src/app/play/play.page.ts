@@ -409,6 +409,11 @@ interface StaffToolbarButton {
   label: string;
 }
 
+interface PlaybackTransportAnchor {
+  scoreTimestamp: number;
+  audioTimeSec: number;
+}
+
 @Component({
   selector: 'app-home',
   templateUrl: 'play.page.html',
@@ -423,8 +428,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly AUDIO_SCHEDULE_AHEAD_SEC = 0.05;
   private static readonly REALTIME_ACCEPT_TOLERANCE_WHOLE_NOTES = 1 / 4;
   private static readonly TIMED_LIVE_DEBUG_WINDOW_WHOLE_NOTES = 1 / 4;
-  private static readonly DEFAULT_TIMED_LIVE_SIMULATION_THRESHOLD_MS = 50;
-  private static readonly DEFAULT_TIMED_LIVE_SIMULATION_CONSIDERATION_MS = 100;
+  private static readonly DEFAULT_TIMED_LIVE_SIMULATION_THRESHOLD_MS = 100;
+  private static readonly DEFAULT_TIMED_LIVE_SIMULATION_CONSIDERATION_MS = 200;
   private static readonly MAX_TIMED_LIVE_SIMULATION_THRESHOLD_MS = 2000;
   private static readonly MAX_TIMED_LIVE_SIMULATION_TIMING_OFFSET_MS = 4000;
   private static readonly MAX_TIMED_LIVE_SIMULATION_PITCH_OFFSET_SEMITONES = 24;
@@ -446,7 +451,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.17';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.13.21';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -504,6 +509,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     scheduledAudioTimeSec: null,
     pendingLoopRestartAudioTimeSec: null,
   };
+  private playbackTransportAnchor: PlaybackTransportAnchor | null = null;
   skipPlayNotes: number = 0;
   tempoInBPM: number = 120;
   speedValue: number = 100;
@@ -1811,6 +1817,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private clearPlaybackClock(): void {
     this.playbackClock.scheduledAudioTimeSec = null;
     this.playbackClock.pendingLoopRestartAudioTimeSec = null;
+    this.playbackTransportAnchor = null;
   }
 
   private shouldShowCompletedRunSummary(): boolean {
@@ -1820,9 +1827,22 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     return (
       this.realtimeMode ||
-      (this.timedLiveCompletionDebugAutoRunsEnabled &&
-        (this.listenMode || this.shouldUseTimedLiveSimulatedFeedback()))
+      (this.listenMode && this.timedLiveCompletionDebugEnabled)
     );
+  }
+
+  private updatePlaybackTransportAnchor(
+    scoreTimestamp: number,
+    audioTimeSec: number
+  ): void {
+    if (!Number.isFinite(scoreTimestamp) || !Number.isFinite(audioTimeSec)) {
+      return;
+    }
+
+    this.playbackTransportAnchor = {
+      scoreTimestamp,
+      audioTimeSec,
+    };
   }
 
   private normalizeTimedLiveCompletionDebugBarCount(value: number): number {
@@ -1912,13 +1932,33 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private getCompletedRunSelectedEventNotes(
     event: TimedLiveCursorEvent
   ): Array<{ note: TimedLiveCursorNote; index: number }> {
-    // The scorecard denominator must reflect only the notes that were
-    // actually available to the active performer path for this run. In human
-    // realtime runs that means the human-played staves; in simulated/listen
-    // debug runs it means the simulated active staves. Reusing the same
-    // selected-note filter here keeps the scorecard aligned with whichever
-    // hand(s) were actually in play.
-    return this.getTimedLiveSelectedEventNotes(event);
+    const scorecardSelection = this.getCompletedRunScorecardStaffSelection();
+    return event.notes
+      .map((note, index) => ({ note, index }))
+      .filter(({ note }) => {
+        if (!note.actionable) {
+          return false;
+        }
+
+        return note.staffId === null || scorecardSelection[note.staffId];
+      });
+  }
+
+  private getCompletedRunScorecardStaffSelection(): Record<number, boolean> {
+    // Scorecard stats should follow the active performer path:
+    // - in normal realtime one-hand mode, only the human-played hand(s) count
+    // - computer-played notes are excluded from stats/congrats by default
+    // - only the explicit debug autoplay mode may count computer/simulated
+    //   notes for scorecard testing
+    if (this.realtimeMode) {
+      return this.getPracticeStaffSelection();
+    }
+
+    if (this.listenMode && this.timedLiveCompletionDebugAutoRunsEnabled) {
+      return this.getPracticeStaffSelection();
+    }
+
+    return {};
   }
 
   private getCompletedRunScoredEvents(): TimedLiveCursorEvent[] {
@@ -2442,6 +2482,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.openSheetMusicDisplay.cursors[1].iterator.CurrentSourceTimestamp
         .RealValue;
     const audioTime = this.getCurrentScheduledPlaybackAudioTime();
+    this.updatePlaybackTransportAnchor(currentTimestamp, audioTime);
 
     if (this.realtimeMode) {
       this.advanceRealtimePractice(audioTime);
@@ -2481,6 +2522,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         } else {
           this.timeouts.push(
             setTimeout(() => {
+              this.finalizeCurrentRealtimeStepFeedback();
+              if (this.shouldShowCompletedRunSummary()) {
+                this.openCompletedRunSummary();
+              }
               this.osmdCursorStop();
             }, timeout)
           );
@@ -3021,6 +3066,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       audioTime = this.getCurrentScheduledPlaybackAudioTime();
     }
     this.playbackStartAudioTimeSec = audioTime;
+    this.updatePlaybackTransportAnchor(this.playbackStartScoreTimestamp, audioTime);
     this.syncTimedLiveCursorDebugLoop();
 
     this.startMetronome();
@@ -8581,19 +8627,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return null;
     }
 
-    if (!Number.isFinite(this.playbackStartScoreTimestamp) || this.timePlayStart <= 0) {
-      return null;
-    }
-
-    const startAudioTimeSec = this.playbackStartAudioTimeSec;
-    if (typeof startAudioTimeSec !== 'number' || !Number.isFinite(startAudioTimeSec)) {
+    const transportAnchor = this.playbackTransportAnchor;
+    if (!transportAnchor) {
       return null;
     }
 
     const wholeNotesPerSecond = this.getEffectiveTempoBPM() / 240;
-    const elapsedSec = Math.max(toneNow() - startAudioTimeSec, 0);
+    const elapsedSec = Math.max(toneNow() - transportAnchor.audioTimeSec, 0);
     const estimatedTimestamp =
-      this.playbackStartScoreTimestamp + elapsedSec * wholeNotesPerSecond;
+      transportAnchor.scoreTimestamp + elapsedSec * wholeNotesPerSecond;
 
     return Math.min(
       Math.max(estimatedTimestamp, timeline.startTimestamp),
