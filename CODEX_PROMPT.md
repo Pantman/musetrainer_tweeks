@@ -344,12 +344,94 @@ Important architectural rule:
 - backing tracks may contribute audio, but they must not decide when the main
   timed transport advances
 
-Recommended first phase:
+Detailed implementation shape:
+
+- introduce a real score-timeline module, likely in a new file such as
+  `src/app/play/playback-timeline.ts`
+- define stable structures such as:
+  - `PlaybackEvent`
+  - `TimelineNote`
+  - optionally `RenderedTimelineAnchor`
+- build the timeline from score data once after:
+  - score load
+  - reroute / hand remapping
+  - loop or range change
+  - any other operation that changes the playable score subset
+
+Each event/note should carry enough data that later systems do not need to
+rediscover ownership or timing from cursor iteration. Include:
+
+- event id
+- timestamp
+- measure / beat
+- note id
+- pitch
+- duration / end timestamp
+- hand assignment
+- backing vs visible role
+- tie metadata
+- rendered-note lookup keys if available
+
+Split the timeline into roles:
+
+- visible timeline
+  - drives green cursor timing
+  - drives visible autoplay timing
+  - drives human note matching / classification
+- backing timeline
+  - drives backing audio only
+- both should come from the same underlying score event model
+
+Migration plan:
+
+1. Introduce the timeline model without changing live behavior yet.
+- Build `PlaybackEvent[]` / `TimelineNote[]`.
+- Log and inspect them beside the current cursor-based behavior.
+- Prove that they match intended score moments before swapping consumers.
+
+2. Move timed autoplay onto the new timeline first.
+- This is the safest first consumer.
+- Stop using OSMD cursor iteration for playback timing.
+- Keep OSMD only for rendering and screen geometry.
+
+3. Add a render map after OSMD renders.
+- Build a map from timeline note/event ids to screen positions.
+- On resize/rerender, rebuild only this render map.
+- Do not rebuild the musical timeline unless score/routing/range changed.
+
+4. Drive green cursor rendering from:
+- timeline timestamp
+- plus render-map interpolation
+
+5. Move human matching/classification onto the same timeline.
+- Early/late/hit/miss/mistake should all match against stable `TimelineNote`
+  identities.
+- This should simplify note coloring and scorecard logic substantially.
+
+6. Retire legacy cursor-driven required-note state gradually.
+- Keep compatibility shims while migrating one subsystem at a time.
+- Do not try to replace everything in one patch.
+
+Why this should help:
+
+- autoplay, green cursor timing, and human matching all consume the same
+  score-time truth
+- backing becomes a sidecar consumer of timeline events instead of a transport
+  driver
+- stable note identities should reduce complexity in matching / note
+  classification / coloring code
+- resize and rerender handling should become cleaner because only the render
+  map needs rebuilding when geometry changes
+
+Recommended first phase for the next session:
 
 - introduce timeline types such as `PlaybackEvent` / `TimelineNote`
 - build them from score data after load, reroute, or range change
 - log/inspect them beside the current cursor-based behavior before swapping
   over live logic
+- start by moving timed autoplay only
+- leave compatibility shims in place for the older cursor-driven systems until
+  each subsystem has migrated
 
 Expected benefits:
 
