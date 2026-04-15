@@ -473,7 +473,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.15.23';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.15.24';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -8114,16 +8114,35 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private getPlaybackTimelineSourceNoteSpan(note: any): number {
-    let total = 0;
+    const tieNotes = this.getPlaybackTimelineTieChainNotes(note);
+    if (tieNotes.length > 0) {
+      return tieNotes.reduce((total: number, tieNote: any) => {
+        const length = tieNote?.Length?.RealValue;
+        return total + (Number.isFinite(length) ? Number(length) : 0);
+      }, 0);
+    }
+
+    const length = note?.Length?.RealValue;
+    return Number.isFinite(length) ? Number(length) : 0;
+  }
+
+  private getPlaybackTimelineTieChainNotes(note: any): any[] {
+    if (!note) {
+      return [];
+    }
+
+    const tieNotes = Array.isArray(note?.NoteTie?.notes) ? note.NoteTie.notes : null;
+    if (tieNotes && tieNotes.length > 0 && note === note?.NoteTie?.StartNote) {
+      return tieNotes;
+    }
+
+    const collected: any[] = [];
     let current = note;
     const visited = new Set<any>();
 
     while (current && !visited.has(current)) {
       visited.add(current);
-      const length = current?.Length?.RealValue;
-      if (Number.isFinite(length)) {
-        total += Number(length);
-      }
+      collected.push(current);
 
       const tie = current?.NoteTie;
       if (!tie || current !== tie?.StartNote || !tie?.StopNote) {
@@ -8133,7 +8152,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       current = tie.StopNote;
     }
 
-    return total;
+    return collected;
   }
 
   private getPlaybackTimelineInstrumentName(
