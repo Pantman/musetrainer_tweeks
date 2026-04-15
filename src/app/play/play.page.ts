@@ -33,6 +33,15 @@ import { PianoKeyboardComponent } from '../piano-keyboard/piano-keyboard.compone
 import { Capacitor, PluginListenerHandle } from '@capacitor/core';
 import { Filesystem } from '@capacitor/filesystem';
 import packageJson from '../../../package.json';
+import {
+  buildPlaybackTimeline,
+  PlaybackEvent,
+  PlaybackEventSeed,
+  PlaybackTimeline,
+  PlaybackTimelineHandAssignment,
+  PlaybackTimelineRole,
+  TimelineNote,
+} from './playback-timeline';
 
 declare const Ionic: any;
 
@@ -464,7 +473,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.14.10';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.15.23';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -608,6 +617,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   playbackTraceEnabled: boolean = false;
   cursorWrapDebugSnapshot: CursorWrapDebugSnapshot | null = null;
   private cursorDebugRefreshTimeout: number | null = null;
+  playbackTimeline: PlaybackTimeline | null = null;
+  private playbackTimelineRefreshTimeout: number | null = null;
+  private timedPlaybackVisibleEventIndex: number = -1;
   timedLiveCursorTimeline: TimedLiveCursorTimeline | null = null;
   timedLiveCursorRenderState: TimedLiveCursorRenderState | null = null;
   timedLiveCursorThresholdMarkers: TimedLiveCursorThresholdMarker[] = [];
@@ -1819,6 +1831,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private refreshIdleCursorDerivedStateDeferred(): void {
+    this.refreshPlaybackTimelineDeferred();
     if (this.showTimedLiveCursorDebugOverlay || this.timedLiveCursorTimeline) {
       this.refreshTimedLiveCursorTimelineDeferred();
     }
@@ -2076,6 +2089,22 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return uniqueEntries
       .map((entry) => instruments[entry.instrumentIndex])
       .filter((instrument: any) => !!instrument);
+  }
+
+  private getMidiInstrumentIdForSourceNote(note: any): number | null {
+    const parentInstrument = note?.ParentStaff?.ParentInstrument;
+    const playbackInstrumentId = note?.PlaybackInstrumentId;
+    const matchingSubInstrument = (parentInstrument?.SubInstruments ?? []).find(
+      (subInstrument: any) => subInstrument?.idString === playbackInstrumentId
+    );
+    const candidates = [
+      matchingSubInstrument?.midiInstrumentID,
+      parentInstrument?.MidiInstrumentId,
+      parentInstrument?.SubInstruments?.[0]?.midiInstrumentID,
+    ];
+    const midiInstrumentId = candidates.find((value) => Number.isFinite(value));
+
+    return Number.isFinite(midiInstrumentId) ? Number(midiInstrumentId) : null;
   }
 
   private getVisiblePracticeStaffSelection(): Record<number, boolean> {
@@ -2604,6 +2633,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   osmdStop(): void {
     this.running = false;
     this.setTransportMode(null);
+    this.timedPlaybackVisibleEventIndex = -1;
     this.timePlayStart = 0;
     this.playbackStartScoreTimestamp = 0;
     this.playbackStartAudioTimeSec = null;
@@ -2846,6 +2876,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     // Required to stop next calls if stop is pressed during play
     if (!this.running) return;
 
+    if (this.listenMode && this.isTimedTransportMode()) {
+      this.osmdTimedListenCursorTempoMoveNext();
+      return;
+    }
+
     if (!this.osmdEndReached(1)) {
       if (this.isTimedTransportMode()) {
         this.advanceTempoCursorToNextScheduledStep();
@@ -2932,6 +2967,21 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       // Move to Next
       const iter = this.openSheetMusicDisplay.cursors[1].iterator;
       const nextScheduledTimestamp = this.getNextScheduledPlaybackTimestamp(1);
+      const nextTimelineVisibleEvent =
+        this.getNextPlaybackTimelineEventAfter(currentTimestamp, 'visible');
+      if (this.playbackTraceEnabled) {
+        this.appendPlaybackTraceEvent(
+          `scheduler compare cur ${this.formatScoreTimestamp(currentTimestamp)} legacy ${
+            nextScheduledTimestamp !== null
+              ? this.formatScoreTimestamp(nextScheduledTimestamp)
+              : 'end'
+          } timeline ${
+            nextTimelineVisibleEvent
+              ? this.formatScoreTimestamp(nextTimelineVisibleEvent.timestamp)
+              : 'end'
+          }`
+        );
+      }
       if (nextScheduledTimestamp === null) {
         nextTimestamp =
           iter.CurrentMeasure.AbsoluteTimestamp.RealValue +
@@ -2998,6 +3048,98 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.advanceTimedStartBootstrapCursorIfNeeded();
       this.playNote(audioTime);
     }
+  }
+
+  private osmdTimedListenCursorTempoMoveNext(): void {
+    const atVisibleTimelineEnd = this.timedPlaybackAtVisibleTimelineEnd();
+    if (!atVisibleTimelineEnd) {
+      this.advanceTempoCursorToNextScheduledStep();
+      this.advancePlayCursorToNextScheduledTimedStep();
+      this.rebuildCurrentPlaybackStepState();
+      this.alignOrAnimatePlayCursorAfterAdvance();
+    }
+
+    const currentTimestamp =
+      this.openSheetMusicDisplay?.cursors?.[1]?.iterator?.CurrentSourceTimestamp
+        ?.RealValue ?? this.getCurrentPracticeTimestamp();
+    const audioTime = this.getCurrentScheduledPlaybackAudioTime();
+    this.updatePlaybackTransportAnchor(currentTimestamp, audioTime);
+
+    const nextVisibleEvent = this.getNextTimedPlaybackVisibleEvent();
+    if (this.playbackTraceEnabled) {
+      const currentEvents = this.getPlaybackTimelineEventsAtTimestamp(currentTimestamp);
+      this.appendPlaybackTraceEvent(
+        `timeline step cur ${this.formatScoreTimestamp(currentTimestamp)} now[${
+          currentEvents
+            .map(
+              (event) =>
+                `vis(${this.formatPlaybackTimelineNotesForTrace(event.visibleNotes)}) backing(${this.formatPlaybackTimelineNotesForTrace(event.backingNotes)})`
+            )
+            .join(' || ') || 'none'
+        }] next[${
+          nextVisibleEvent
+            ? this.formatPlaybackTimelineNotesForTrace(nextVisibleEvent.visibleNotes)
+            : 'end'
+        }]`
+      );
+    }
+    let nextTimestamp =
+      nextVisibleEvent?.timestamp ??
+      this.getTimedPlaybackTimelineEndTimestamp() ??
+      currentTimestamp;
+    let timeout = this.getPlaybackDelayMs(nextTimestamp - currentTimestamp);
+
+    if (timeout < 0) {
+      nextTimestamp =
+        this.getTimedPlaybackTimelineEndTimestamp() ?? currentTimestamp;
+      timeout = this.getPlaybackDelayMs(nextTimestamp - currentTimestamp);
+    }
+
+    const nextMeasureNumber =
+      nextVisibleEvent?.measureNumber ?? this.inputMeasure.upper + 1;
+    if (
+      this.shouldShowCompletedRunSummary() &&
+      this.shouldCompleteDebugRunBeforeMeasure(nextMeasureNumber)
+    ) {
+      this.timeouts.push(
+        setTimeout(() => {
+          this.openCompletedRunSummary();
+          this.osmdCursorStop();
+        }, timeout)
+      );
+      this.scheduleMetronomeWindow(currentTimestamp, nextTimestamp, audioTime);
+      this.advanceScheduledPlaybackAudioTime(timeout);
+      this.advanceTimedStartBootstrapCursorIfNeeded();
+      this.playNote(audioTime);
+      return;
+    }
+
+    if (!nextVisibleEvent) {
+      this.timeouts.push(
+        setTimeout(() => {
+          this.openSheetMusicDisplay.cursors[1].hide();
+        }, timeout)
+      );
+      this.timeouts.push(
+        setTimeout(() => {
+          if (this.shouldShowCompletedRunSummary()) {
+            this.openCompletedRunSummary();
+          }
+          this.osmdCursorStop();
+        }, timeout)
+      );
+    } else {
+      this.timeouts.push(
+        setTimeout(() => {
+          this.osmdCursorTempoMoveNext();
+        }, timeout)
+      );
+    }
+
+    this.scheduleMetronomeWindow(currentTimestamp, nextTimestamp, audioTime);
+    this.advanceScheduledPlaybackAudioTime(timeout);
+    this.advanceTimedStartBootstrapCursorIfNeeded();
+    this.playNote(audioTime);
   }
 
   osmdEndReached(cursorId: number): boolean {
@@ -3104,12 +3246,16 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       // that step becomes current. Rehydrate those per-event timing outcomes
       // here so the step does not forget them and redraw them later as missed.
       this.rehydrateTimedLiveRealtimeMatchesForCurrentStep();
-      this.computerNotesService.calculateRequired(
-        this.openSheetMusicDisplay.cursors[0],
-        this.getComputerStaffSelection(),
-        back,
-        this.getTrackEntryInstruments(this.getBackingTrackAssignmentEntries())
-      );
+      if (this.playbackTimeline && Number.isFinite(scoreTimestamp)) {
+        this.syncComputerNotesServiceToTimeline(Number(scoreTimestamp));
+      } else {
+        this.computerNotesService.calculateRequired(
+          this.openSheetMusicDisplay.cursors[0],
+          this.getComputerStaffSelection(),
+          back,
+          this.getTrackEntryInstruments(this.getBackingTrackAssignmentEntries())
+        );
+      }
       this.tracePlaybackStepState(
         'computer step',
         this.computerNotesService,
@@ -3289,6 +3435,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private advanceTempoCursorToNextScheduledStep(): boolean {
+    if (this.listenMode && this.isTimedTransportMode()) {
+      const nextVisibleEvent = this.getNextTimedPlaybackVisibleEvent();
+      if (!nextVisibleEvent) {
+        return false;
+      }
+
+      return this.advanceTempoCursorToTimestamp(nextVisibleEvent.timestamp);
+    }
+
     const cursor: any = this.openSheetMusicDisplay?.cursors?.[1];
     const iterator = cursor?.iterator;
     if (!cursor || !iterator) {
@@ -3311,6 +3466,19 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private advancePlayCursorToNextScheduledTimedStep(): boolean {
+    if (this.listenMode && this.isTimedTransportMode()) {
+      const nextVisibleEvent = this.getNextTimedPlaybackVisibleEvent();
+      if (!nextVisibleEvent) {
+        return false;
+      }
+
+      const advanced = this.advancePlayCursorToTimestamp(nextVisibleEvent.timestamp);
+      if (advanced) {
+        this.markTimedPlaybackVisibleEventReached(nextVisibleEvent);
+      }
+      return advanced;
+    }
+
     const cursor = this.openSheetMusicDisplay?.cursors?.[0];
     const scheduledSelection = this.getScheduledPlaybackStaffSelection();
     if (!cursor) {
@@ -3320,6 +3488,64 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     while (this.moveToNextPlayCursorStep(false)) {
       if (this.cursorStepHasVisiblePlaybackNote(cursor, scheduledSelection)) {
         return true;
+      }
+    }
+
+    return false;
+  }
+
+  private advanceTempoCursorToTimestamp(targetTimestamp: number): boolean {
+    const cursor: any = this.openSheetMusicDisplay?.cursors?.[1];
+    const iterator = cursor?.iterator;
+    if (!cursor || !iterator || !Number.isFinite(targetTimestamp)) {
+      return false;
+    }
+
+    const timestampEpsilon = 1e-7;
+    while (
+      Number(iterator.CurrentSourceTimestamp?.RealValue ?? NaN) <
+      targetTimestamp - timestampEpsilon
+    ) {
+      this.moveIteratorToNextScheduledPlaybackStep(iterator, 1);
+      if (
+        iterator.EndReached ||
+        this.inputMeasure.upper < (iterator.CurrentMeasureIndex ?? -1) + 1
+      ) {
+        return false;
+      }
+    }
+
+    cursor.update?.();
+    if (this.listenMode) {
+      cursor.hide?.();
+    }
+    return true;
+  }
+
+  private advancePlayCursorToTimestamp(targetTimestamp: number): boolean {
+    const cursor = this.openSheetMusicDisplay?.cursors?.[0];
+    const scheduledSelection = this.getScheduledPlaybackStaffSelection();
+    if (!cursor || !Number.isFinite(targetTimestamp)) {
+      return false;
+    }
+
+    const timestampEpsilon = 1e-7;
+    while (this.moveToNextPlayCursorStep(false)) {
+      const currentTimestamp =
+        cursor.iterator?.CurrentSourceTimestamp?.RealValue ?? NaN;
+      const currentHasVisiblePlayback = this.cursorStepHasVisiblePlaybackNote(
+        cursor,
+        scheduledSelection
+      );
+      if (
+        currentHasVisiblePlayback &&
+        Math.abs(currentTimestamp - targetTimestamp) <= timestampEpsilon
+      ) {
+        return true;
+      }
+
+      if (currentTimestamp > targetTimestamp + timestampEpsilon) {
+        return false;
       }
     }
 
@@ -3446,6 +3672,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     this.rebuildCurrentPlaybackStepState();
     this.alignOrAnimatePlayCursorAfterAdvance();
+    if (this.listenMode && this.isTimedTransportMode()) {
+      this.syncTimedPlaybackVisibleEventIndexToCurrentCursor();
+    }
     this.pendingTimedStartBootstrapAdvance = !this.hasCurrentRequiredPressKeys();
   }
 
@@ -3578,6 +3807,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           ? 'restart prepared'
           : 'start prepared'
       );
+      this.syncTimedPlaybackVisibleEventIndexToCurrentCursor();
       this.refreshTimedStartBootstrapState();
       return true;
     });
@@ -3662,7 +3892,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.playComputerNotes(audioTime);
     }
 
+    const timelineNextVisibleEvent =
+      this.listenMode && this.isTimedTransportMode()
+        ? this.getNextTimedPlaybackVisibleEvent()
+        : null;
     const nextTimestamp =
+      timelineNextVisibleEvent?.timestamp ??
+      (this.listenMode && this.isTimedTransportMode()
+        ? this.getTimedPlaybackTimelineEndTimestamp()
+        : null) ??
       this.getNextScheduledPlaybackTimestamp(1) ??
       this.getNextRawCursorTimestamp(this.openSheetMusicDisplay.cursors[1]) ??
       this.getNextRawCursorTimestamp(this.openSheetMusicDisplay.cursors[0]) ??
@@ -3680,6 +3918,17 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         )
       )} skip ${this.skipPlayNotes}`
     );
+    if (this.playbackTraceEnabled && this.listenMode && this.isTimedTransportMode()) {
+      this.appendPlaybackTraceEvent(
+        `timeline start cur ${this.formatScoreTimestamp(
+          this.playbackStartScoreTimestamp
+        )} next ${
+          timelineNextVisibleEvent
+            ? this.formatScoreTimestamp(timelineNextVisibleEvent.timestamp)
+            : 'end'
+        } idx ${this.timedPlaybackVisibleEventIndex}`
+      );
+    }
 
     this.scheduleMetronomeWindow(
       this.playbackStartScoreTimestamp,
@@ -3705,6 +3954,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       if (this.skipPlayNotes > 0) {
         this.skipPlayNotes--;
       }
+      return;
+    }
+
+    if (this.listenMode && this.isTimedTransportMode()) {
+      this.playTimedPlaybackTimelineNotes(audioTime);
       return;
     }
 
@@ -3745,6 +3999,116 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         }
       );
     }
+  }
+
+  private playTimedPlaybackTimelineNotes(audioTime?: number): void {
+    const currentTimestamp = this.getCurrentPracticeTimestamp();
+    const eventsAtTimestamp = this.getPlaybackTimelineEventsAtTimestamp(
+      currentTimestamp
+    );
+    if (eventsAtTimestamp.length === 0) {
+      this.appendCursorWrapDebugEvent(
+        `timeline play none ${this.formatScoreTimestamp(currentTimestamp)}`
+      );
+      return;
+    }
+
+    const visibleNotes = eventsAtTimestamp.flatMap((event) => event.visibleNotes);
+    const backingNotes = this.checkboxBackingTrack
+      ? eventsAtTimestamp.flatMap((event) => event.backingNotes)
+      : [];
+    const playableVisibleNotes = visibleNotes.filter(
+      (note) => !note.tie.isContinuation || note.tie.isStart
+    );
+    const playableBackingNotes = backingNotes.filter(
+      (note) => !note.tie.isContinuation || note.tie.isStart
+    );
+    this.appendCursorWrapDebugEvent(
+      `timeline play ${this.formatScoreTimestamp(currentTimestamp)} vis[${
+        playableVisibleNotes
+          .map((note) => this.noteKeyToLabel(note.halfTone.toString()))
+          .join(' ') || 'none'
+      }] backing[${
+        playableBackingNotes
+          .map((note) => `${this.noteKeyToLabel(note.halfTone.toString())}/${note.role}`)
+          .join(' ') || 'none'
+      }]`
+    );
+    if (this.playbackTraceEnabled) {
+      this.appendPlaybackTraceEvent(
+        `timeline play ${this.formatScoreTimestamp(currentTimestamp)} vis[${
+          this.formatPlaybackTimelineNotesForTrace(playableVisibleNotes)
+        }] backing[${this.formatPlaybackTimelineNotesForTrace(playableBackingNotes)}]`
+      );
+    }
+
+    playableVisibleNotes.forEach((note) =>
+      this.scheduleTimedPlaybackTimelineNote(note, audioTime)
+    );
+    playableBackingNotes.forEach((note) =>
+      this.scheduleTimedPlaybackTimelineNote(note, audioTime)
+    );
+  }
+
+  private getPlaybackTimelineEventsAtTimestamp(
+    timestamp: number
+  ): PlaybackEvent[] {
+    const timeline = this.playbackTimeline;
+    if (!timeline || !Number.isFinite(timestamp)) {
+      return [];
+    }
+
+    const timestampEpsilon = 1e-7;
+    return timeline.events.filter(
+      (event) => Math.abs(event.timestamp - timestamp) <= timestampEpsilon
+    );
+  }
+
+  private scheduleTimedPlaybackTimelineNote(
+    note: TimelineNote,
+    audioTime?: number
+  ): void {
+    const pitch = note.halfTone + 12;
+    if (!Number.isFinite(pitch) || pitch < 0 || pitch > 127) {
+      return;
+    }
+
+    const durationMs = this.getPlaybackDelayMs(
+      Math.max(note.durationWholeNotes, 1 / 32)
+    );
+    const midiInstrumentId = note.midiInstrumentId;
+    const key = note.halfTone.toFixed();
+    this.mapNotesAutoPressed.set(key, 1);
+    this.autoPressedMidiInstrumentIds.set(key, midiInstrumentId);
+    this.timeouts.push(
+      setTimeout(() => {
+        this.keyNoteOn(Date.now() - this.timePlayStart, pitch);
+      }, 0)
+    );
+
+    const routeKey = this.sendOutputNoteOn(pitch, 60, audioTime, midiInstrumentId);
+    this.trackAutoPressedSoftwareRoute(key, routeKey);
+
+    const releaseAudioTime =
+      typeof audioTime === 'number' && Number.isFinite(audioTime)
+        ? audioTime + durationMs / 1000
+        : undefined;
+    this.sendOutputNoteOff(pitch, releaseAudioTime, midiInstrumentId, routeKey);
+
+    this.timeouts.push(
+      setTimeout(() => {
+        this.mapNotesAutoPressed.delete(key);
+        this.autoPressedMidiInstrumentIds.delete(key);
+        const routeKeys = this.autoPressedSoftwareRouteKeys.get(key) ?? [];
+        const nextRouteKeys = routeKeys.filter((candidate) => candidate !== routeKey);
+        if (nextRouteKeys.length === 0) {
+          this.autoPressedSoftwareRouteKeys.delete(key);
+        } else {
+          this.autoPressedSoftwareRouteKeys.set(key, nextRouteKeys);
+        }
+        this.keyNoteOff(Date.now() - this.timePlayStart, pitch);
+      }, Math.max(durationMs, 0))
+    );
   }
 
   // Remove all feedback elements
@@ -6379,6 +6743,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       wrapLogSize: this.cursorWrapDebugEvents.length,
       realtimeLogSize: this.realtimeDebugEvents.length,
       traceLogSize: this.cursorTraceEvents.length,
+      playbackTimelineSummary: this.playbackTimeline?.summary ?? null,
+      playbackTimelineEventCount: this.playbackTimeline?.events.length ?? 0,
+      playbackTimelinePreview: this.getPlaybackTimelinePreview(),
       timedLiveCursorDebugEnabled: this.showTimedLiveCursorDebugOverlay,
       timedLiveCursorRenderState: this.timedLiveCursorRenderState,
       timedLiveCursorThresholdCount: this.timedLiveCursorThresholdMarkers.length,
@@ -6397,6 +6764,25 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         this.getTimedLiveSimulationLateConsiderationMs(),
       timedLiveSimulatedFeedbackStats: this.timedLiveSimulatedFeedbackStats,
     };
+  }
+
+  private getPlaybackTimelinePreview(): string[] {
+    const timeline = this.playbackTimeline;
+    if (!timeline) {
+      return [];
+    }
+
+    return timeline.events.slice(0, 6).map((event) => {
+      const visible = event.visibleNotes.map((note) =>
+        this.noteKeyToLabel(note.halfTone.toString())
+      );
+      const backing = event.backingNotes.map((note) =>
+        this.noteKeyToLabel(note.halfTone.toString())
+      );
+      return `m${event.measureNumber} ${this.formatScoreTimestamp(event.timestamp)} vis[${
+        visible.join(' ') || 'none'
+      }] backing[${backing.join(' ') || 'none'}]`;
+    });
   }
 
   private formatRequiredNoteSummary(): string {
@@ -6826,6 +7212,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.showRangePicker = true;
     }
     this.loopPass = 0;
+    this.refreshPlaybackTimelineDeferred();
     this.refreshTimedLiveCursorTimelineDeferred();
     this.refreshCursorDebugMarkersDeferred();
   }
@@ -6843,6 +7230,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.loopPass = 0;
     this.inputMeasure.lower = this.inputMeasureRange.lower;
     this.inputMeasure.upper = this.inputMeasureRange.upper;
+    this.refreshPlaybackTimelineDeferred();
     this.refreshTimedLiveCursorTimelineDeferred();
     this.refreshCursorDebugMarkersDeferred();
   }
@@ -6854,12 +7242,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.checkboxRepeat = true;
       this.showRangePicker = true;
       this.loopPass = 0;
+      this.refreshPlaybackTimelineDeferred();
       this.refreshTimedLiveCursorTimelineDeferred();
       this.refreshCursorDebugMarkersDeferred();
       return;
     }
 
     this.showRangePicker = true;
+    this.refreshPlaybackTimelineDeferred();
     this.refreshTimedLiveCursorTimelineDeferred();
     this.refreshCursorDebugMarkersDeferred();
   }
@@ -7109,6 +7499,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     if (!this.fileLoaded) {
       this.measureOverlays = [];
       this.incorrectFeedbackStaffGeometry.clear();
+      this.playbackTimeline = null;
       this.timedLiveCursorTimeline = null;
       this.timedLiveCursorRenderState = null;
       return;
@@ -7121,6 +7512,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     if (!sheet || !graphicSheet || !container) {
       this.measureOverlays = [];
       this.incorrectFeedbackStaffGeometry.clear();
+      this.playbackTimeline = null;
       this.timedLiveCursorTimeline = null;
       this.timedLiveCursorRenderState = null;
       return;
@@ -7300,6 +7692,724 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.timedLiveCursorRefreshTimeout = null;
       this.refreshTimedLiveCursorTimeline();
     }, 0);
+  }
+
+  private refreshPlaybackTimelineDeferred(): void {
+    if (this.playbackTimelineRefreshTimeout !== null) {
+      window.clearTimeout(this.playbackTimelineRefreshTimeout);
+    }
+
+    this.playbackTimelineRefreshTimeout = window.setTimeout(() => {
+      this.playbackTimelineRefreshTimeout = null;
+      this.refreshPlaybackTimeline();
+    }, 0);
+  }
+
+  private refreshPlaybackTimeline(): void {
+    if (!this.fileLoaded) {
+      this.playbackTimeline = null;
+      this.timedPlaybackVisibleEventIndex = -1;
+      return;
+    }
+
+    // Phase 1 keeps runtime behavior on the legacy scheduler while we build a
+    // stable score-time model beside it for inspection and later handoff.
+    if (this.running) {
+      return;
+    }
+
+    const cursor: any = this.openSheetMusicDisplay?.cursors?.[0];
+    if (!cursor) {
+      this.playbackTimeline = null;
+      this.timedPlaybackVisibleEventIndex = -1;
+      return;
+    }
+
+    this.playbackTimeline = this.buildPlaybackTimelineFromCursor(cursor);
+    this.syncTimedPlaybackVisibleEventIndexToCurrentCursor();
+    this.tracePlaybackTimelineBuild();
+  }
+
+  private buildPlaybackTimelineFromCursor(
+    cursor: any
+  ): PlaybackTimeline | null {
+    void cursor;
+    const startMeasure = this.getSourceMeasureByNumber(this.inputMeasure.lower);
+    const endMeasure = this.getSourceMeasureByNumber(this.inputMeasure.upper);
+
+    if (!startMeasure || !endMeasure) {
+      return null;
+    }
+
+    const startTimestamp = startMeasure.AbsoluteTimestamp?.RealValue;
+    const endTimestamp =
+      endMeasure.AbsoluteTimestamp?.RealValue + endMeasure.Duration?.RealValue;
+    if (!Number.isFinite(startTimestamp) || !Number.isFinite(endTimestamp)) {
+      return null;
+    }
+
+    const events = this.buildPlaybackTimelineSourceEventSeeds();
+
+    if (events.length === 0) {
+      return null;
+    }
+
+    return buildPlaybackTimeline({
+      range: {
+        lower: this.inputMeasure.lower,
+        upper: this.inputMeasure.upper,
+      },
+      startTimestamp: Number(startTimestamp),
+      endTimestamp: Number(endTimestamp),
+      events,
+    });
+  }
+
+  private buildPlaybackTimelineSourceEventSeeds(): PlaybackEventSeed[] {
+    const visibleInstrumentIndexes = new Set(
+      this.getVisibleTrackAssignmentEntries().map((entry) => entry.instrumentIndex)
+    );
+    const backingInstrumentIndexes = new Set(
+      this.getBackingTrackAssignmentEntries().map((entry) => entry.instrumentIndex)
+    );
+    const eventMap = new Map<string, PlaybackEventSeed>();
+
+    for (
+      let measureNumber = this.inputMeasure.lower;
+      measureNumber <= this.inputMeasure.upper;
+      measureNumber++
+    ) {
+      const measure = this.getSourceMeasureByNumber(measureNumber);
+      if (!measure) {
+        continue;
+      }
+
+      const measureStart = measure.AbsoluteTimestamp?.RealValue;
+      const beatLength = this.getBeatLengthInWholeNotes(measure);
+      const containers =
+        measure.VerticalSourceStaffEntryContainers ??
+        measure.verticalSourceStaffEntryContainers ??
+        [];
+      containers.forEach((container: any, containerIndex: number) => {
+        const staffEntries =
+          container?.StaffEntries ?? container?.staffEntries ?? [];
+        staffEntries.forEach((staffEntry: any, staffEntryIndex: number) => {
+          if (!staffEntry) {
+            return;
+          }
+
+          const voiceEntries =
+            staffEntry?.VoiceEntries ?? staffEntry?.voiceEntries ?? [];
+          voiceEntries.forEach((voiceEntry: any, voiceEntryIndex: number) => {
+            const notes = voiceEntry?.Notes ?? voiceEntry?.notes ?? [];
+            notes.forEach((note: any, noteIndex: number) => {
+              const timelineNote = this.buildPlaybackTimelineNoteFromSource(
+                note,
+                measure,
+                measureNumber,
+                measureStart,
+                beatLength,
+                visibleInstrumentIndexes,
+                backingInstrumentIndexes,
+                {
+                  containerIndex,
+                  staffEntryIndex,
+                  voiceEntryIndex,
+                  noteIndex,
+                }
+              );
+              if (!timelineNote) {
+                return;
+              }
+
+              const eventKey = `${timelineNote.measureNumber}:${timelineNote.timestamp.toFixed(
+                6
+              )}`;
+              const event =
+                eventMap.get(eventKey) ??
+                ({
+                  timestamp: timelineNote.timestamp,
+                  measureNumber: timelineNote.measureNumber,
+                  beatInMeasure: timelineNote.beatInMeasure,
+                  visibleNotes: [],
+                  backingNotes: [],
+                } as PlaybackEventSeed);
+              if (timelineNote.role === 'visible') {
+                event.visibleNotes.push(timelineNote);
+              } else {
+                event.backingNotes.push(timelineNote);
+              }
+              eventMap.set(eventKey, event);
+            });
+          });
+        });
+      });
+    }
+
+    return Array.from(eventMap.values()).sort((left, right) => {
+      if (left.timestamp !== right.timestamp) {
+        return left.timestamp - right.timestamp;
+      }
+
+      return left.measureNumber - right.measureNumber;
+    });
+  }
+
+  private buildPlaybackTimelineEventSeed(cursor: any): {
+    timestamp: number;
+    measureNumber: number;
+    beatInMeasure: number;
+    visibleNotes: Omit<TimelineNote, 'id' | 'eventId'>[];
+    backingNotes: Omit<TimelineNote, 'id' | 'eventId'>[];
+  } | null {
+    const timestamp = cursor?.iterator?.CurrentSourceTimestamp?.RealValue;
+    const measureNumber = cursor?.iterator?.CurrentMeasureIndex + 1;
+    const currentMeasure = cursor?.iterator?.CurrentMeasure;
+    if (
+      !Number.isFinite(timestamp) ||
+      !Number.isFinite(measureNumber) ||
+      !currentMeasure
+    ) {
+      return null;
+    }
+
+    const beatLength = this.getBeatLengthInWholeNotes(currentMeasure);
+    const measureStart = currentMeasure.AbsoluteTimestamp?.RealValue ?? timestamp;
+    const beatInMeasure =
+      Number.isFinite(beatLength) && beatLength > 0
+        ? (timestamp - measureStart) / beatLength
+        : 0;
+
+    return {
+      timestamp,
+      measureNumber,
+      beatInMeasure,
+      visibleNotes: this.buildPlaybackTimelineNotesForRole(cursor, 'visible'),
+      backingNotes: this.buildPlaybackTimelineNotesForRole(cursor, 'backing'),
+    };
+  }
+
+  private buildPlaybackTimelineNotesForRole(
+    cursor: any,
+    role: PlaybackTimelineRole
+  ): Omit<TimelineNote, 'id' | 'eventId'>[] {
+    const timestamp = cursor?.iterator?.CurrentSourceTimestamp?.RealValue;
+    const measureNumber = cursor?.iterator?.CurrentMeasureIndex + 1;
+    const currentMeasure = cursor?.iterator?.CurrentMeasure;
+    if (
+      !Number.isFinite(timestamp) ||
+      !Number.isFinite(measureNumber) ||
+      !currentMeasure
+    ) {
+      return [];
+    }
+
+    const beatLength = this.getBeatLengthInWholeNotes(currentMeasure);
+    const measureStart = currentMeasure.AbsoluteTimestamp?.RealValue ?? timestamp;
+    const beatInMeasure =
+      Number.isFinite(beatLength) && beatLength > 0
+        ? (timestamp - measureStart) / beatLength
+        : 0;
+    const notes = this.getPlaybackTimelineSourceNotesForRole(cursor, role);
+
+    return notes
+      .map((note: any) =>
+        this.buildPlaybackTimelineNote(
+          note,
+          role,
+          timestamp,
+          measureNumber,
+          beatInMeasure
+        )
+      )
+      .filter(
+        (note): note is Omit<TimelineNote, 'id' | 'eventId'> => note !== null
+      )
+      .sort((left, right) => {
+        if (left.halfTone !== right.halfTone) {
+          return left.halfTone - right.halfTone;
+        }
+
+        const staffLeft = left.staffId ?? Number.POSITIVE_INFINITY;
+        const staffRight = right.staffId ?? Number.POSITIVE_INFINITY;
+        return staffLeft - staffRight;
+      });
+  }
+
+  private getPlaybackTimelineSourceNotesForRole(
+    cursor: any,
+    role: PlaybackTimelineRole
+  ): any[] {
+    const voices =
+      role === 'visible'
+        ? cursor?.VoicesUnderCursor?.() ?? []
+        : this.getListenPlaybackInstruments().flatMap((instrument: any) => {
+            const audibleVoices =
+              cursor?.iterator?.CurrentAudibleVoiceEntries?.(instrument) ?? [];
+            return audibleVoices.length > 0
+              ? audibleVoices
+              : cursor?.VoicesUnderCursor?.(instrument) ?? [];
+          });
+    const staffSelection =
+      role === 'visible'
+        ? this.getVisiblePracticeStaffSelection()
+        : this.buildStaffSelectionFromTrackEntries(
+            this.getBackingTrackAssignmentEntries()
+          );
+    const uniqueNotes = new Set<any>();
+    const result: any[] = [];
+
+    voices.forEach((voice: any) => {
+      voice?.Notes?.forEach((note: any) => {
+        const staffId = note?.ParentStaff?.idInMusicSheet;
+        if (staffId !== undefined && !staffSelection[staffId]) {
+          return;
+        }
+        if (note?.isRest?.() === true || uniqueNotes.has(note)) {
+          return;
+        }
+
+        uniqueNotes.add(note);
+        result.push(note);
+      });
+    });
+
+    return result;
+  }
+
+  private buildPlaybackTimelineNoteFromSource(
+    note: any,
+    measure: any,
+    measureNumber: number,
+    measureStart: number | null | undefined,
+    beatLength: number,
+    visibleInstrumentIndexes: Set<number>,
+    backingInstrumentIndexes: Set<number>,
+    indexes: {
+      containerIndex: number;
+      staffEntryIndex: number;
+      voiceEntryIndex: number;
+      noteIndex: number;
+    }
+  ): Omit<TimelineNote, 'id' | 'eventId'> | null {
+    if (
+      note?.isRest?.() === true ||
+      note?.isRestFlag === true ||
+      note?.PrintObject === false ||
+      note?.IsGraceNote === true
+    ) {
+      return null;
+    }
+
+    const staffId = Number.isFinite(note?.ParentStaff?.idInMusicSheet)
+      ? Number(note.ParentStaff.idInMusicSheet)
+      : null;
+    const instrumentIndex = this.getInstrumentIndexForSourceNote(note);
+    const role = this.resolvePlaybackTimelineRoleForInstrumentIndex(
+      instrumentIndex,
+      visibleInstrumentIndexes,
+      backingInstrumentIndexes
+    );
+    if (!role) {
+      return null;
+    }
+
+    if (this.isPlaybackTimelineTieContinuation(note)) {
+      return null;
+    }
+
+    const timestamp =
+      note?.getAbsoluteTimestamp?.()?.RealValue ??
+      note?.AbsoluteTimestamp?.RealValue ??
+      note?.absoluteTimestamp?.realValue ??
+      null;
+    const halfTone = note?.halfTone;
+    if (!Number.isFinite(timestamp) || !Number.isFinite(halfTone)) {
+      return null;
+    }
+
+    const durationWholeNotes = this.getPlaybackTimelineSourceNoteSpan(note);
+    const instrumentName = this.getPlaybackTimelineInstrumentName(instrumentIndex);
+    const midiInstrumentId = this.getPlaybackTimelineMidiInstrumentId(
+      note,
+      instrumentIndex
+    );
+    const sourceNoteId =
+      this.getPlaybackTimelineSourceNoteId(note) ??
+      `src-${measureNumber}-${Number(timestamp).toFixed(6)}-${staffId ?? 'na'}-${
+        indexes.voiceEntryIndex
+      }-${Number(halfTone).toFixed(0)}-${indexes.noteIndex}`;
+    const tie = this.getPlaybackTimelineTieMetadata(note, sourceNoteId);
+    const beatInMeasure =
+      Number.isFinite(measureStart) && Number.isFinite(beatLength) && beatLength > 0
+        ? (Number(timestamp) - Number(measureStart)) / beatLength
+        : 0;
+
+    return {
+      timestamp: Number(timestamp),
+      endTimestamp: Number(timestamp) + Math.max(durationWholeNotes, 0),
+      durationWholeNotes: Math.max(durationWholeNotes, 0),
+      measureNumber,
+      beatInMeasure,
+      halfTone: Number(halfTone),
+      staffId,
+      voiceId: Number.isFinite(note?.ParentVoiceEntry?.ParentVoice?.VoiceId)
+        ? Number(note.ParentVoiceEntry.ParentVoice.VoiceId)
+        : Number.isFinite(note?.ParentVoice?.VoiceId)
+          ? Number(note.ParentVoice.VoiceId)
+          : null,
+      handAssignment: this.getPlaybackTimelineHandAssignmentForStaffId(staffId),
+      role,
+      noteId: sourceNoteId,
+      midiInstrumentId,
+      instrumentIndex,
+      instrumentName,
+      tie,
+      renderedLookupKey:
+        role === 'visible'
+          ? {
+              measureNumber,
+              timestamp: Number(timestamp),
+              halfTone: Number(halfTone),
+              staffId,
+              sourceNoteId,
+            }
+          : null,
+    };
+  }
+
+  private getInstrumentIndexForSourceNote(note: any): number | null {
+    const parentInstrument = note?.ParentStaff?.ParentInstrument;
+    const instruments = this.openSheetMusicDisplay?.Sheet?.Instruments ?? [];
+    const instrumentIndex = instruments.findIndex(
+      (instrument: any) => instrument === parentInstrument
+    );
+
+    return instrumentIndex >= 0 ? instrumentIndex : null;
+  }
+
+  private resolvePlaybackTimelineRoleForInstrumentIndex(
+    instrumentIndex: number | null,
+    visibleInstrumentIndexes: Set<number>,
+    backingInstrumentIndexes: Set<number>
+  ): PlaybackTimelineRole | null {
+    if (!Number.isFinite(instrumentIndex)) {
+      return null;
+    }
+
+    if (visibleInstrumentIndexes.has(Number(instrumentIndex))) {
+      return 'visible';
+    }
+
+    if (backingInstrumentIndexes.has(Number(instrumentIndex))) {
+      return 'backing';
+    }
+
+    return null;
+  }
+
+  private isPlaybackTimelineTieContinuation(note: any): boolean {
+    const tie = note?.NoteTie;
+    return !!tie && note !== tie?.StartNote;
+  }
+
+  private getPlaybackTimelineSourceNoteSpan(note: any): number {
+    let total = 0;
+    let current = note;
+    const visited = new Set<any>();
+
+    while (current && !visited.has(current)) {
+      visited.add(current);
+      const length = current?.Length?.RealValue;
+      if (Number.isFinite(length)) {
+        total += Number(length);
+      }
+
+      const tie = current?.NoteTie;
+      if (!tie || current !== tie?.StartNote || !tie?.StopNote) {
+        break;
+      }
+
+      current = tie.StopNote;
+    }
+
+    return total;
+  }
+
+  private getPlaybackTimelineInstrumentName(
+    instrumentIndex: number | null
+  ): string | null {
+    if (!Number.isFinite(instrumentIndex)) {
+      return null;
+    }
+
+    const instrument =
+      this.openSheetMusicDisplay?.Sheet?.Instruments?.[Number(instrumentIndex)] ?? null;
+    return instrument ? this.getTrackDisplayName(instrument, Number(instrumentIndex)) : null;
+  }
+
+  private getPlaybackTimelineMidiInstrumentId(
+    note: any,
+    instrumentIndex: number | null
+  ): number | null {
+    if (Number.isFinite(instrumentIndex)) {
+      const assignmentMidiInstrumentId = this.trackAssignmentEntries.find(
+        (entry) => entry.instrumentIndex === Number(instrumentIndex)
+      )?.midiInstrumentId;
+      if (Number.isFinite(assignmentMidiInstrumentId)) {
+        return Number(assignmentMidiInstrumentId);
+      }
+
+      const instrument =
+        this.openSheetMusicDisplay?.Sheet?.Instruments?.[Number(instrumentIndex)] ?? null;
+      const fallbackInstrumentId = [
+        instrument?.MidiInstrumentId,
+        instrument?.SubInstruments?.[0]?.midiInstrumentID,
+      ].find((value) => Number.isFinite(value));
+      if (Number.isFinite(fallbackInstrumentId)) {
+        return Number(fallbackInstrumentId);
+      }
+    }
+
+    return this.getMidiInstrumentIdForSourceNote(note);
+  }
+
+  private buildPlaybackTimelineNote(
+    note: any,
+    role: PlaybackTimelineRole,
+    timestamp: number,
+    measureNumber: number,
+    beatInMeasure: number
+  ): Omit<TimelineNote, 'id' | 'eventId'> | null {
+    const halfTone = note?.halfTone;
+    const durationWholeNotes = note?.Length?.RealValue;
+    const staffId = Number.isFinite(note?.ParentStaff?.idInMusicSheet)
+      ? Number(note.ParentStaff.idInMusicSheet)
+      : null;
+    if (!Number.isFinite(halfTone) || !Number.isFinite(durationWholeNotes)) {
+      return null;
+    }
+
+    const sourceNoteId = this.getPlaybackTimelineSourceNoteId(note);
+    const tie = this.getPlaybackTimelineTieMetadata(note, sourceNoteId);
+    const instrumentIndex = this.getInstrumentIndexForSourceNote(note);
+    const midiInstrumentId = this.getPlaybackTimelineMidiInstrumentId(
+      note,
+      instrumentIndex
+    );
+
+    return {
+      timestamp,
+      endTimestamp: timestamp + Math.max(durationWholeNotes, 0),
+      durationWholeNotes: Math.max(durationWholeNotes, 0),
+      measureNumber,
+      beatInMeasure,
+      halfTone: Number(halfTone),
+      staffId,
+      voiceId: Number.isFinite(note?.ParentVoice?.VoiceId)
+        ? Number(note.ParentVoice.VoiceId)
+        : null,
+      handAssignment: this.getPlaybackTimelineHandAssignmentForStaffId(staffId),
+      role,
+      noteId: sourceNoteId,
+      midiInstrumentId,
+      instrumentIndex,
+      instrumentName: this.getPlaybackTimelineInstrumentName(instrumentIndex),
+      tie,
+      renderedLookupKey:
+        role === 'visible'
+          ? {
+              measureNumber,
+              timestamp,
+              halfTone: Number(halfTone),
+              staffId,
+              sourceNoteId,
+            }
+          : null,
+    };
+  }
+
+  private getPlaybackTimelineSourceNoteId(note: any): string | null {
+    const candidates = [
+      note?.idString,
+      note?.sourceNoteId,
+      note?.XmlId,
+      note?.GraphicNoteId,
+    ];
+    const value = candidates.find(
+      (candidate) => typeof candidate === 'string' && candidate.trim().length > 0
+    );
+
+    return value?.trim() ?? null;
+  }
+
+  private getPlaybackTimelineTieMetadata(
+    note: any,
+    sourceNoteId: string | null
+  ): TimelineNote['tie'] {
+    const tie = note?.NoteTie;
+    const tieIdCandidate = tie?.TieNumber ?? tie?.tieNumber ?? sourceNoteId;
+    const tieId =
+      tieIdCandidate !== undefined && tieIdCandidate !== null
+        ? String(tieIdCandidate)
+        : null;
+
+    return {
+      tieId,
+      isStart: !!tie && note === tie?.StartNote,
+      isStop: !!tie && note === tie?.StopNote,
+      isContinuation: !!tie && note !== tie?.StartNote,
+    };
+  }
+
+  private getPlaybackTimelineHandAssignmentForStaffId(
+    staffId: number | null
+  ): PlaybackTimelineHandAssignment {
+    if (!Number.isFinite(staffId)) {
+      return 'unassigned';
+    }
+
+    const leftSelection = this.getHandStaffSelection('left');
+    const rightSelection = this.getHandStaffSelection('right');
+    const inLeft = !!leftSelection[Number(staffId)];
+    const inRight = !!rightSelection[Number(staffId)];
+
+    if (inLeft && inRight) {
+      return 'both';
+    }
+    if (inLeft) {
+      return 'left';
+    }
+    if (inRight) {
+      return 'right';
+    }
+
+    return 'unassigned';
+  }
+
+  private getNextPlaybackTimelineEventAfter(
+    currentTimestamp: number,
+    role: PlaybackTimelineRole
+  ): PlaybackEvent | null {
+    const timeline = this.playbackTimeline;
+    if (!timeline || !Number.isFinite(currentTimestamp)) {
+      return null;
+    }
+
+    const timestampEpsilon = 1e-7;
+    return (
+      timeline.events.find((event) => {
+        if (event.timestamp <= currentTimestamp + timestampEpsilon) {
+          return false;
+        }
+
+        return role === 'visible'
+          ? event.visibleNotes.length > 0
+          : event.backingNotes.length > 0;
+      }) ?? null
+    );
+  }
+
+  private getTimedPlaybackVisibleEvents(): PlaybackEvent[] {
+    const timeline = this.playbackTimeline;
+    if (!timeline) {
+      return [];
+    }
+
+    return timeline.events.filter((event) => event.visibleNotes.length > 0);
+  }
+
+  private syncTimedPlaybackVisibleEventIndexToCurrentCursor(): void {
+    const currentTimestamp =
+      this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentSourceTimestamp
+        ?.RealValue ?? NaN;
+    if (!Number.isFinite(currentTimestamp)) {
+      this.timedPlaybackVisibleEventIndex = -1;
+      return;
+    }
+
+    const visibleEvents = this.getTimedPlaybackVisibleEvents();
+    const timestampEpsilon = 1e-7;
+    let index = -1;
+    visibleEvents.forEach((event, eventIndex) => {
+      if (event.timestamp <= currentTimestamp + timestampEpsilon) {
+        index = eventIndex;
+      }
+    });
+    this.timedPlaybackVisibleEventIndex = index;
+  }
+
+  private getNextTimedPlaybackVisibleEvent(): PlaybackEvent | null {
+    const visibleEvents = this.getTimedPlaybackVisibleEvents();
+    const nextIndex = this.timedPlaybackVisibleEventIndex + 1;
+    if (nextIndex < 0 || nextIndex >= visibleEvents.length) {
+      return null;
+    }
+
+    return visibleEvents[nextIndex] ?? null;
+  }
+
+  private getTimedPlaybackTimelineEndTimestamp(): number | null {
+    return this.playbackTimeline?.endTimestamp ?? null;
+  }
+
+  private markTimedPlaybackVisibleEventReached(target: PlaybackEvent): void {
+    const visibleEvents = this.getTimedPlaybackVisibleEvents();
+    const index = visibleEvents.findIndex((event) => event.id === target.id);
+    this.timedPlaybackVisibleEventIndex = index;
+  }
+
+  private timedPlaybackAtVisibleTimelineEnd(): boolean {
+    return this.getNextTimedPlaybackVisibleEvent() === null;
+  }
+
+  private tracePlaybackTimelineBuild(): void {
+    if (!this.playbackTraceEnabled) {
+      return;
+    }
+
+    const timeline = this.playbackTimeline;
+    if (!timeline) {
+      this.appendPlaybackTraceEvent('timeline unavailable');
+      return;
+    }
+
+    const firstVisibleEvent =
+      timeline.events.find((event) => event.visibleNotes.length > 0) ?? null;
+    const firstBackingEvent =
+      timeline.events.find((event) => event.backingNotes.length > 0) ?? null;
+    this.appendPlaybackTraceEvent(
+      `timeline build m${timeline.range.lower}-${timeline.range.upper} events ${timeline.events.length} vis ${timeline.summary.visibleEventCount}/${timeline.summary.visibleNoteCount} backing ${timeline.summary.backingEventCount}/${timeline.summary.backingNoteCount} firstVis ${firstVisibleEvent ? this.formatScoreTimestamp(firstVisibleEvent.timestamp) : 'none'} firstBacking ${firstBackingEvent ? this.formatScoreTimestamp(firstBackingEvent.timestamp) : 'none'}`
+    );
+    timeline.events.slice(0, 16).forEach((event) => {
+      this.appendPlaybackTraceEvent(
+        `timeline event ${this.formatScoreTimestamp(event.timestamp)} vis[${
+          this.formatPlaybackTimelineNotesForTrace(event.visibleNotes)
+        }] backing[${this.formatPlaybackTimelineNotesForTrace(event.backingNotes)}]`
+      );
+    });
+  }
+
+  private formatPlaybackTimelineNotesForTrace(notes: TimelineNote[]): string {
+    if (notes.length === 0) {
+      return 'none';
+    }
+
+    return notes
+      .map((note) => {
+        const pitch = this.noteKeyToLabel(note.halfTone.toString());
+        const instrumentIndex = Number.isFinite(note.instrumentIndex)
+          ? `p${note.instrumentIndex}`
+          : 'p?';
+        const instrumentName = note.instrumentName ?? 'unknown';
+        const tieLabel = note.tie.isStart
+          ? 'start'
+          : note.tie.isContinuation
+            ? 'cont'
+            : 'single';
+        return `${pitch}/${note.role}/${instrumentIndex}/${instrumentName}/${tieLabel}`;
+      })
+      .join(' ');
   }
 
   private refreshTimedLiveCursorTimeline(): void {
@@ -10834,6 +11944,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
+    if (this.playbackTimeline) {
+      this.playComputerTimelineNotes(audioTime);
+      return;
+    }
+
     this.computerNotesService.playRequiredNotes(
       (note, velocity, noteObj) => {
         const key = (note - 12).toFixed();
@@ -10859,6 +11974,153 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           midiInstrumentId
         );
       }
+    );
+  }
+
+  private playComputerTimelineNotes(audioTime?: number): void {
+    const currentTimestamp = this.getCurrentPracticeTimestamp();
+    const eventsAtTimestamp = this.getPlaybackTimelineEventsAtTimestamp(
+      currentTimestamp
+    );
+    if (eventsAtTimestamp.length === 0) {
+      if (this.playbackTraceEnabled) {
+        this.appendPlaybackTraceEvent(
+          `computer timeline play none ${this.formatScoreTimestamp(currentTimestamp)}`
+        );
+      }
+      return;
+    }
+
+    const visibleNotes = eventsAtTimestamp
+      .flatMap((event) => event.visibleNotes)
+      .filter((note) => this.shouldPlayComputerTimelineVisibleNote(note));
+    const backingNotes = this.checkboxBackingTrack
+      ? eventsAtTimestamp.flatMap((event) => event.backingNotes)
+      : [];
+    const playableVisibleNotes = visibleNotes.filter(
+      (note) => !note.tie.isContinuation || note.tie.isStart
+    );
+    const playableBackingNotes = backingNotes.filter(
+      (note) => !note.tie.isContinuation || note.tie.isStart
+    );
+
+    if (this.playbackTraceEnabled) {
+      this.appendPlaybackTraceEvent(
+        `computer timeline play ${this.formatScoreTimestamp(currentTimestamp)} vis[${
+          this.formatPlaybackTimelineNotesForTrace(playableVisibleNotes)
+        }] backing[${this.formatPlaybackTimelineNotesForTrace(playableBackingNotes)}]`
+      );
+    }
+
+    playableVisibleNotes.forEach((note) =>
+      this.scheduleComputerPlaybackTimelineNote(note, audioTime)
+    );
+    playableBackingNotes.forEach((note) =>
+      this.scheduleComputerPlaybackTimelineNote(note, audioTime)
+    );
+  }
+
+  private shouldPlayComputerTimelineVisibleNote(note: TimelineNote): boolean {
+    if (note.handAssignment === 'left') {
+      return this.handEnabled.left;
+    }
+
+    if (note.handAssignment === 'right') {
+      return this.handEnabled.right;
+    }
+
+    return this.handEnabled.left || this.handEnabled.right;
+  }
+
+  private syncComputerNotesServiceToTimeline(timestamp: number): void {
+    const nextNotes = this.getComputerTimelineNotesAtTimestamp(timestamp);
+    const required = this.computerNotesService.getMapRequired();
+    const previous = this.computerNotesService.getMapPrevRequired();
+    const nextRequired = new Map<string, NoteObject>();
+
+    previous.clear();
+    required.forEach((noteObj, key) => {
+      previous.set(key, { ...noteObj });
+    });
+
+    nextNotes.forEach((note) => {
+      const key = note.halfTone.toFixed();
+      const existing = nextRequired.get(key);
+      const previousValue = required.get(key)?.value ?? 0;
+      const nextNoteObject: NoteObject = {
+        value: required.has(key) ? previousValue + 1 : 0,
+        key,
+        timestamp: note.endTimestamp,
+        staffId: Number.isFinite(note.staffId) ? Number(note.staffId) : -1,
+        voice: Number.isFinite(note.voiceId) ? Number(note.voiceId) : -1,
+        fingering: '',
+        isGrace: false,
+        midiInstrumentId: note.midiInstrumentId,
+      };
+
+      if (!existing) {
+        nextRequired.set(key, nextNoteObject);
+        return;
+      }
+
+      nextRequired.set(key, {
+        ...existing,
+        timestamp: Math.max(existing.timestamp, nextNoteObject.timestamp),
+        value: Math.min(existing.value, nextNoteObject.value),
+        midiInstrumentId: existing.midiInstrumentId ?? nextNoteObject.midiInstrumentId,
+      });
+    });
+
+    required.clear();
+    nextRequired.forEach((noteObj, key) => {
+      required.set(key, noteObj);
+    });
+  }
+
+  private getComputerTimelineNotesAtTimestamp(timestamp: number): TimelineNote[] {
+    const eventsAtTimestamp = this.getPlaybackTimelineEventsAtTimestamp(timestamp);
+    const visibleNotes = eventsAtTimestamp
+      .flatMap((event) => event.visibleNotes)
+      .filter((note) => this.shouldPlayComputerTimelineVisibleNote(note));
+    const backingNotes = this.checkboxBackingTrack
+      ? eventsAtTimestamp.flatMap((event) => event.backingNotes)
+      : [];
+
+    return [...visibleNotes, ...backingNotes].filter(
+      (note) => !note.tie.isContinuation || note.tie.isStart
+    );
+  }
+
+  private scheduleComputerPlaybackTimelineNote(
+    note: TimelineNote,
+    audioTime?: number
+  ): void {
+    const pitch = note.halfTone + 12;
+    if (!Number.isFinite(pitch) || pitch < 0 || pitch > 127) {
+      return;
+    }
+
+    const durationMs = this.getPlaybackDelayMs(
+      Math.max(note.durationWholeNotes, 1 / 32)
+    );
+    const midiInstrumentId = note.midiInstrumentId;
+    const key = note.halfTone.toFixed();
+
+    this.computerPressedNotes.set(key, 1);
+    this.computerNotesService.press(key);
+    this.keyPressNoteInternal(pitch, 60, audioTime, false, midiInstrumentId);
+
+    const releaseAudioTime =
+      typeof audioTime === 'number' && Number.isFinite(audioTime)
+        ? audioTime + durationMs / 1000
+        : undefined;
+
+    this.timeouts.push(
+      setTimeout(() => {
+        this.computerPressedNotes.delete(key);
+        this.computerNotesService.release(key);
+        this.keyReleaseNoteInternal(pitch, releaseAudioTime, false, midiInstrumentId);
+      }, Math.max(durationMs, 0))
     );
   }
 
