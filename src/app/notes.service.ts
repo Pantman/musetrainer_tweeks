@@ -53,6 +53,36 @@ export class NotesService {
     this.mapPressed.delete(name);
   }
 
+  private mergeRequiredNote(
+    noteString: string,
+    noteObj: NoteObject,
+    isFreshAttack: boolean
+  ): void {
+    const existing = this.mapRequired.get(noteString);
+    if (!existing) {
+      this.mapRequired.set(noteString, {
+        ...noteObj,
+        value: isFreshAttack ? 0 : 1,
+      });
+      return;
+    }
+
+    // Multi-track playback can legitimately produce the same pitch from more
+    // than one track at the same cursor timestamp. When that happens, the
+    // pitch should stay active until the latest matching note ends, rather
+    // than letting a shorter backing-track note overwrite and truncate a
+    // longer foreground note. We therefore merge duplicate pitch entries by
+    // keeping the furthest end timestamp and the "freshest" attack state.
+    this.mapRequired.set(noteString, {
+      ...existing,
+      ...noteObj,
+      timestamp: Math.max(existing.timestamp, noteObj.timestamp),
+      value: Math.min(existing.value, isFreshAttack ? 0 : 1),
+      midiInstrumentId:
+        existing.midiInstrumentId ?? noteObj.midiInstrumentId,
+    });
+  }
+
   // Check that new notes have been pressed since the last succesful check (value===1)
   private isNewRequiredNotesPressed(): boolean {
     for (const [, noteObj] of this.mapRequired) {
@@ -160,17 +190,12 @@ export class NotesService {
             };
 
             // In case of tie, check that it is a start note
-            if (
+            this.mergeRequiredNote(
+              noteString,
+              noteObj,
               typeof value.NoteTie === 'undefined' ||
-              value === value.NoteTie.StartNote
-            ) {
-              this.mapRequired.set(noteString, noteObj);
-            } else {
-              this.mapRequired.set(noteString, {
-                ...noteObj,
-                value: 1,
-              });
-            }
+                value === value.NoteTie.StartNote
+            );
           }
         }
       });

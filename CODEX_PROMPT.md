@@ -317,6 +317,58 @@ The dev server may need elevated permissions in this environment to bind to port
 The root `tsconfig.json` was narrowed to avoid VS Code indexing transient build outputs such as `www/*`.
 Be cautious about broadening it again unless you also handle editor noise.
 
+### 7. Playback timeline refactor is the next architectural step
+
+The current multi-track/backing-track timing work exposed an architectural weakness:
+
+- autoplay timing is still too dependent on OSMD cursor iteration
+- visible-practice timing and backing-track timing are still partially coupled
+- tactical scheduler filtering improved some measures but remains fragile,
+  especially around ties and mixed visible/backing content
+
+The next session should strongly consider replacing cursor-step-driven timed
+playback with an explicit score-derived playback timeline.
+
+The intended model is:
+
+- one shared score timeline with stable event/note identities
+- a visible/practice view of that timeline for:
+  - green cursor timing
+  - visible autoplay timing
+  - human note matching/classification
+- a backing view of that same timeline for:
+  - backing audio only
+
+Important architectural rule:
+
+- backing tracks may contribute audio, but they must not decide when the main
+  timed transport advances
+
+Recommended first phase:
+
+- introduce timeline types such as `PlaybackEvent` / `TimelineNote`
+- build them from score data after load, reroute, or range change
+- log/inspect them beside the current cursor-based behavior before swapping
+  over live logic
+
+Expected benefits:
+
+- more reliable multi-track timing
+- stable note identities for hit/early/late/missed/mistake classification
+- simpler note-coloring and scorecard bookkeeping
+- cleaner separation between score-time truth and rendered-position truth
+
+Current checkpoint status before that refactor:
+
+- multi-track hand routing and backing playback exist
+- playback trace tooling exists in the timed debug panel
+- a first scheduler split now tries to advance timed playback on visible score
+  content rather than backing-only content
+- that split improved measure 25 in a known repro, but measure 26 is still not
+  fully correct
+- treat the current scheduler filtering as a tactical bridge, not the target
+  architecture
+
 ## Working Rules For Future Codex Sessions
 
 - Read the relevant cursor/feedback sections before editing.

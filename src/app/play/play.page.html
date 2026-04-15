@@ -258,6 +258,20 @@
           />
           <span>auto-run stats</span>
         </label>
+        <label class="realtime-debug-panel__control">
+          <input
+            type="checkbox"
+            [(ngModel)]="playbackTraceEnabled"
+          />
+          <span>playback trace</span>
+        </label>
+        <button
+          type="button"
+          class="completion-dialog__button"
+          (click)="clearPlaybackTraceEvents()"
+        >
+          clear trace
+        </button>
         <label class="realtime-debug-panel__control realtime-debug-panel__control--stacked">
           <span>congrats bars</span>
           <input
@@ -328,6 +342,10 @@
         </label>
       </div>
       <div *ngFor="let line of getTimedLiveCursorDebugSummaryLines()">{{ line }}</div>
+      <div class="realtime-debug-panel__events" *ngIf="playbackTraceEvents.length">
+        <div>playback trace</div>
+        <div *ngFor="let event of playbackTraceEvents">{{ event }}</div>
+      </div>
     </div>
 
     <div

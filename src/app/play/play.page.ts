@@ -121,6 +121,7 @@ interface IncorrectPitchSpelling {
 }
 
 interface ActiveSoftwareOutputRoute {
+  groupKey: string;
   profile: SoftwareInstrumentProfile;
   pitch: number;
 }
@@ -463,7 +464,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.14.2';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.14.10';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -573,10 +574,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   >();
   private activeSoftwareOutputCounts = new Map<string, number>();
   private activeSoftwareOutputRoutes = new Map<string, ActiveSoftwareOutputRoute>();
+  private softwareOutputRouteInstanceSeed = 0;
   private monitoredMidiInputCounts = new Map<number, number>();
   private monitoredMidiInputInstruments = new Map<number, number | null>();
   private monitoredMidiInputRouteKeys = new Map<number, string | null>();
-  private autoPressedSoftwareRouteKeys = new Map<string, string | null>();
+  private autoPressedSoftwareRouteKeys = new Map<string, string[]>();
   computerPressedNotes = new Map<string, number>();
   computerNotesService: NotesService;
   private correctNoteheadElements = new Map<string, HTMLElement>();
@@ -602,6 +604,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   showCursorWrapDebugOverlay: boolean = false;
   showTimedLiveCursorDebugOverlay: boolean = false;
   cursorWrapDebugEvents: string[] = [];
+  playbackTraceEvents: string[] = [];
+  playbackTraceEnabled: boolean = false;
   cursorWrapDebugSnapshot: CursorWrapDebugSnapshot | null = null;
   private cursorDebugRefreshTimeout: number | null = null;
   timedLiveCursorTimeline: TimedLiveCursorTimeline | null = null;
@@ -1102,17 +1106,18 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     midiInstrumentId: number | null = null
   ): string | null {
     const profile = this.getSoftwareInstrumentProfile(midiInstrumentId);
-    const routeKey = this.getProfileOutputRouteKey(pitch, profile);
-    const nextCount = (this.activeSoftwareOutputCounts.get(routeKey) ?? 0) + 1;
-    this.activeSoftwareOutputCounts.set(routeKey, nextCount);
-    if (nextCount > 1) {
-      return routeKey;
-    }
-
+    const groupKey = this.getProfileOutputRouteKey(pitch, profile);
+    const routeKey = `${groupKey}#${++this.softwareOutputRouteInstanceSeed}`;
+    const nextCount = (this.activeSoftwareOutputCounts.get(groupKey) ?? 0) + 1;
+    this.activeSoftwareOutputCounts.set(groupKey, nextCount);
     this.activeSoftwareOutputRoutes.set(routeKey, {
+      groupKey,
       profile,
       pitch,
     });
+    if (nextCount > 1) {
+      return routeKey;
+    }
     if (profile === 'piano') {
       this.piano?.keyDown({
         midi: pitch,
@@ -1144,7 +1149,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     if (Number.isFinite(midiInstrumentId)) {
-      this.releaseSoftwareNoteRoute(
+      this.releaseSoftwareNoteGroup(
         this.getProfileOutputRouteKey(
           pitch,
           this.getSoftwareInstrumentProfile(midiInstrumentId)
@@ -1154,23 +1159,75 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    const pitchKeySuffix = `:${pitch}`;
-    Array.from(this.activeSoftwareOutputRoutes.keys())
-      .filter((key) => key.endsWith(pitchKeySuffix))
-      .forEach((activeRouteKey) =>
-        this.releaseSoftwareNoteRoute(activeRouteKey, audioTime)
-      );
+    Array.from(this.activeSoftwareOutputRoutes.entries())
+      .filter(([, route]) => route.pitch === pitch)
+      .forEach(([activeRouteKey]) => this.releaseSoftwareNoteRoute(activeRouteKey, audioTime));
+  }
+
+  private trackAutoPressedSoftwareRoute(
+    key: string,
+    routeKey: string | null
+  ): void {
+    if (!routeKey) {
+      return;
+    }
+
+    const routeKeys = this.autoPressedSoftwareRouteKeys.get(key) ?? [];
+    routeKeys.push(routeKey);
+    this.autoPressedSoftwareRouteKeys.set(key, routeKeys);
+  }
+
+  private takeAutoPressedSoftwareRoute(
+    key: string,
+    pitch: number,
+    midiInstrumentId: number | null
+  ): string | null {
+    const routeKeys = this.autoPressedSoftwareRouteKeys.get(key) ?? [];
+    if (routeKeys.length === 0) {
+      return null;
+    }
+
+    const expectedRouteKey = Number.isFinite(midiInstrumentId)
+      ? this.getProfileOutputRouteKey(
+          pitch,
+          this.getSoftwareInstrumentProfile(midiInstrumentId)
+        )
+      : null;
+    const routeIndex =
+      expectedRouteKey !== null
+        ? routeKeys.findIndex((routeKey) => routeKey.startsWith(`${expectedRouteKey}#`))
+        : 0;
+
+    if (routeIndex < 0) {
+      const routeKey = routeKeys.shift() ?? null;
+      if (routeKeys.length === 0) {
+        this.autoPressedSoftwareRouteKeys.delete(key);
+      } else {
+        this.autoPressedSoftwareRouteKeys.set(key, routeKeys);
+      }
+      return routeKey;
+    }
+
+    const [routeKey] = routeKeys.splice(routeIndex, 1);
+    if (routeKeys.length === 0) {
+      this.autoPressedSoftwareRouteKeys.delete(key);
+    } else {
+      this.autoPressedSoftwareRouteKeys.set(key, routeKeys);
+    }
+
+    return routeKey ?? null;
   }
 
   private releaseSoftwareNoteRoute(routeKey: string, audioTime?: number): void {
-    const currentCount = this.activeSoftwareOutputCounts.get(routeKey) ?? 0;
+    const route = this.activeSoftwareOutputRoutes.get(routeKey);
+    if (!route) {
+      return;
+    }
+
+    const currentCount = this.activeSoftwareOutputCounts.get(route.groupKey) ?? 0;
     if (currentCount <= 1) {
-      this.activeSoftwareOutputCounts.delete(routeKey);
-      const route = this.activeSoftwareOutputRoutes.get(routeKey);
+      this.activeSoftwareOutputCounts.delete(route.groupKey);
       this.activeSoftwareOutputRoutes.delete(routeKey);
-      if (!route) {
-        return;
-      }
 
       if (route.profile === 'piano') {
         this.piano?.keyUp({ midi: route.pitch, time: audioTime });
@@ -1183,7 +1240,22 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    this.activeSoftwareOutputCounts.set(routeKey, currentCount - 1);
+    this.activeSoftwareOutputCounts.set(route.groupKey, currentCount - 1);
+    this.activeSoftwareOutputRoutes.delete(routeKey);
+  }
+
+  private releaseSoftwareNoteGroup(groupKey: string, audioTime?: number): void {
+    const matchingRoutes = Array.from(this.activeSoftwareOutputRoutes.entries())
+      .filter(([, route]) => route.groupKey === groupKey)
+      .map(([routeKey]) => routeKey);
+
+    if (matchingRoutes.length === 0) {
+      return;
+    }
+
+    matchingRoutes.forEach((routeKey) =>
+      this.releaseSoftwareNoteRoute(routeKey, audioTime)
+    );
   }
 
   private getMidiInstrumentIdForNoteObject(
@@ -2774,7 +2846,24 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     // Required to stop next calls if stop is pressed during play
     if (!this.running) return;
 
-    if (!this.osmdEndReached(1)) this.osmdCursorMoveNext(1);
+    if (!this.osmdEndReached(1)) {
+      if (this.isTimedTransportMode()) {
+        this.advanceTempoCursorToNextScheduledStep();
+      } else {
+        this.osmdCursorMoveNext(1);
+      }
+    }
+
+    if (this.listenMode) {
+      // Timed autoplay needs the visible play cursor to advance over the same
+      // visible score steps as the hidden scheduler cursor. Otherwise the
+      // required-note map remains on the old step and the currently sounding
+      // notes never release.
+      this.advancePlayCursorToNextScheduledTimedStep();
+      this.rebuildCurrentPlaybackStepState();
+      this.alignOrAnimatePlayCursorAfterAdvance();
+    }
+
     const currentTimestamp =
       this.openSheetMusicDisplay.cursors[1].iterator.CurrentSourceTimestamp
         .RealValue;
@@ -2842,12 +2931,20 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     } else {
       // Move to Next
       const iter = this.openSheetMusicDisplay.cursors[1].iterator;
-      const it2 = this.openSheetMusicDisplay.cursors[1].iterator.clone();
-      it2.moveToNext();
-      nextTimestamp = it2.CurrentSourceTimestamp.RealValue;
-      timeout = this.getPlaybackDelayMs(
-        nextTimestamp - iter.CurrentSourceTimestamp.RealValue
-      );
+      const nextScheduledTimestamp = this.getNextScheduledPlaybackTimestamp(1);
+      if (nextScheduledTimestamp === null) {
+        nextTimestamp =
+          iter.CurrentMeasure.AbsoluteTimestamp.RealValue +
+          iter.CurrentMeasure.Duration.RealValue;
+        timeout = this.getPlaybackDelayMs(
+          nextTimestamp - iter.CurrentSourceTimestamp.RealValue
+        );
+      } else {
+        nextTimestamp = nextScheduledTimestamp;
+        timeout = this.getPlaybackDelayMs(
+          nextTimestamp - iter.CurrentSourceTimestamp.RealValue
+        );
+      }
 
       // On repeat sign, manually calculate
       if (timeout < 0) {
@@ -2861,7 +2958,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         );
       }
 
-      const nextMeasureNumber = (it2.CurrentMeasureIndex ?? -1) + 1;
+      const nextMeasureNumber =
+        nextScheduledTimestamp === null
+          ? (iter.CurrentMeasureIndex ?? -1) + 2
+          : (this.getNextScheduledPlaybackMeasureNumber(1) ??
+            (iter.CurrentMeasureIndex ?? -1) + 2);
       if (
         this.listenMode &&
         this.shouldShowCompletedRunSummary() &&
@@ -2972,11 +3073,22 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   // should rebuild required notes, practice targets, tempo, and realtime state here.
   private rebuildCurrentPlaybackStepState(back = false): void {
     const practiceSelection = this.getPracticeStaffSelection();
+    const measureNumber =
+      (this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasureIndex ?? -1) + 1;
+    const scoreTimestamp =
+      this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentSourceTimestamp
+        ?.RealValue ?? null;
     this.notesService.calculateRequired(
       this.openSheetMusicDisplay.cursors[0],
       this.realtimeMode ? practiceSelection : this.getListenPlaybackStaffSelection(),
       back,
       this.realtimeMode ? null : this.getListenPlaybackInstruments()
+    );
+    this.tracePlaybackStepState(
+      this.realtimeMode ? 'practice step' : 'listen step',
+      this.notesService,
+      measureNumber,
+      scoreTimestamp
     );
 
     if (this.realtimeMode) {
@@ -2997,6 +3109,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         this.getComputerStaffSelection(),
         back,
         this.getTrackEntryInstruments(this.getBackingTrackAssignmentEntries())
+      );
+      this.tracePlaybackStepState(
+        'computer step',
+        this.computerNotesService,
+        measureNumber,
+        scoreTimestamp
       );
       this.tempoInBPM = this.resolveRealtimeTempo();
       const hasCurrentRequiredPressKeys = this.hasCurrentRequiredPressKeys();
@@ -3024,8 +3142,17 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.correctlyHeldPracticeKeys.clear();
 
     Array.from(this.mapNotesAutoPressed.keys()).forEach((key) => {
+      const pitch = parseInt(key) + 12;
+      const routeKeys = this.autoPressedSoftwareRouteKeys.get(key) ?? [];
+      if (routeKeys.length > 0) {
+        routeKeys.forEach((routeKey) =>
+          this.sendOutputNoteOff(pitch, undefined, null, routeKey)
+        );
+        return;
+      }
+
       this.keyReleaseNoteInternal(
-        parseInt(key) + 12,
+        pitch,
         undefined,
         false,
         this.autoPressedMidiInstrumentIds.get(key) ?? null
@@ -3050,6 +3177,153 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     if (this.isTimedTransportMode()) {
       cursor1.hide();
     }
+  }
+
+  private getScheduledPlaybackStaffSelection(): Record<number, boolean> {
+    // Timed transport should follow only the visible hand-mapped score path.
+    // Backing tracks may add audio inside those intervals, but they must never
+    // create extra scheduler ticks or pull visible playback earlier.
+    return this.getVisiblePracticeStaffSelection();
+  }
+
+  private createIteratorCursorLike(iterator: any): any {
+    return {
+      iterator,
+      VoicesUnderCursor: () =>
+        iterator?.CurrentVisibleVoiceEntries?.() ??
+        iterator?.CurrentVoiceEntries?.() ??
+        [],
+    };
+  }
+
+  private cursorStepHasVisiblePlaybackNote(
+    cursorLike: any,
+    staffIdEnabled: Record<number, boolean>
+  ): boolean {
+    const voices = cursorLike?.VoicesUnderCursor?.() ?? [];
+
+    for (const voice of voices) {
+      for (const note of voice?.Notes ?? []) {
+        const staffId = note?.ParentStaff?.idInMusicSheet;
+        if (
+          staffId !== undefined &&
+          !staffIdEnabled[staffId]
+        ) {
+          continue;
+        }
+
+        if (note?.isRest?.() === true) {
+          continue;
+        }
+
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private moveIteratorToNextScheduledPlaybackStep(
+    iterator: any,
+    cursorId: number
+  ): void {
+    if (cursorId === 1 && this.isTimedTransportMode()) {
+      const scheduledSelection = this.getScheduledPlaybackStaffSelection();
+      const iteratorCursorLike = this.createIteratorCursorLike(iterator);
+
+      do {
+        iterator?.moveToNext?.();
+        if (
+          !iterator ||
+          iterator.EndReached ||
+          this.inputMeasure.upper < (iterator.CurrentMeasureIndex ?? -1) + 1
+        ) {
+          return;
+        }
+      } while (
+        !this.cursorStepHasVisiblePlaybackNote(
+          iteratorCursorLike,
+          scheduledSelection
+        )
+      );
+      return;
+    }
+
+    iterator?.moveToNext?.();
+  }
+
+  private getNextScheduledPlaybackTimestamp(cursorId: number): number | null {
+    const cursor = this.openSheetMusicDisplay?.cursors?.[cursorId];
+    const iterator = cursor?.iterator?.clone?.();
+    if (!iterator) {
+      return null;
+    }
+
+    this.moveIteratorToNextScheduledPlaybackStep(iterator, cursorId);
+    if (
+      iterator.EndReached ||
+      this.inputMeasure.upper < (iterator.CurrentMeasureIndex ?? -1) + 1
+    ) {
+      return null;
+    }
+
+    return iterator.CurrentSourceTimestamp?.RealValue ?? null;
+  }
+
+  private getNextScheduledPlaybackMeasureNumber(cursorId: number): number | null {
+    const cursor = this.openSheetMusicDisplay?.cursors?.[cursorId];
+    const iterator = cursor?.iterator?.clone?.();
+    if (!iterator) {
+      return null;
+    }
+
+    this.moveIteratorToNextScheduledPlaybackStep(iterator, cursorId);
+    if (
+      iterator.EndReached ||
+      this.inputMeasure.upper < (iterator.CurrentMeasureIndex ?? -1) + 1
+    ) {
+      return null;
+    }
+
+    return (iterator.CurrentMeasureIndex ?? -1) + 1;
+  }
+
+  private advanceTempoCursorToNextScheduledStep(): boolean {
+    const cursor: any = this.openSheetMusicDisplay?.cursors?.[1];
+    const iterator = cursor?.iterator;
+    if (!cursor || !iterator) {
+      return false;
+    }
+
+    this.moveIteratorToNextScheduledPlaybackStep(iterator, 1);
+    if (
+      iterator.EndReached ||
+      this.inputMeasure.upper < (iterator.CurrentMeasureIndex ?? -1) + 1
+    ) {
+      return false;
+    }
+
+    cursor.update?.();
+    if (this.listenMode) {
+      cursor.hide?.();
+    }
+    return true;
+  }
+
+  private advancePlayCursorToNextScheduledTimedStep(): boolean {
+    const cursor = this.openSheetMusicDisplay?.cursors?.[0];
+    const scheduledSelection = this.getScheduledPlaybackStaffSelection();
+    if (!cursor) {
+      return false;
+    }
+
+    while (this.moveToNextPlayCursorStep(false)) {
+      if (this.cursorStepHasVisiblePlaybackNote(cursor, scheduledSelection)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   private positionCursorsForPlaybackStart(
@@ -3218,8 +3492,17 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       });
     });
     for (const [key] of this.mapNotesAutoPressed) {
+      const pitch = parseInt(key) + 12;
+      const routeKeys = this.autoPressedSoftwareRouteKeys.get(key) ?? [];
+      if (routeKeys.length > 0) {
+        routeKeys.forEach((routeKey) =>
+          this.sendOutputNoteOff(pitch, undefined, null, routeKey)
+        );
+        continue;
+      }
+
       this.keyReleaseNote(
-        parseInt(key) + 12,
+        pitch,
         undefined,
         this.autoPressedMidiInstrumentIds.get(key) ?? null
       );
@@ -3379,9 +3662,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.playComputerNotes(audioTime);
     }
 
-    const it2 = this.openSheetMusicDisplay.cursors[0].iterator.clone();
-    it2.moveToNext();
-    const nextTimestamp = it2.CurrentSourceTimestamp.RealValue;
+    const nextTimestamp =
+      this.getNextScheduledPlaybackTimestamp(1) ??
+      this.getNextRawCursorTimestamp(this.openSheetMusicDisplay.cursors[1]) ??
+      this.getNextRawCursorTimestamp(this.openSheetMusicDisplay.cursors[0]) ??
+      this.playbackStartScoreTimestamp;
     this.appendCursorWrapDebugEvent(
       `${
         this.isLoopRestartStart(startContext) ? 'restart' : 'start'
@@ -5853,6 +6138,64 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private appendCursorWrapDebugEvent(message: string): void {
     this.cursorWrapDebugEvents.unshift(message);
     this.relayDebugEvent('wrap', message);
+  }
+
+  private shouldLogPlaybackTraceForMeasure(
+    measureNumber: number | null | undefined
+  ): boolean {
+    if (!this.playbackTraceEnabled || !Number.isFinite(measureNumber)) {
+      return false;
+    }
+
+    return (
+      Number(measureNumber) >= this.inputMeasure.lower &&
+      Number(measureNumber) <= this.inputMeasure.upper
+    );
+  }
+
+  private appendPlaybackTraceEvent(message: string): void {
+    if (!this.playbackTraceEnabled) {
+      return;
+    }
+
+    this.playbackTraceEvents.unshift(message);
+    if (this.playbackTraceEvents.length > 120) {
+      this.playbackTraceEvents.pop();
+    }
+    this.relayDebugEvent('trace', message);
+    console.debug(`[playback-trace] ${message}`);
+  }
+
+  clearPlaybackTraceEvents(): void {
+    this.playbackTraceEvents = [];
+  }
+
+  private tracePlaybackStepState(
+    label: string,
+    notesService: NotesService,
+    measureNumber: number | null | undefined,
+    scoreTimestamp: number | null | undefined
+  ): void {
+    if (!this.shouldLogPlaybackTraceForMeasure(measureNumber)) {
+      return;
+    }
+
+    const notes = Array.from(notesService.getMapRequired().values())
+      .map((note) => {
+        const pitch = this.noteKeyToLabel(note.key);
+        const end = Number.isFinite(note.timestamp)
+          ? this.formatScoreTimestamp(note.timestamp)
+          : '?';
+        const instrument = Number.isFinite(note.midiInstrumentId)
+          ? note.midiInstrumentId
+          : 'na';
+        return `${pitch}@${end}/i${instrument}/s${note.staffId}/v${note.voice}/n${note.value}`;
+      })
+      .join(' | ');
+
+    this.appendPlaybackTraceEvent(
+      `${label} m${measureNumber} t${this.formatScoreTimestamp(scoreTimestamp ?? null)} ${notes || 'none'}`
+    );
   }
 
   private relayDebugEvent(
@@ -9991,6 +10334,18 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     midiInstrumentId: number | null = null
   ): string | null {
     this.appendScheduledAudioDebugEvent('on', pitch, audioTime);
+    const measureNumber =
+      (this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasureIndex ?? -1) + 1;
+    if (this.shouldLogPlaybackTraceForMeasure(measureNumber)) {
+      const instrument = Number.isFinite(midiInstrumentId) ? midiInstrumentId : 'na';
+      this.appendPlaybackTraceEvent(
+        `note on m${measureNumber} ${this.getMidiPitchNoteName(pitch)} i${instrument} a${
+          typeof audioTime === 'number' && Number.isFinite(audioTime)
+            ? audioTime.toFixed(3)
+            : 'now'
+        }`
+      );
+    }
 
     if (this.midiAvailable && this.checkboxMidiOut) {
       CapacitorMuseTrainerMidi.sendCommand({
@@ -10027,7 +10382,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       audioTime,
       midiInstrumentId
     );
-    this.autoPressedSoftwareRouteKeys.set(key, routeKey);
+    this.trackAutoPressedSoftwareRoute(key, routeKey);
   }
 
   // Release note on Ouput MIDI Device
@@ -10046,6 +10401,20 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     routeKey?: string | null
   ): void {
     this.appendScheduledAudioDebugEvent('off', pitch, audioTime);
+    const measureNumber =
+      (this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentMeasureIndex ?? -1) + 1;
+    if (this.shouldLogPlaybackTraceForMeasure(measureNumber)) {
+      const instrument = Number.isFinite(midiInstrumentId) ? midiInstrumentId : 'na';
+      this.appendPlaybackTraceEvent(
+        `note off m${measureNumber} ${this.getMidiPitchNoteName(pitch)} i${instrument} route${
+          routeKey ?? 'na'
+        } a${
+          typeof audioTime === 'number' && Number.isFinite(audioTime)
+            ? audioTime.toFixed(3)
+            : 'now'
+        }`
+      );
+    }
 
     if (this.midiAvailable && this.checkboxMidiOut) {
       CapacitorMuseTrainerMidi.sendCommand({
@@ -10067,8 +10436,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const key = (pitch - 12).toFixed();
     this.mapNotesAutoPressed.delete(key);
     this.autoPressedMidiInstrumentIds.delete(key);
-    const routeKey = this.autoPressedSoftwareRouteKeys.get(key) ?? null;
-    this.autoPressedSoftwareRouteKeys.delete(key);
+    const routeKey = this.takeAutoPressedSoftwareRoute(
+      key,
+      pitch,
+      midiInstrumentId
+    );
     if (reflectInput) {
       this.timeouts.push(
         setTimeout(() => {
