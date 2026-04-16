@@ -366,6 +366,7 @@ interface TimedLiveSimulatedPendingNote {
 }
 
 interface TimedLiveMatchedRealtimeNote {
+  playbackNote: TimelineNote;
   event: TimedLiveCursorEvent;
   note: TimedLiveCursorNote;
   index: number;
@@ -475,7 +476,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.15.26';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.15.27';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -10068,22 +10069,40 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private getTimedLiveSamePitchRealtimeCandidates(
     playedHalfTone: number
   ): TimedLiveMatchedRealtimeNote[] {
-    const timeline = this.timedLiveCursorTimeline;
+    const timeline = this.playbackTimeline;
     if (!timeline) {
       return [];
     }
 
+    const practiceSelection = this.getPracticeStaffSelection();
     const candidates: TimedLiveMatchedRealtimeNote[] = [];
     timeline.events.forEach((event) => {
-      this.getTimedLiveSelectedEventNotes(event).forEach(({ note, index }) => {
-        if (note.halfTone !== playedHalfTone) {
+      event.visibleNotes.forEach((playbackNote) => {
+        if (playbackNote.halfTone !== playedHalfTone) {
+          return;
+        }
+        if (playbackNote.tie.isContinuation && !playbackNote.tie.isStart) {
+          return;
+        }
+        if (
+          playbackNote.staffId !== null &&
+          !practiceSelection[playbackNote.staffId]
+        ) {
+          return;
+        }
+
+        const timedLiveMatch = this.findTimedLiveCursorNoteByPlaybackNoteId(
+          playbackNote.id
+        );
+        if (!timedLiveMatch) {
           return;
         }
 
         candidates.push({
-          event,
-          note,
-          index,
+          playbackNote,
+          event: timedLiveMatch.event,
+          note: timedLiveMatch.note,
+          index: timedLiveMatch.index,
           timingClass: 'missed',
           offsetMs: 0,
         });
@@ -10107,12 +10126,16 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const timestampEpsilon = 1e-7;
 
     const previousCandidates = candidates
-      .filter((candidate) => candidate.event.timestamp <= scoreTimestamp + timestampEpsilon)
-      .sort((left, right) => right.event.timestamp - left.event.timestamp);
+      .filter(
+        (candidate) => candidate.playbackNote.timestamp <= scoreTimestamp + timestampEpsilon
+      )
+      .sort(
+        (left, right) => right.playbackNote.timestamp - left.playbackNote.timestamp
+      );
 
     for (const candidate of previousCandidates) {
       const offsetMs = this.getPlaybackSignedDurationMs(
-        scoreTimestamp - candidate.event.timestamp
+        scoreTimestamp - candidate.playbackNote.timestamp
       );
       if (offsetMs > lateConsiderationMs) {
         break;
@@ -10135,12 +10158,16 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     const nextCandidates = candidates
-      .filter((candidate) => candidate.event.timestamp > scoreTimestamp + timestampEpsilon)
-      .sort((left, right) => left.event.timestamp - right.event.timestamp);
+      .filter(
+        (candidate) => candidate.playbackNote.timestamp > scoreTimestamp + timestampEpsilon
+      )
+      .sort(
+        (left, right) => left.playbackNote.timestamp - right.playbackNote.timestamp
+      );
 
     for (const candidate of nextCandidates) {
       const offsetMs = this.getPlaybackSignedDurationMs(
-        scoreTimestamp - candidate.event.timestamp
+        scoreTimestamp - candidate.playbackNote.timestamp
       );
       if (offsetMs < -earlyConsiderationMs) {
         break;
@@ -10160,6 +10187,30 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         offsetMs,
         timingClass: this.classifyTimedLiveSimulatedFeedback(offsetMs),
       };
+    }
+
+    return null;
+  }
+
+  private findTimedLiveCursorNoteByPlaybackNoteId(
+    playbackNoteId: string | null
+  ): { event: TimedLiveCursorEvent; note: TimedLiveCursorNote; index: number } | null {
+    const timeline = this.timedLiveCursorTimeline;
+    if (!timeline || !playbackNoteId) {
+      return null;
+    }
+
+    for (const event of timeline.events) {
+      const selectedNotes = this.getTimedLiveSelectedEventNotes(event);
+      const match =
+        selectedNotes.find(({ note }) => note.playbackNoteId === playbackNoteId) ?? null;
+      if (match) {
+        return {
+          event,
+          note: match.note,
+          index: match.index,
+        };
+      }
     }
 
     return null;
