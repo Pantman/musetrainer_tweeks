@@ -476,7 +476,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.15.31';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.15.34';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -602,6 +602,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private activePracticeGraphicalNotes: PracticeGraphicalNote[] = [];
   private correctlyHeldPracticeKeys = new Set<string>();
   private correctlyHeldPracticeTieKeys = new Set<string>();
+  private realtimePracticePressedKeys = new Set<string>();
   private realtimePreviousStepKeys = new Set<string>();
   private realtimePreviousStepNoteIds = new Set<string>();
   private realtimePreviousStepMatchedKeys = new Set<string>();
@@ -1321,6 +1322,20 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       if (Number.isFinite(currentMidiInstrumentId)) {
         return Number(currentMidiInstrumentId);
       }
+
+      const practiceSelection = this.getPracticeStaffSelection();
+      for (const staffId of this.staffIdList) {
+        if (!practiceSelection[staffId]) {
+          continue;
+        }
+
+        const midiInstrumentId = this.getMidiInstrumentIdForStaffId(staffId);
+        if (Number.isFinite(midiInstrumentId)) {
+          return midiInstrumentId;
+        }
+      }
+
+      return null;
     }
 
     if (Number.isFinite(pitch)) {
@@ -3326,6 +3341,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.releaseComputerPressedNotes();
     this.computerNotesService.clear();
     this.notesService.clear();
+    this.realtimePracticePressedKeys.clear();
     this.correctlyHeldPracticeKeys.clear();
     this.correctlyHeldPracticeTieKeys.clear();
 
@@ -4145,6 +4161,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.resetCorrectNoteheads();
     this.resetIncorrectNoteheads();
     this.resetTimingFeedbackNoteheads();
+    this.realtimePracticePressedKeys.clear();
     this.correctlyHeldPracticeKeys.clear();
     this.correctlyHeldPracticeTieKeys.clear();
     let elems = document.getElementsByClassName('feedback');
@@ -4233,7 +4250,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       }
 
       const key = note.halfTone.toString();
-      if (this.notesService.getMapPressed().has(key)) {
+      if (this.isRealtimePracticeKeyPressed(key)) {
         this.correctlyHeldPracticeKeys.add(key);
         const tieKey = this.getPracticeGraphicalTieKey(note);
         if (tieKey) {
@@ -4258,7 +4275,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return (
         (this.correctlyHeldPracticeKeys.has(key) ||
           (!!tieKey && this.correctlyHeldPracticeTieKeys.has(tieKey))) &&
-        this.notesService.getMapPressed().has(key)
+        this.isRealtimePracticeKeyPressed(key)
       );
     });
 
@@ -6356,6 +6373,36 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return false;
   }
 
+  private getRealtimePracticePressedKeys(): Set<string> {
+    return this.shouldUseTimedLiveRealtimeClassification()
+      ? this.realtimePracticePressedKeys
+      : new Set(this.notesService.getMapPressed().keys());
+  }
+
+  private isRealtimePracticeKeyPressed(key: string): boolean {
+    return this.shouldUseTimedLiveRealtimeClassification()
+      ? this.realtimePracticePressedKeys.has(key)
+      : this.notesService.getMapPressed().has(key);
+  }
+
+  private pressRealtimePracticeKey(key: string): void {
+    if (this.shouldUseTimedLiveRealtimeClassification()) {
+      this.realtimePracticePressedKeys.add(key);
+      return;
+    }
+
+    this.notesService.press(key);
+  }
+
+  private releaseRealtimePracticeKey(key: string): void {
+    if (this.shouldUseTimedLiveRealtimeClassification()) {
+      this.realtimePracticePressedKeys.delete(key);
+      return;
+    }
+
+    this.notesService.release(key);
+  }
+
   private areRealtimeRequiredPressKeysPressed(): boolean {
     const requiredKeys = this.shouldUseTimedLiveRealtimeClassification()
       ? this.getRealtimeRequiredPressKeysForActiveStep()
@@ -6364,7 +6411,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return false;
     }
 
-    const pressedKeys = this.notesService.getMapPressed();
+    const pressedKeys = this.getRealtimePracticePressedKeys();
     return Array.from(requiredKeys).every((key) => pressedKeys.has(key));
   }
 
@@ -9575,7 +9622,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     noteNames.forEach((name) => {
       this.mapNotesAutoPressed.delete(name);
       this.autoPressedMidiInstrumentIds.delete(name);
-      this.notesService.release(name);
+      this.releaseRealtimePracticeKey(name);
       this.correctlyHeldPracticeKeys.delete(name);
     });
   }
@@ -11898,7 +11945,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.updateRealtimeDebugWindow();
     this.debugRealtimeStats.playedTotal++;
 
-    if (!acceptedLateRealtimeNote) {
+    if (timedLiveRealtimeClassification) {
+      this.pressRealtimePracticeKey(name);
+    } else if (!acceptedLateRealtimeNote) {
       this.notesService.press(name);
     }
 
@@ -12057,7 +12106,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.shouldSuppressListenAutoplayFeedbackForName(name);
     this.updateRealtimeDebugWindow();
     if (this.shouldUseTimedLiveRealtimeClassification()) {
-      this.notesService.release(name);
+      this.releaseRealtimePracticeKey(name);
       this.correctlyHeldPracticeKeys.delete(name);
       if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
       return;
@@ -12607,10 +12656,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private resolveRealtimeTempo(): number {
-    const candidates = [
-      this.notesService.tempoInBPM,
-      this.computerNotesService.tempoInBPM,
-    ];
+    const candidates = this.shouldUseTimedLiveRealtimeClassification()
+      ? [this.tempoInBPM, this.computerNotesService.tempoInBPM]
+      : [this.notesService.tempoInBPM, this.computerNotesService.tempoInBPM];
 
     const realtimeTempo = candidates.find(
       (tempo) => Number.isFinite(tempo) && (tempo as number) > 0
