@@ -247,6 +247,24 @@ These fixes have already been made and committed:
   Restored portal-style live wrap behavior for the timed cursor.
 - `fc771a7` `Use rendered live cursor for incorrect feedback placement`
   Made incorrect/red feedback use the rendered live cursor position.
+- `09f4359` `Checkpoint timed playback scheduler before timeline refactor`
+  Last checkpoint before the playback-timeline architecture shift began.
+- `eae7d2d` `Updated codex_prompt to include idea for refactoring timeline representation`
+  Expanded the prompt with the playback-timeline plan.
+- `d1df420` `Checkpoint playback timeline for realtime computer notes`
+  Introduced `src/app/play/playback-timeline.ts`, moved realtime computer-note
+  playback onto the shared playback timeline, and separated visible/backing
+  playback timing enough to fix the doubled backing-note/piano leak in the
+  known repro around bars 25-26.
+- `cf4f949` `Fix playback timeline tie spans across barlines`
+  Fixed timeline note duration across tie chains so barline ties sustain
+  correctly in playback.
+- `8c1743b` `Fix stuck backing notes on stop during timeline playback`
+  Fixed a stop-path bug where long/tied backing notes could remain sounding if
+  multiple active route instances shared a pitch.
+- `aa9b98e` `Checkpoint realtime matching handoff to playback note ids`
+  Began moving realtime matching and scorecard dedupe from timed-live
+  `event.id:index` bookkeeping to shared playback note ids.
 
 There is also a stash that may still be useful:
 
@@ -264,6 +282,16 @@ That stash represents an alternate wrap implementation that was intentionally se
 - Incorrect feedback placement has been updated to use the visible cursor path.
 - A first-pass congratulations scorecard exists for non-loop live runs.
 - Debug short-run scorecard testing exists via the timed-live debug panel.
+- Shared `playbackTimeline` infrastructure now exists in
+  `src/app/play/playback-timeline.ts`.
+- Realtime computer playback uses `playbackTimeline` rather than the old
+  mixed cursor-derived `computerNotesService.playRequiredNotes(...)` path.
+- Backing-track notes are now separated from visible/computer-piano playback
+  more reliably in the known multi-track repro.
+- Playback tie spans across barlines are working again in the known bars 25-26
+  repro.
+- Stop/release behavior for long backing notes is improved; the known stuck
+  backing-note-on-stop issue was fixed.
 
 ## Known Gotchas
 
@@ -450,6 +478,100 @@ Current checkpoint status before that refactor:
   fully correct
 - treat the current scheduler filtering as a tactical bridge, not the target
   architecture
+
+### 8. The timeline migration is partially complete, not finished
+
+The architecture shift has started, but the codebase is in a mixed state:
+
+- `playbackTimeline` now exists and is already used by:
+  - realtime computer playback
+  - parts of realtime matching identity/dedupe
+  - some required-note / next-step prediction logic in timed-live realtime mode
+- `timedLiveCursorTimeline` still exists and is still used for:
+  - visible green cursor geometry/interpolation
+  - rendered note placement / feedback placement
+  - some timed-live note lookup glue
+- `notesService` is still partially involved in realtime input bookkeeping
+  even though score-time truth is starting to come from `playbackTimeline`
+
+Important rule for future work:
+
+- avoid reintroducing new cursor-derived logic if the same behavior can be
+  expressed using stable `playbackTimeline` note/event identity
+
+### 9. Known deferred issues after the recent timeline work
+
+These came up after the last prompt refresh and should be remembered for future
+sessions.
+
+#### Same-pitch repeated-note matcher policy is still unresolved
+
+There is a tricky realtime classification case with repeated same-pitch notes
+or chords, especially repeated eighth-note chords:
+
+- if the player is slightly late on the first repeated chord, the system can
+  still feel like it is matching against the "wrong" note in the sequence
+- this is partly about timing-window width and partly about candidate-selection
+  policy
+- the current behavior sits in an uncomfortable middle ground: pure nearest
+  timestamp distance is not always musically satisfying, but adding too much
+  tactical matcher logic before the rearchitecture is complete risks more
+  churn
+
+Current recommendation:
+
+- treat repeated same-pitch matcher refinement as deferred until the broader
+  timeline migration is more complete
+- when revisiting it, use stable playback-note identity and explicitly decide
+  the intended policy for:
+  - unresolved previous same-pitch note
+  - future same-pitch note
+  - overlapping early/late consideration windows
+
+Do not assume "closest by absolute timestamp" is automatically the desired
+musical rule.
+
+#### Tie-continuation feedback classification is still incomplete
+
+Playback tie spans are fixed, but tie-continuation feedback/rendering in
+realtime classification is not fully solved yet:
+
+- tie continuations should turn green when the tied note chain was accepted and
+  the key is still held
+- tie continuations should turn red when the held note was released too early
+- current behavior improved somewhat, but still does not fully classify held
+  tie continuations correctly
+
+Current recommendation:
+
+- defer full tie-continuation feedback polish until the remaining human/realtime
+  rearchitecture is further along
+- when revisiting it, solve it from tie-chain / stable-note identity, not only
+  by pitch-based held-key memory
+
+#### Main lesson from the recent regressions
+
+Several regressions after the recent timeline work came from mixing:
+
+- pitch identity
+- rendered/timed-live note identity
+- stable playback note identity
+
+Future sessions should prefer:
+
+- `playbackTimeline` for score-time truth and note identity
+- `timedLiveCursorTimeline` only for rendered cursor/note placement
+- explicit tie-chain identity when reasoning about held continuations
+
+If a bug involves a note turning green and later red, or a repeated same-pitch
+note matching the "wrong" score note, first check whether the code is using:
+
+- pitch only
+- render-event index
+- or stable playback-note identity
+
+Most of the recent regressions were caused by those three notions drifting out
+of sync.
 
 ## Working Rules For Future Codex Sessions
 

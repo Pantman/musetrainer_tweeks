@@ -476,7 +476,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.15.27';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.15.30';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -600,6 +600,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private activePracticeNoteElements: SVGElement[] = [];
   private activePracticeGraphicalNotes: PracticeGraphicalNote[] = [];
   private correctlyHeldPracticeKeys = new Set<string>();
+  private correctlyHeldPracticeTieKeys = new Set<string>();
   private realtimePreviousStepKeys = new Set<string>();
   private realtimePreviousStepMatchedKeys = new Set<string>();
   private realtimePreviousStepElements: SVGElement[] = [];
@@ -2658,6 +2659,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.pendingDeferredTieStepAdvance = false;
     this.pendingTimedStartBootstrapAdvance = false;
     this.correctlyHeldPracticeKeys.clear();
+    this.correctlyHeldPracticeTieKeys.clear();
     this.timedLiveRealtimeMatchedEventNotes.clear();
     this.stopTimedLiveCursorDebugLoop(true);
     this.stopTimedLiveSimulatedFeedbackPlayback();
@@ -3291,6 +3293,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.computerNotesService.clear();
     this.notesService.clear();
     this.correctlyHeldPracticeKeys.clear();
+    this.correctlyHeldPracticeTieKeys.clear();
 
     Array.from(this.mapNotesAutoPressed.keys()).forEach((key) => {
       const pitch = parseInt(key) + 12;
@@ -4109,6 +4112,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.resetIncorrectNoteheads();
     this.resetTimingFeedbackNoteheads();
     this.correctlyHeldPracticeKeys.clear();
+    this.correctlyHeldPracticeTieKeys.clear();
     let elems = document.getElementsByClassName('feedback');
     // Remove all elements
     while (elems.length > 0) {
@@ -4197,6 +4201,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       const key = note.halfTone.toString();
       if (this.notesService.getMapPressed().has(key)) {
         this.correctlyHeldPracticeKeys.add(key);
+        const tieKey = this.getPracticeGraphicalTieKey(note);
+        if (tieKey) {
+          this.correctlyHeldPracticeTieKeys.add(tieKey);
+        }
       }
     });
   }
@@ -4212,8 +4220,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       }
 
       const key = note.halfTone.toString();
+      const tieKey = this.getPracticeGraphicalTieKey(note);
       return (
-        this.correctlyHeldPracticeKeys.has(key) &&
+        (this.correctlyHeldPracticeKeys.has(key) ||
+          (!!tieKey && this.correctlyHeldPracticeTieKeys.has(tieKey))) &&
         this.notesService.getMapPressed().has(key)
       );
     });
@@ -4270,6 +4280,23 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       typeof sourceNote.NoteTie !== 'undefined' &&
       sourceNote !== sourceNote.NoteTie?.StartNote
     );
+  }
+
+  private getPracticeGraphicalTieKey(note: PracticeGraphicalNote): string | null {
+    const sourceNote = note.graphicalNote?.sourceNote;
+    if (!sourceNote?.NoteTie) {
+      return null;
+    }
+
+    const startNote = sourceNote.NoteTie?.StartNote ?? sourceNote;
+    const tieIdCandidate =
+      sourceNote.NoteTie?.TieNumber ??
+      sourceNote.NoteTie?.tieNumber ??
+      this.getPlaybackTimelineSourceNoteId(startNote);
+
+    return tieIdCandidate !== undefined && tieIdCandidate !== null
+      ? String(tieIdCandidate)
+      : null;
   }
 
   private renderCorrectPracticeNotes(
@@ -10123,73 +10150,44 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     const lateConsiderationMs = this.getTimedLiveSimulationLateConsiderationMs();
     const earlyConsiderationMs = this.getTimedLiveSimulationEarlyConsiderationMs();
-    const timestampEpsilon = 1e-7;
-
-    const previousCandidates = candidates
-      .filter(
-        (candidate) => candidate.playbackNote.timestamp <= scoreTimestamp + timestampEpsilon
-      )
-      .sort(
-        (left, right) => right.playbackNote.timestamp - left.playbackNote.timestamp
-      );
-
-    for (const candidate of previousCandidates) {
-      const offsetMs = this.getPlaybackSignedDurationMs(
-        scoreTimestamp - candidate.playbackNote.timestamp
-      );
-      if (offsetMs > lateConsiderationMs) {
-        break;
-      }
-      if (
-        this.isTimedLiveRealtimeNoteMatched(
-          candidate.event,
-          candidate.note,
-          candidate.index
+    return (
+      candidates
+        .map((candidate) => ({
+          ...candidate,
+          offsetMs: this.getPlaybackSignedDurationMs(
+            scoreTimestamp - candidate.playbackNote.timestamp
+          ),
+        }))
+        .filter(
+          (candidate) =>
+            candidate.offsetMs >= -earlyConsiderationMs &&
+            candidate.offsetMs <= lateConsiderationMs &&
+            !this.isTimedLiveRealtimeNoteMatched(
+              candidate.event,
+              candidate.note,
+              candidate.index
+            )
         )
-      ) {
-        continue;
-      }
+        .sort((left, right) => {
+          const absOffsetDelta =
+            Math.abs(left.offsetMs) - Math.abs(right.offsetMs);
+          if (Math.abs(absOffsetDelta) > Number.EPSILON) {
+            return absOffsetDelta;
+          }
 
-      return {
-        ...candidate,
-        offsetMs,
-        timingClass: this.classifyTimedLiveSimulatedFeedback(offsetMs),
-      };
-    }
+          const leftIsCurrentOrFuture = left.offsetMs <= 0 ? 0 : 1;
+          const rightIsCurrentOrFuture = right.offsetMs <= 0 ? 0 : 1;
+          if (leftIsCurrentOrFuture !== rightIsCurrentOrFuture) {
+            return leftIsCurrentOrFuture - rightIsCurrentOrFuture;
+          }
 
-    const nextCandidates = candidates
-      .filter(
-        (candidate) => candidate.playbackNote.timestamp > scoreTimestamp + timestampEpsilon
-      )
-      .sort(
-        (left, right) => left.playbackNote.timestamp - right.playbackNote.timestamp
-      );
-
-    for (const candidate of nextCandidates) {
-      const offsetMs = this.getPlaybackSignedDurationMs(
-        scoreTimestamp - candidate.playbackNote.timestamp
-      );
-      if (offsetMs < -earlyConsiderationMs) {
-        break;
-      }
-      if (
-        this.isTimedLiveRealtimeNoteMatched(
-          candidate.event,
-          candidate.note,
-          candidate.index
-        )
-      ) {
-        continue;
-      }
-
-      return {
-        ...candidate,
-        offsetMs,
-        timingClass: this.classifyTimedLiveSimulatedFeedback(offsetMs),
-      };
-    }
-
-    return null;
+          return left.playbackNote.timestamp - right.playbackNote.timestamp;
+        })
+        .map((candidate) => ({
+          ...candidate,
+          timingClass: this.classifyTimedLiveSimulatedFeedback(candidate.offsetMs),
+        }))[0] ?? null
+    );
   }
 
   private findTimedLiveCursorNoteByPlaybackNoteId(
@@ -11714,7 +11712,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       : null;
 
     const pitchLabel = this.noteKeyToLabel(name);
-    const requiredPressKeys = this.getCurrentRequiredPressKeys();
+    const requiredPressKeys = this.getRealtimeRequiredPressKeysForActiveStep();
     const acceptedLateRealtimeNote = this.isAcceptedLateRealtimeNote(name);
     const suppressAutoplayFeedback =
       this.shouldSuppressListenAutoplayFeedbackForName(name);
@@ -11833,8 +11831,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     // current required notes as no longer "new". Call it exactly once per
     // note-on path, otherwise listen/autoplay can consume the success state
     // before cursor advancement runs and replay the same chord on later ticks.
-    const currentStepPressedNow =
-      !acceptedLateRealtimeNote && this.notesService.isRequiredNotesPressed();
+    const currentStepPressedNow = timedLiveRealtimeClassification
+      ? !acceptedLateRealtimeNote &&
+        requiredPressKeys.size > 0 &&
+        Array.from(requiredPressKeys).every((key) =>
+          this.realtimeCurrentStepMatchedKeys.has(key)
+        )
+      : !acceptedLateRealtimeNote && this.notesService.isRequiredNotesPressed();
     if (currentStepPressedNow) {
       // Timing-classified notes can still make the required pitch set "pressed"
       // in realtime mode, but only on-time notes should be rendered as green
@@ -11949,6 +11952,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
+    if (this.shouldUseTimedLiveRealtimeClassification()) {
+      this.realtimeNextStepKeys = this.getRealtimeTimelineNextStepKeys();
+      return;
+    }
+
     const cursor = this.openSheetMusicDisplay?.cursors?.[0];
     const iter = cursor?.iterator?.clone?.();
     if (!iter) {
@@ -11979,7 +11987,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     // step of the piece must run through the same hit/miss bookkeeping as any
     // interior step, otherwise the congratulations screen would undercount the
     // last notes.
-    const currentRequiredPressKeys = this.getCurrentRequiredPressKeys();
+    const currentRequiredPressKeys = this.getRealtimeRequiredPressKeysForActiveStep();
 
     if (
       this.currentStepSatisfied &&
@@ -12000,9 +12008,40 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         (key) => !this.realtimeCurrentStepMatchedKeys.has(key)
       );
       if (missedKeys.length > 0) {
-        const missedGraphicalNotes = this.activePracticeGraphicalNotes.filter((note) =>
-          missedKeys.includes(note.halfTone.toString())
+        const missedPlaybackNoteIds = new Set(
+          missedTimedLiveNotes
+            .map(({ note }) => note.playbackNoteId)
+            .filter((noteId): noteId is string => typeof noteId === 'string')
         );
+        const missedGraphicalNotes = this.activePracticeGraphicalNotes.filter((note) => {
+          if (this.isTieContinuationGraphicalPracticeNote(note)) {
+            return false;
+          }
+
+          const sourceNote = note.graphicalNote?.sourceNote;
+          const measureNumber =
+            sourceNote?.SourceMeasure?.MeasureNumber ??
+            sourceNote?.sourceMeasure?.MeasureNumber ??
+            sourceNote?.sourceMeasure?.measureNumber ??
+            null;
+          const timestamp =
+            sourceNote?.getAbsoluteTimestamp?.()?.RealValue ??
+            sourceNote?.AbsoluteTimestamp?.RealValue ??
+            sourceNote?.absoluteTimestamp?.realValue ??
+            null;
+          const playbackNote =
+            Number.isFinite(measureNumber) && Number.isFinite(timestamp)
+              ? this.findPlaybackTimelineVisibleNoteForSourceNote(
+                  sourceNote,
+                  Number(measureNumber),
+                  Number(timestamp)
+                )
+              : null;
+          return (
+            !!playbackNote?.id &&
+            missedPlaybackNoteIds.has(playbackNote.id)
+          );
+        });
         this.debugRealtimeStats.missedExpected += missedKeys.length;
         this.appendRealtimeDebugEvent(
           `missed ${missedKeys
@@ -12075,6 +12114,65 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.rebuildCurrentPlaybackStepState();
     this.updatePlayCursorVisualAlignment();
     this.playComputerNotes(audioTime);
+  }
+
+  private getRealtimeRequiredPressKeysForActiveStep(): Set<string> {
+    if (!this.shouldUseTimedLiveRealtimeClassification()) {
+      return this.getCurrentRequiredPressKeys();
+    }
+
+    return new Set(
+      this.getRealtimeTimelineCurrentStepNotes().map((note) =>
+        note.halfTone.toFixed()
+      )
+    );
+  }
+
+  private getRealtimeTimelineCurrentStepNotes(): TimelineNote[] {
+    const scoreTimestamp = this.getTimedLiveCursorScoreTimestamp();
+    if (!Number.isFinite(scoreTimestamp)) {
+      return [];
+    }
+
+    return this.getRealtimeTimelineVisibleNotesAtTimestamp(Number(scoreTimestamp));
+  }
+
+  private getRealtimeTimelineNextStepKeys(): Set<string> {
+    const timeline = this.playbackTimeline;
+    const scoreTimestamp = this.getTimedLiveCursorScoreTimestamp();
+    if (!timeline || !Number.isFinite(scoreTimestamp)) {
+      return new Set<string>();
+    }
+
+    const timestampEpsilon = 1e-7;
+    const nextEvent =
+      timeline.events.find(
+        (event) => event.timestamp > Number(scoreTimestamp) + timestampEpsilon
+      ) ?? null;
+    if (!nextEvent) {
+      return new Set<string>();
+    }
+
+    return new Set(
+      this.getRealtimeTimelineVisibleNotesAtTimestamp(nextEvent.timestamp).map((note) =>
+        note.halfTone.toFixed()
+      )
+    );
+  }
+
+  private getRealtimeTimelineVisibleNotesAtTimestamp(
+    timestamp: number
+  ): TimelineNote[] {
+    const practiceSelection = this.getPracticeStaffSelection();
+    return this.getPlaybackTimelineEventsAtTimestamp(timestamp)
+      .flatMap((event) => event.visibleNotes)
+      .filter((note) => {
+        if (note.tie.isContinuation && !note.tie.isStart) {
+          return false;
+        }
+
+        return note.staffId === null || practiceSelection[note.staffId];
+      });
   }
 
   private playComputerNotes(audioTime?: number): void {
