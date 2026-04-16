@@ -232,6 +232,8 @@ interface CursorWrapDebugSnapshot {
 }
 
 interface TimedLiveCursorNote {
+  playbackNoteId: string | null;
+  playbackEventId: string | null;
   halfTone: number;
   staffId: number | null;
   actionable: boolean;
@@ -473,7 +475,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.15.24';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.15.26';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -669,7 +671,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private timedLiveSimulatedProcessedEventNotes = new Map<string, Set<number>>();
   private timedLiveRealtimeMatchedEventNotes = new Map<
     string,
-    Map<number, TimedLiveSimulatedFeedbackTimingClass>
+    TimedLiveSimulatedFeedbackTimingClass
   >();
   private timedLiveSimulatedHeldNotes = new Map<string, number>();
   private timedLiveSimulatedOutputTokens = new Map<number, number>();
@@ -2379,13 +2381,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private getCompletedRunExpectedNoteKey(
     event: TimedLiveCursorEvent,
+    note: TimedLiveCursorNote,
     index: number
   ): string {
-    return `${event.id}:${index}`;
+    return note.playbackNoteId ?? `${event.id}:${index}`;
   }
 
   private recordCompletedRunOutcome(
     event: TimedLiveCursorEvent,
+    note: TimedLiveCursorNote,
     index: number,
     outcome: RunOutcomeClass
   ): void {
@@ -2403,7 +2407,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    const key = this.getCompletedRunExpectedNoteKey(event, index);
+    const key = this.getCompletedRunExpectedNoteKey(event, note, index);
     if (tracker.resolvedExpectedNotes.has(key)) {
       return;
     }
@@ -3721,20 +3725,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       });
     });
     for (const [key] of this.mapNotesAutoPressed) {
-      const pitch = parseInt(key) + 12;
-      const routeKeys = this.autoPressedSoftwareRouteKeys.get(key) ?? [];
-      if (routeKeys.length > 0) {
-        routeKeys.forEach((routeKey) =>
-          this.sendOutputNoteOff(pitch, undefined, null, routeKey)
-        );
-        continue;
-      }
-
-      this.keyReleaseNote(
-        pitch,
-        undefined,
-        this.autoPressedMidiInstrumentIds.get(key) ?? null
-      );
+      this.releaseTrackedAutoPressedPitch(key);
     }
     this.mapNotesAutoPressed.clear();
     this.autoPressedMidiInstrumentIds.clear();
@@ -6235,13 +6226,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         return;
       }
 
-      const matchedIndexes =
-        this.timedLiveRealtimeMatchedEventNotes.get(
-          this.getTimedLiveRealtimeMatchKey(event)
-        ) ?? new Map<number, TimedLiveSimulatedFeedbackTimingClass>();
-
       this.getTimedLiveSelectedEventNotes(event).forEach(({ note, index }) => {
-        const timingClass = matchedIndexes.get(index);
+        const timingClass = this.timedLiveRealtimeMatchedEventNotes.get(
+          this.getTimedLiveRealtimeMatchKey(event, note, index)
+        );
         if (!timingClass || timingClass === 'missed') {
           return;
         }
@@ -8610,8 +8598,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const notes = this.getAllGraphicalNotesForCursor(cursor)
       .map((note) => {
         const placement = this.getRenderedNoteheadPlacement(note, false);
+        const playbackNote = this.findPlaybackTimelineVisibleNoteForSourceNote(
+          note.graphicalNote?.sourceNote,
+          Number(measureNumber),
+          Number(timestamp)
+        );
 
         return {
+          playbackNoteId: playbackNote?.id ?? null,
+          playbackEventId: playbackNote?.eventId ?? null,
           halfTone: note.halfTone,
           staffId:
             note.graphicalNote?.sourceNote?.ParentStaff?.idInMusicSheet ?? null,
@@ -8666,6 +8661,53 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       allTargets,
       notes,
     };
+  }
+
+  private findPlaybackTimelineVisibleNoteForSourceNote(
+    sourceNote: any,
+    measureNumber: number,
+    timestamp: number
+  ): TimelineNote | null {
+    const timeline = this.playbackTimeline;
+    if (!timeline || !sourceNote) {
+      return null;
+    }
+
+    const sourceNoteId = this.getPlaybackTimelineSourceNoteId(sourceNote);
+    const staffId = Number.isFinite(sourceNote?.ParentStaff?.idInMusicSheet)
+      ? Number(sourceNote.ParentStaff.idInMusicSheet)
+      : null;
+    const halfTone = Number.isFinite(sourceNote?.halfTone)
+      ? Number(sourceNote.halfTone)
+      : null;
+    if (!Number.isFinite(timestamp) || !Number.isFinite(halfTone)) {
+      return null;
+    }
+
+    const timestampEpsilon = 1e-7;
+    const visibleNotes = timeline.events
+      .filter((event) => Math.abs(event.timestamp - timestamp) <= timestampEpsilon)
+      .flatMap((event) => event.visibleNotes);
+
+    const exactSourceNoteMatch =
+      visibleNotes.find(
+        (note) =>
+          !!note.renderedLookupKey?.sourceNoteId &&
+          !!sourceNoteId &&
+          note.renderedLookupKey.sourceNoteId === sourceNoteId
+      ) ?? null;
+    if (exactSourceNoteMatch) {
+      return exactSourceNoteMatch;
+    }
+
+    return (
+      visibleNotes.find(
+        (note) =>
+          note.measureNumber === measureNumber &&
+          note.halfTone === Number(halfTone) &&
+          note.staffId === staffId
+      ) ?? null
+    );
   }
 
   private buildTimedLiveCursorSegments(
@@ -9354,6 +9396,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     if (this.timedLiveCompletionDebugAutoRunsEnabled) {
       this.recordCompletedRunOutcome(
         pendingNote.event,
+        pendingNote.note,
         pendingNote.index,
         pendingNote.timingClass
       );
@@ -9966,8 +10009,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       });
   }
 
-  private getTimedLiveRealtimeMatchKey(event: TimedLiveCursorEvent): string {
-    return `${this.loopPass}:${event.id}`;
+  private getTimedLiveRealtimeMatchKey(
+    event: TimedLiveCursorEvent,
+    note: TimedLiveCursorNote,
+    index: number
+  ): string {
+    return `${this.loopPass}:${note.playbackNoteId ?? `${event.id}:${index}`}`;
   }
 
   private getTimedLiveEventAtTimestamp(
@@ -9998,26 +10045,24 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private isTimedLiveRealtimeNoteMatched(
     event: TimedLiveCursorEvent,
+    note: TimedLiveCursorNote,
     index: number
   ): boolean {
-    const matchedIndexes =
-      this.timedLiveRealtimeMatchedEventNotes.get(
-        this.getTimedLiveRealtimeMatchKey(event)
-      ) ?? new Map<number, TimedLiveSimulatedFeedbackTimingClass>();
-    return matchedIndexes.has(index);
+    return this.timedLiveRealtimeMatchedEventNotes.has(
+      this.getTimedLiveRealtimeMatchKey(event, note, index)
+    );
   }
 
   private markTimedLiveRealtimeNoteMatched(
     event: TimedLiveCursorEvent,
+    note: TimedLiveCursorNote,
     index: number,
     timingClass: TimedLiveSimulatedFeedbackTimingClass
   ): void {
-    const key = this.getTimedLiveRealtimeMatchKey(event);
-    const matchedIndexes =
-      this.timedLiveRealtimeMatchedEventNotes.get(key) ??
-      new Map<number, TimedLiveSimulatedFeedbackTimingClass>();
-    matchedIndexes.set(index, timingClass);
-    this.timedLiveRealtimeMatchedEventNotes.set(key, matchedIndexes);
+    this.timedLiveRealtimeMatchedEventNotes.set(
+      this.getTimedLiveRealtimeMatchKey(event, note, index),
+      timingClass
+    );
   }
 
   private getTimedLiveSamePitchRealtimeCandidates(
@@ -10072,7 +10117,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       if (offsetMs > lateConsiderationMs) {
         break;
       }
-      if (this.isTimedLiveRealtimeNoteMatched(candidate.event, candidate.index)) {
+      if (
+        this.isTimedLiveRealtimeNoteMatched(
+          candidate.event,
+          candidate.note,
+          candidate.index
+        )
+      ) {
         continue;
       }
 
@@ -10094,7 +10145,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       if (offsetMs < -earlyConsiderationMs) {
         break;
       }
-      if (this.isTimedLiveRealtimeNoteMatched(candidate.event, candidate.index)) {
+      if (
+        this.isTimedLiveRealtimeNoteMatched(
+          candidate.event,
+          candidate.note,
+          candidate.index
+        )
+      ) {
         continue;
       }
 
@@ -10135,10 +10192,16 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     this.markTimedLiveRealtimeNoteMatched(
       match.event,
+      match.note,
       match.index,
       match.timingClass
     );
-    this.recordCompletedRunOutcome(match.event, match.index, match.timingClass);
+    this.recordCompletedRunOutcome(
+      match.event,
+      match.note,
+      match.index,
+      match.timingClass
+    );
     this.commitTimedLiveSimulatedFeedbackNote(
       this.buildTimedLiveRealtimePendingNote(match, playedHalfTone, scoreTimestamp),
       true
@@ -11879,8 +11942,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       );
       const missedTimedLiveNotes =
         currentEvent?.selectedNotes.filter(
-          ({ index }) =>
-            !this.isTimedLiveRealtimeNoteMatched(currentEvent.event, index)
+          ({ note, index }) =>
+            !this.isTimedLiveRealtimeNoteMatched(currentEvent.event, note, index)
         ) ?? [];
       const missedKeys = Array.from(currentRequiredPressKeys).filter(
         (key) => !this.realtimeCurrentStepMatchedKeys.has(key)
@@ -11905,8 +11968,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         );
       }
       if (currentEvent) {
-        missedTimedLiveNotes.forEach(({ index }) => {
-          this.recordCompletedRunOutcome(currentEvent.event, index, 'missed');
+        missedTimedLiveNotes.forEach(({ note, index }) => {
+          this.recordCompletedRunOutcome(
+            currentEvent.event,
+            note,
+            index,
+            'missed'
+          );
         });
       }
     }
@@ -12146,21 +12214,43 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private releaseComputerPressedNotes(): void {
     for (const [key] of this.computerPressedNotes) {
       this.computerNotesService.release(key);
-      const midiInstrumentId =
+      this.releaseTrackedAutoPressedPitch(
+        key,
         this.getMidiInstrumentIdForNoteObject(
           this.computerNotesService.getMapRequired().get(key)
         ) ??
-        this.getMidiInstrumentIdForNoteObject(
-          this.computerNotesService.getMapPrevRequired().get(key)
-        );
-      this.keyReleaseNoteInternal(
-        parseInt(key) + 12,
-        undefined,
-        false,
-        midiInstrumentId
+          this.getMidiInstrumentIdForNoteObject(
+            this.computerNotesService.getMapPrevRequired().get(key)
+          ) ??
+          this.autoPressedMidiInstrumentIds.get(key) ??
+          null
       );
     }
     this.computerPressedNotes.clear();
+  }
+
+  private releaseTrackedAutoPressedPitch(
+    key: string,
+    midiInstrumentId: number | null = null
+  ): void {
+    const pitch = parseInt(key) + 12;
+    const routeKeys = this.autoPressedSoftwareRouteKeys.get(key) ?? [];
+    if (routeKeys.length > 0) {
+      this.mapNotesAutoPressed.delete(key);
+      this.autoPressedMidiInstrumentIds.delete(key);
+      this.autoPressedSoftwareRouteKeys.delete(key);
+      routeKeys.forEach((routeKey) =>
+        this.sendOutputNoteOff(pitch, undefined, midiInstrumentId, routeKey)
+      );
+      return;
+    }
+
+    this.keyReleaseNoteInternal(
+      pitch,
+      undefined,
+      false,
+      midiInstrumentId ?? this.autoPressedMidiInstrumentIds.get(key) ?? null
+    );
   }
 
   private resolveRealtimeTempo(): number {
