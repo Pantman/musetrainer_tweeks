@@ -440,6 +440,12 @@ interface PlaybackTransportAnchor {
   audioTimeSec: number;
 }
 
+interface TimelinePlaybackBuckets {
+  guideVisibleNotes: TimelineNote[];
+  playableVisibleNotes: TimelineNote[];
+  playableBackingNotes: TimelineNote[];
+}
+
 @Component({
   selector: 'app-home',
   templateUrl: 'play.page.html',
@@ -477,7 +483,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.17.59';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.18.61';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -4122,54 +4128,64 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           this.getCurrentPracticeTimestamp()
         )} req[${this.formatRequiredNoteSummary()}]`
       );
-      this.notesService.playRequiredNotes(
-        (note, velocity, noteObj) =>
-          this.keyPressNote(
-            note,
-            velocity,
-            audioTime,
-            this.getMidiInstrumentIdForNoteObject(noteObj)
-          ),
-        (note, noteObj, retrigger) => {
-          const midiInstrumentId = this.getMidiInstrumentIdForNoteObject(noteObj);
-          if (retrigger) {
-            this.keyReleaseNoteInternal(
-              note,
-              this.getRetriggerReleaseAudioTime(audioTime),
-              false,
-              midiInstrumentId
-            );
-            return;
-          }
-
-          this.keyReleaseNote(note, audioTime, midiInstrumentId);
-        }
-      );
+      this.playLegacyRequiredPlaybackNotes(this.notesService, audioTime, {
+        reflectInput: true,
+      });
     }
+  }
+
+  private playLegacyRequiredPlaybackNotes(
+    notesService: NotesService,
+    audioTime: number | undefined,
+    options: {
+      reflectInput: boolean;
+      onPress?: (key: string) => void;
+      onRelease?: (key: string) => void;
+    }
+  ): void {
+    notesService.playRequiredNotes(
+      (note, velocity, noteObj) => {
+        const key = (note - 12).toFixed();
+        options.onPress?.(key);
+        this.keyPressNoteInternal(
+          note,
+          velocity,
+          audioTime,
+          options.reflectInput,
+          this.getMidiInstrumentIdForNoteObject(noteObj)
+        );
+      },
+      (note, noteObj, retrigger) => {
+        const key = (note - 12).toFixed();
+        options.onRelease?.(key);
+        this.releasePlaybackLifecycleNote(
+          note,
+          audioTime,
+          retrigger === true,
+          options.reflectInput,
+          this.getMidiInstrumentIdForNoteObject(noteObj)
+        );
+      }
+    );
   }
 
   private playTimedPlaybackTimelineNotes(audioTime?: number): void {
     const currentTimestamp = this.getCurrentPracticeTimestamp();
-    const eventsAtTimestamp = this.getPlaybackTimelineEventsAtTimestamp(
-      currentTimestamp
-    );
-    if (eventsAtTimestamp.length === 0) {
+    const {
+      guideVisibleNotes,
+      playableVisibleNotes,
+      playableBackingNotes,
+    } = this.getTimedPlaybackTimelineBuckets(currentTimestamp);
+    if (
+      guideVisibleNotes.length === 0 &&
+      playableVisibleNotes.length === 0 &&
+      playableBackingNotes.length === 0
+    ) {
       this.appendCursorWrapDebugEvent(
         `timeline play none ${this.formatScoreTimestamp(currentTimestamp)}`
       );
       return;
     }
-
-    const visibleNotes = eventsAtTimestamp.flatMap((event) => event.visibleNotes);
-    const backingNotes = this.checkboxBackingTrack
-      ? eventsAtTimestamp.flatMap((event) => event.backingNotes)
-      : [];
-    const playableVisibleNotes = visibleNotes.filter(
-      (note) => !note.tie.isContinuation || note.tie.isStart
-    );
-    const playableBackingNotes = backingNotes.filter(
-      (note) => !note.tie.isContinuation || note.tie.isStart
-    );
     this.appendCursorWrapDebugEvent(
       `timeline play ${this.formatScoreTimestamp(currentTimestamp)} vis[${
         playableVisibleNotes
@@ -4189,7 +4205,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       );
     }
 
-    playableVisibleNotes.forEach((note) =>
+    guideVisibleNotes.forEach((note) =>
       this.schedulePianoKeyboardGuideTimelineNote(note)
     );
     playableVisibleNotes.forEach((note) =>
@@ -4214,55 +4230,109 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     );
   }
 
+  private filterPlayableTimelineNotes(notes: TimelineNote[]): TimelineNote[] {
+    return notes.filter((note) => !note.tie.isContinuation || note.tie.isStart);
+  }
+
+  private getTimedPlaybackTimelineBuckets(timestamp: number): TimelinePlaybackBuckets {
+    const eventsAtTimestamp = this.getPlaybackTimelineEventsAtTimestamp(timestamp);
+    const guideVisibleNotes = this.filterPlayableTimelineNotes(
+      eventsAtTimestamp.flatMap((event) => event.visibleNotes)
+    );
+    const playableBackingNotes = this.checkboxBackingTrack
+      ? this.filterPlayableTimelineNotes(
+          eventsAtTimestamp.flatMap((event) => event.backingNotes)
+        )
+      : [];
+
+    return {
+      guideVisibleNotes,
+      playableVisibleNotes: guideVisibleNotes,
+      playableBackingNotes,
+    };
+  }
+
+  private getRealtimeComputerTimelineBuckets(
+    timestamp: number
+  ): TimelinePlaybackBuckets {
+    const eventsAtTimestamp = this.getPlaybackTimelineEventsAtTimestamp(timestamp);
+    const guideVisibleNotes = this.filterPlayableTimelineNotes(
+      this.getVisibleGuideTimelineNotesAtTimestamp(timestamp)
+    );
+    const playableVisibleNotes = guideVisibleNotes.filter((note) =>
+      this.shouldPlayComputerTimelineVisibleNote(note)
+    );
+    const playableBackingNotes = this.checkboxBackingTrack
+      ? this.filterPlayableTimelineNotes(
+          eventsAtTimestamp.flatMap((event) => event.backingNotes)
+        )
+      : [];
+
+    return {
+      guideVisibleNotes,
+      playableVisibleNotes,
+      playableBackingNotes,
+    };
+  }
+
   private scheduleTimedPlaybackTimelineNote(
     note: TimelineNote,
     audioTime?: number
+  ): void {
+    this.scheduleTimelinePlaybackLifecycleNote(note, audioTime, {
+      reflectInput: true,
+      onPress: (key) => {
+        if (note.role === 'visible') {
+          this.setPianoKeyboardComputerPressedKey(key, true);
+        }
+      },
+      onRelease: (key) => {
+        if (note.role === 'visible') {
+          this.setPianoKeyboardComputerPressedKey(key, false);
+        }
+      },
+    });
+  }
+
+  private scheduleTimelinePlaybackLifecycleNote(
+    note: TimelineNote,
+    audioTime: number | undefined,
+    options: {
+      reflectInput: boolean;
+      onPress?: (key: string) => void;
+      onRelease?: (key: string) => void;
+    }
   ): void {
     const pitch = note.halfTone + 12;
     if (!Number.isFinite(pitch) || pitch < 0 || pitch > 127) {
       return;
     }
 
-    const durationMs = this.getPlaybackDelayMs(
-      Math.max(note.durationWholeNotes, 1 / 32)
-    );
-    const midiInstrumentId = note.midiInstrumentId;
     const key = note.halfTone.toFixed();
-    this.mapNotesAutoPressed.set(key, 1);
-    this.autoPressedMidiInstrumentIds.set(key, midiInstrumentId);
-    if (note.role === 'visible') {
-      this.setPianoKeyboardComputerPressedKey(key, true);
-    }
-    this.timeouts.push(
-      setTimeout(() => {
-        this.keyNoteOn(Date.now() - this.timePlayStart, pitch);
-      }, 0)
+    const durationMs = this.getPlaybackNoteDurationMs(note.durationWholeNotes);
+    const releaseAudioTime = this.getScheduledPlaybackReleaseAudioTime(
+      audioTime,
+      durationMs
+    );
+    options.onPress?.(key);
+    this.keyPressNoteInternal(
+      pitch,
+      60,
+      audioTime,
+      options.reflectInput,
+      note.midiInstrumentId
     );
 
-    const routeKey = this.sendOutputNoteOn(pitch, 60, audioTime, midiInstrumentId);
-    this.trackAutoPressedSoftwareRoute(key, routeKey);
-
-    const releaseAudioTime =
-      typeof audioTime === 'number' && Number.isFinite(audioTime)
-        ? audioTime + durationMs / 1000
-        : undefined;
-    this.sendOutputNoteOff(pitch, releaseAudioTime, midiInstrumentId, routeKey);
-
     this.timeouts.push(
       setTimeout(() => {
-        this.mapNotesAutoPressed.delete(key);
-        this.autoPressedMidiInstrumentIds.delete(key);
-        if (note.role === 'visible') {
-          this.setPianoKeyboardComputerPressedKey(key, false);
-        }
-        const routeKeys = this.autoPressedSoftwareRouteKeys.get(key) ?? [];
-        const nextRouteKeys = routeKeys.filter((candidate) => candidate !== routeKey);
-        if (nextRouteKeys.length === 0) {
-          this.autoPressedSoftwareRouteKeys.delete(key);
-        } else {
-          this.autoPressedSoftwareRouteKeys.set(key, nextRouteKeys);
-        }
-        this.keyNoteOff(Date.now() - this.timePlayStart, pitch);
+        options.onRelease?.(key);
+        this.releasePlaybackLifecycleNote(
+          pitch,
+          releaseAudioTime,
+          false,
+          options.reflectInput,
+          note.midiInstrumentId
+        );
       }, Math.max(durationMs, 0))
     );
   }
@@ -6581,16 +6651,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private getPianoKeyboardVisibleTimelineNotesAtTimestamp(
     timestamp: number
   ): TimelineNote[] {
-    const visibleSelection = this.getVisiblePracticeStaffSelection();
-    return this.getPlaybackTimelineEventsAtTimestamp(timestamp)
-      .flatMap((event) => event.visibleNotes)
-      .filter((note) => {
-        if (note.tie.isContinuation && !note.tie.isStart) {
-          return false;
-        }
-
-        return note.staffId === null || visibleSelection[note.staffId];
-      });
+    return this.getVisibleTimelineNotesAtTimestamp(
+      timestamp,
+      this.getVisiblePracticeStaffSelection()
+    );
   }
 
   private getPianoKeyboardVisibleTimelineActiveNotesAtTimestamp(
@@ -7553,6 +7617,44 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       Math.max(0.012, PlayPageComponent.AUDIO_SCHEDULE_AHEAD_SEC * 0.3)
     );
     return Math.max(toneNow(), audioTime - retriggerGapSec);
+  }
+
+  private getPlaybackNoteDurationMs(durationWholeNotes: number): number {
+    return this.getPlaybackDelayMs(Math.max(durationWholeNotes, 1 / 32));
+  }
+
+  private getScheduledPlaybackReleaseAudioTime(
+    audioTime: number | undefined,
+    durationMs: number
+  ): number | undefined {
+    return typeof audioTime === 'number' && Number.isFinite(audioTime)
+      ? audioTime + Math.max(durationMs, 0) / 1000
+      : undefined;
+  }
+
+  private releasePlaybackLifecycleNote(
+    pitch: number,
+    audioTime: number | undefined,
+    retrigger: boolean,
+    reflectInput: boolean,
+    midiInstrumentId: number | null
+  ): void {
+    if (retrigger) {
+      this.keyReleaseNoteInternal(
+        pitch,
+        this.getRetriggerReleaseAudioTime(audioTime),
+        false,
+        midiInstrumentId
+      );
+      return;
+    }
+
+    this.keyReleaseNoteInternal(
+      pitch,
+      audioTime,
+      reflectInput,
+      midiInstrumentId
+    );
   }
 
   private formatScoreTimestamp(timestamp: number | null): string {
@@ -12858,22 +12960,25 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private getRealtimeTimelineVisibleNotesAtTimestamp(
     timestamp: number
   ): TimelineNote[] {
-    const practiceSelection = this.getPracticeStaffSelection();
-    return this.getPlaybackTimelineEventsAtTimestamp(timestamp)
-      .flatMap((event) => event.visibleNotes)
-      .filter((note) => {
-        if (note.tie.isContinuation && !note.tie.isStart) {
-          return false;
-        }
-
-        return note.staffId === null || practiceSelection[note.staffId];
-      });
+    return this.getVisibleTimelineNotesAtTimestamp(
+      timestamp,
+      this.getPracticeStaffSelection()
+    );
   }
 
   private getVisibleGuideTimelineNotesAtTimestamp(
     timestamp: number
   ): TimelineNote[] {
-    const practiceSelection = this.getVisiblePracticeStaffSelection();
+    return this.getVisibleTimelineNotesAtTimestamp(
+      timestamp,
+      this.getVisiblePracticeStaffSelection()
+    );
+  }
+
+  private getVisibleTimelineNotesAtTimestamp(
+    timestamp: number,
+    staffSelection: Record<number, boolean>
+  ): TimelineNote[] {
     return this.getPlaybackTimelineEventsAtTimestamp(timestamp)
       .flatMap((event) => event.visibleNotes)
       .filter((note) => {
@@ -12881,7 +12986,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           return false;
         }
 
-        return note.staffId === null || practiceSelection[note.staffId];
+        return note.staffId === null || staffSelection[note.staffId];
       });
   }
 
@@ -12899,40 +13004,31 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private playLegacyComputerNotes(audioTime?: number): void {
-    this.computerNotesService.playRequiredNotes(
-      (note, velocity, noteObj) => {
-        const key = (note - 12).toFixed();
+    this.playLegacyRequiredPlaybackNotes(this.computerNotesService, audioTime, {
+      reflectInput: false,
+      onPress: (key) => {
         this.computerPressedNotes.set(key, 1);
         this.computerNotesService.press(key);
-        this.keyPressNoteInternal(
-          note,
-          velocity,
-          audioTime,
-          false,
-          this.getMidiInstrumentIdForNoteObject(noteObj)
-        );
       },
-      (note, noteObj, retrigger) => {
-        const key = (note - 12).toFixed();
+      onRelease: (key) => {
         this.computerPressedNotes.delete(key);
         this.computerNotesService.release(key);
-        const midiInstrumentId = this.getMidiInstrumentIdForNoteObject(noteObj);
-        this.keyReleaseNoteInternal(
-          note,
-          retrigger ? this.getRetriggerReleaseAudioTime(audioTime) : audioTime,
-          false,
-          midiInstrumentId
-        );
-      }
-    );
+      },
+    });
   }
 
   private playComputerTimelineNotes(audioTime?: number): void {
     const currentTimestamp = this.getCurrentPracticeTimestamp();
-    const eventsAtTimestamp = this.getPlaybackTimelineEventsAtTimestamp(
-      currentTimestamp
-    );
-    if (eventsAtTimestamp.length === 0) {
+    const {
+      guideVisibleNotes,
+      playableVisibleNotes,
+      playableBackingNotes,
+    } = this.getRealtimeComputerTimelineBuckets(currentTimestamp);
+    if (
+      guideVisibleNotes.length === 0 &&
+      playableVisibleNotes.length === 0 &&
+      playableBackingNotes.length === 0
+    ) {
       if (this.playbackTraceEnabled) {
         this.appendPlaybackTraceEvent(
           `computer timeline play none ${this.formatScoreTimestamp(currentTimestamp)}`
@@ -12940,21 +13036,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       }
       return;
     }
-
-    const guideVisibleNotes =
-      this.getVisibleGuideTimelineNotesAtTimestamp(currentTimestamp);
-    const visibleNotes = guideVisibleNotes.filter((note) =>
-      this.shouldPlayComputerTimelineVisibleNote(note)
-    );
-    const backingNotes = this.checkboxBackingTrack
-      ? eventsAtTimestamp.flatMap((event) => event.backingNotes)
-      : [];
-    const playableVisibleNotes = visibleNotes.filter(
-      (note) => !note.tie.isContinuation || note.tie.isStart
-    );
-    const playableBackingNotes = backingNotes.filter(
-      (note) => !note.tie.isContinuation || note.tie.isStart
-    );
 
     if (this.playbackTraceEnabled) {
       this.appendPlaybackTraceEvent(
@@ -12998,54 +13079,31 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private getComputerTimelineNotesAtTimestamp(timestamp: number): TimelineNote[] {
-    const eventsAtTimestamp = this.getPlaybackTimelineEventsAtTimestamp(timestamp);
-    const visibleNotes = eventsAtTimestamp
-      .flatMap((event) => event.visibleNotes)
-      .filter((note) => this.shouldPlayComputerTimelineVisibleNote(note));
-    const backingNotes = this.checkboxBackingTrack
-      ? eventsAtTimestamp.flatMap((event) => event.backingNotes)
-      : [];
-
-    return [...visibleNotes, ...backingNotes].filter(
-      (note) => !note.tie.isContinuation || note.tie.isStart
-    );
+    const { playableVisibleNotes, playableBackingNotes } =
+      this.getRealtimeComputerTimelineBuckets(timestamp);
+    return [...playableVisibleNotes, ...playableBackingNotes];
   }
 
   private scheduleComputerPlaybackTimelineNote(
     note: TimelineNote,
     audioTime?: number
   ): void {
-    const pitch = note.halfTone + 12;
-    if (!Number.isFinite(pitch) || pitch < 0 || pitch > 127) {
-      return;
-    }
-
-    const durationMs = this.getPlaybackDelayMs(
-      Math.max(note.durationWholeNotes, 1 / 32)
-    );
-    const midiInstrumentId = note.midiInstrumentId;
     const key = note.halfTone.toFixed();
-
-    this.computerPressedNotes.set(key, 1);
-    if (note.role === 'visible') {
-      this.setPianoKeyboardComputerPressedKey(key, true);
-    }
-    this.keyPressNoteInternal(pitch, 60, audioTime, false, midiInstrumentId);
-
-    const releaseAudioTime =
-      typeof audioTime === 'number' && Number.isFinite(audioTime)
-        ? audioTime + durationMs / 1000
-        : undefined;
-
-    this.timeouts.push(
-      setTimeout(() => {
+    this.scheduleTimelinePlaybackLifecycleNote(note, audioTime, {
+      reflectInput: false,
+      onPress: () => {
+        this.computerPressedNotes.set(key, 1);
+        if (note.role === 'visible') {
+          this.setPianoKeyboardComputerPressedKey(key, true);
+        }
+      },
+      onRelease: () => {
         this.computerPressedNotes.delete(key);
         if (note.role === 'visible') {
           this.setPianoKeyboardComputerPressedKey(key, false);
         }
-        this.keyReleaseNoteInternal(pitch, releaseAudioTime, false, midiInstrumentId);
-      }, Math.max(durationMs, 0))
-    );
+      },
+    });
   }
 
   private groupTimelineNotesByPitchKey(
