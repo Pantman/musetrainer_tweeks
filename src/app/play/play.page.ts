@@ -30,6 +30,7 @@ import {
 
 import { NoteObject, NotesService } from '../notes.service';
 import { PianoKeyboardComponent } from '../piano-keyboard/piano-keyboard.component';
+import type { PianoKeyboardVisualState } from '../piano-keyboard/piano-keyboard.component';
 import { Capacitor, PluginListenerHandle } from '@capacitor/core';
 import { Filesystem } from '@capacitor/filesystem';
 import packageJson from '../../../package.json';
@@ -476,7 +477,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.17.50';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.17.59';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -596,6 +597,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   computerNotesService: NotesService;
   private computerTimelineCurrentNotesByKey = new Map<string, TimelineNote[]>();
   private computerTimelinePreviousNotesByKey = new Map<string, TimelineNote[]>();
+  private pianoKeyboardGuideKeyCounts = new Map<string, number>();
+  private pianoKeyboardComputerPressedKeys = new Set<string>();
   private correctNoteheadElements = new Map<string, HTMLElement>();
   private incorrectNoteheadElements = new Map<string, HTMLElement>();
   private timingFeedbackNoteheadElements = new Map<string, HTMLElement>();
@@ -1409,6 +1412,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     void startTone().catch(() => undefined);
     const currentCount = this.monitoredMidiInputCounts.get(pitch) ?? 0;
     this.monitoredMidiInputCounts.set(pitch, currentCount + 1);
+    this.refreshPianoKeyboardStatus();
     if (currentCount > 0) {
       return;
     }
@@ -1438,10 +1442,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.monitoredMidiInputInstruments.delete(pitch);
       this.monitoredMidiInputRouteKeys.delete(pitch);
       this.sendSoftwareNoteOff(pitch, undefined, midiInstrumentId, routeKey);
+      this.refreshPianoKeyboardStatus();
       return;
     }
 
     this.monitoredMidiInputCounts.set(pitch, currentCount - 1);
+    this.refreshPianoKeyboardStatus();
   }
 
   private releaseMonitoredMidiInputNotes(): void {
@@ -2746,11 +2752,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.correctlyHeldPracticeKeys.clear();
     this.correctlyHeldPracticeTieKeys.clear();
     this.timedLiveRealtimeMatchedEventNotes.clear();
+    this.pianoKeyboardComputerPressedKeys.clear();
+    this.pianoKeyboardGuideKeyCounts.clear();
     this.stopTimedLiveCursorDebugLoop(true);
     this.stopTimedLiveSimulatedFeedbackPlayback();
     this.resetTimedLiveSimulatedFeedbackStats();
     this.updateLegacyPlayCursorDebugVisibility();
     this.refreshCursorDebugMarkersDeferred();
+    this.refreshPianoKeyboardStatus();
   }
 
   // Play
@@ -3320,15 +3329,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         scoreTimestamp
       );
     } else {
-      this.notesService.calculateRequired(
-        this.openSheetMusicDisplay.cursors[0],
-        this.realtimeMode ? practiceSelection : this.getListenPlaybackStaffSelection(),
+      this.rebuildLegacyPracticeStepState(
         back,
-        this.realtimeMode ? null : this.getListenPlaybackInstruments()
-      );
-      this.tracePlaybackStepState(
-        this.realtimeMode ? 'practice step' : 'listen step',
-        this.notesService,
+        practiceSelection,
         measureNumber,
         scoreTimestamp
       );
@@ -3347,30 +3350,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       // that step becomes current. Rehydrate those per-event timing outcomes
       // here so the step does not forget them and redraw them later as missed.
       this.rehydrateTimedLiveRealtimeMatchesForCurrentStep();
-      if (this.playbackTimeline && Number.isFinite(scoreTimestamp)) {
-        const currentComputerNotes = this.syncComputerTimelineStepState(
-          Number(scoreTimestamp)
-        );
-        this.tracePlaybackTimelineStepState(
-          'computer step',
-          currentComputerNotes,
-          measureNumber,
-          scoreTimestamp
-        );
-      } else {
-        this.computerNotesService.calculateRequired(
-          this.openSheetMusicDisplay.cursors[0],
-          this.getComputerStaffSelection(),
-          back,
-          this.getTrackEntryInstruments(this.getBackingTrackAssignmentEntries())
-        );
-        this.tracePlaybackStepState(
-          'computer step',
-          this.computerNotesService,
-          measureNumber,
-          scoreTimestamp
-        );
-      }
+      this.rebuildCurrentComputerStepState(back, measureNumber, scoreTimestamp);
       this.tempoInBPM = this.resolveRealtimeTempo();
       const hasCurrentRequiredPressKeys = this.shouldUseTimedLiveRealtimeClassification()
         ? this.getRealtimeRequiredPressKeysForActiveStep().size > 0
@@ -3387,9 +3367,59 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.tempoInBPM = this.getLegacyPracticeTempoBPM();
     }
 
-    if (this.pianoKeyboard) {
-      this.pianoKeyboard.updateNotesStatus();
+    this.refreshPianoKeyboardStatus();
+  }
+
+  private rebuildLegacyPracticeStepState(
+    back: boolean,
+    practiceSelection: Record<number, boolean>,
+    measureNumber: number | null | undefined,
+    scoreTimestamp: number | null | undefined
+  ): void {
+    this.notesService.calculateRequired(
+      this.openSheetMusicDisplay.cursors[0],
+      this.realtimeMode ? practiceSelection : this.getListenPlaybackStaffSelection(),
+      back,
+      this.realtimeMode ? null : this.getListenPlaybackInstruments()
+    );
+    this.tracePlaybackStepState(
+      this.realtimeMode ? 'practice step' : 'listen step',
+      this.notesService,
+      measureNumber,
+      scoreTimestamp
+    );
+  }
+
+  private rebuildCurrentComputerStepState(
+    back: boolean,
+    measureNumber: number | null | undefined,
+    scoreTimestamp: number | null | undefined
+  ): void {
+    if (this.playbackTimeline && Number.isFinite(scoreTimestamp)) {
+      const currentComputerNotes = this.syncComputerTimelineStepState(
+        Number(scoreTimestamp)
+      );
+      this.tracePlaybackTimelineStepState(
+        'computer step',
+        currentComputerNotes,
+        measureNumber,
+        scoreTimestamp
+      );
+      return;
     }
+
+    this.computerNotesService.calculateRequired(
+      this.openSheetMusicDisplay.cursors[0],
+      this.getComputerStaffSelection(),
+      back,
+      this.getTrackEntryInstruments(this.getBackingTrackAssignmentEntries())
+    );
+    this.tracePlaybackStepState(
+      'computer step',
+      this.computerNotesService,
+      measureNumber,
+      scoreTimestamp
+    );
   }
 
   private resetPlaybackNoteStateForStart(): void {
@@ -3397,6 +3427,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.computerNotesService.clear();
     this.computerTimelineCurrentNotesByKey.clear();
     this.computerTimelinePreviousNotesByKey.clear();
+    this.pianoKeyboardComputerPressedKeys.clear();
+    this.pianoKeyboardGuideKeyCounts.clear();
     this.notesService.clear();
     this.realtimePracticePressedKeys.clear();
     this.correctlyHeldPracticeKeys.clear();
@@ -3422,6 +3454,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.mapNotesAutoPressed.clear();
     this.autoPressedMidiInstrumentIds.clear();
     this.autoPressedSoftwareRouteKeys.clear();
+    this.refreshPianoKeyboardStatus();
   }
 
   private syncTempoCursorToPlayCursor(): void {
@@ -3876,7 +3909,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.clearRealtimeCurrentStepMatches();
     this.clearRealtimeToleranceWindow();
     this.activeRunPerformanceTracker = null;
-    if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
+    this.refreshPianoKeyboardStatus();
     this.activeRangeHandle = null;
     this.activeRangeSelectionStart = null;
     window.removeEventListener('pointermove', this.onRangeHandlePointerMove);
@@ -4157,6 +4190,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     playableVisibleNotes.forEach((note) =>
+      this.schedulePianoKeyboardGuideTimelineNote(note)
+    );
+    playableVisibleNotes.forEach((note) =>
       this.scheduleTimedPlaybackTimelineNote(note, audioTime)
     );
     playableBackingNotes.forEach((note) =>
@@ -4194,6 +4230,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const key = note.halfTone.toFixed();
     this.mapNotesAutoPressed.set(key, 1);
     this.autoPressedMidiInstrumentIds.set(key, midiInstrumentId);
+    if (note.role === 'visible') {
+      this.setPianoKeyboardComputerPressedKey(key, true);
+    }
     this.timeouts.push(
       setTimeout(() => {
         this.keyNoteOn(Date.now() - this.timePlayStart, pitch);
@@ -4213,6 +4252,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       setTimeout(() => {
         this.mapNotesAutoPressed.delete(key);
         this.autoPressedMidiInstrumentIds.delete(key);
+        if (note.role === 'visible') {
+          this.setPianoKeyboardComputerPressedKey(key, false);
+        }
         const routeKeys = this.autoPressedSoftwareRouteKeys.get(key) ?? [];
         const nextRouteKeys = routeKeys.filter((candidate) => candidate !== routeKey);
         if (nextRouteKeys.length === 0) {
@@ -6459,6 +6501,281 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return this.shouldUseTimedLiveRealtimeClassification()
       ? this.realtimePracticePressedKeys
       : this.getLegacyPracticePressedKeys();
+  }
+
+  private getPianoKeyboardPressedKeys(): Set<string> {
+    return new Set([
+      ...this.getRealtimePracticePressedKeys(),
+      ...Array.from(this.monitoredMidiInputCounts.entries())
+        .filter(([, count]) => Number.isFinite(count) && count > 0)
+        .map(([pitch]) => (Number(pitch) - 12).toFixed()),
+      ...this.pianoKeyboardComputerPressedKeys,
+    ]);
+  }
+
+  private getPianoKeyboardTargetKeys(): Set<string> {
+    const guideKeys = new Set(this.pianoKeyboardGuideKeyCounts.keys());
+    if (guideKeys.size > 0) {
+      return guideKeys;
+    }
+
+    if (!this.running || this.startFlashCount > 0) {
+      const guideNotes = this.getPianoKeyboardVisibleTimelineUpcomingNotes();
+      if (guideNotes.length > 0) {
+        return new Set(guideNotes.map((note) => note.halfTone.toFixed()));
+      }
+    }
+
+    if (this.running && (this.realtimeMode || this.isTimedTransportMode())) {
+      return guideKeys;
+    }
+
+    return this.realtimeMode
+      ? this.getRealtimeRequiredPressKeysForActiveStep()
+      : this.getCurrentRequiredPressKeys();
+  }
+
+  private getPianoKeyboardGuideNotes(): TimelineNote[] {
+    if (!this.playbackTimeline) {
+      return [];
+    }
+
+    if (!this.running || this.startFlashCount > 0) {
+      return this.getPianoKeyboardVisibleTimelineUpcomingNotes();
+    }
+
+    if (this.isTimedTransportMode()) {
+      const transportTimestamp = this.getTimedLiveCursorScoreTimestamp();
+      if (Number.isFinite(transportTimestamp)) {
+        return this.getPianoKeyboardVisibleTimelineActiveNotesAtTimestamp(
+          Number(transportTimestamp)
+        );
+      }
+    }
+
+    return this.getPianoKeyboardVisibleTimelineNotesAtTimestamp(
+      this.getCurrentPracticeTimestamp()
+    );
+  }
+
+  private getPianoKeyboardVisibleTimelineUpcomingNotes(): TimelineNote[] {
+    const currentTimestamp = this.getCurrentPracticeTimestamp();
+    const currentEventNotes = this.getPianoKeyboardVisibleTimelineNotesAtTimestamp(
+      currentTimestamp
+    );
+    if (currentEventNotes.length > 0) {
+      return currentEventNotes;
+    }
+
+    const nextEvent = this.getNextPlaybackTimelineEventAfter(
+      currentTimestamp - 1e-7,
+      'visible'
+    );
+    if (!nextEvent) {
+      return [];
+    }
+
+    return this.getPianoKeyboardVisibleTimelineNotesAtTimestamp(nextEvent.timestamp);
+  }
+
+  private getPianoKeyboardVisibleTimelineNotesAtTimestamp(
+    timestamp: number
+  ): TimelineNote[] {
+    const visibleSelection = this.getVisiblePracticeStaffSelection();
+    return this.getPlaybackTimelineEventsAtTimestamp(timestamp)
+      .flatMap((event) => event.visibleNotes)
+      .filter((note) => {
+        if (note.tie.isContinuation && !note.tie.isStart) {
+          return false;
+        }
+
+        return note.staffId === null || visibleSelection[note.staffId];
+      });
+  }
+
+  private getPianoKeyboardVisibleTimelineActiveNotesAtTimestamp(
+    timestamp: number
+  ): TimelineNote[] {
+    const timeline = this.playbackTimeline;
+    if (!timeline || !Number.isFinite(timestamp)) {
+      return [];
+    }
+
+    const visibleSelection = this.getVisiblePracticeStaffSelection();
+    const timestampEpsilon = 1e-7;
+    return timeline.notes.filter((note) => {
+      if (note.role !== 'visible') {
+        return false;
+      }
+      if (note.staffId !== null && !visibleSelection[note.staffId]) {
+        return false;
+      }
+      return (
+        note.timestamp <= timestamp + timestampEpsilon &&
+        note.endTimestamp > timestamp + timestampEpsilon
+      );
+    });
+  }
+
+  private setPianoKeyboardComputerPressedKey(
+    key: string,
+    pressed: boolean
+  ): void {
+    if (pressed) {
+      this.pianoKeyboardComputerPressedKeys.add(key);
+    } else {
+      this.pianoKeyboardComputerPressedKeys.delete(key);
+    }
+    this.refreshPianoKeyboardStatus();
+  }
+
+  private setPianoKeyboardGuideKey(
+    key: string,
+    pressed: boolean
+  ): void {
+    const currentCount = this.pianoKeyboardGuideKeyCounts.get(key) ?? 0;
+    if (pressed) {
+      this.pianoKeyboardGuideKeyCounts.set(key, currentCount + 1);
+      this.refreshPianoKeyboardStatus();
+      return;
+    }
+
+    if (currentCount <= 1) {
+      this.pianoKeyboardGuideKeyCounts.delete(key);
+    } else {
+      this.pianoKeyboardGuideKeyCounts.set(key, currentCount - 1);
+    }
+    this.refreshPianoKeyboardStatus();
+  }
+
+  private schedulePianoKeyboardGuideTimelineNote(
+    note: TimelineNote
+  ): void {
+    if (note.role !== 'visible') {
+      return;
+    }
+
+    const key = note.halfTone.toFixed();
+    const durationMs = this.getPlaybackDelayMs(
+      Math.max(note.durationWholeNotes, 1 / 32)
+    );
+    this.setPianoKeyboardGuideKey(key, true);
+    this.timeouts.push(
+      setTimeout(() => {
+        this.setPianoKeyboardGuideKey(key, false);
+      }, Math.max(durationMs, 0))
+    );
+  }
+
+  private getPianoKeyboardFingerByKey(): Map<string, string> {
+    const fingerByKey = new Map<string, string>();
+    this.getLegacyPracticeRequiredNoteObjects().forEach((noteObj) => {
+      if (!noteObj?.key || noteObj.key === '0') {
+        return;
+      }
+      if (typeof noteObj.fingering === 'string' && noteObj.fingering.length > 0) {
+        fingerByKey.set(noteObj.key, noteObj.fingering);
+      }
+    });
+    return fingerByKey;
+  }
+
+  private getPianoKeyboardStaffByKey(): Map<string, string> {
+    const staffByKey = new Map<string, string>();
+    const normalizeStaffId = (
+      key: string | null | undefined,
+      staffId: unknown,
+      handAssignment: PlaybackTimelineHandAssignment | null = null
+    ): string | null => {
+      if (handAssignment === 'right') {
+        return '1';
+      }
+      if (handAssignment === 'left') {
+        return '2';
+      }
+      if (Number.isFinite(staffId as number)) {
+        const normalizedStaffId = Number(staffId);
+        if (normalizedStaffId <= 0) {
+          return '1';
+        }
+
+        return normalizedStaffId === 1 ? '2' : normalizedStaffId.toFixed();
+      }
+      if (typeof key === 'string' && key.length > 0) {
+        const halfTone = parseInt(key, 10);
+        if (Number.isFinite(halfTone)) {
+          const feedbackStaffId = this.getIncorrectFeedbackStaffId(halfTone);
+          if (feedbackStaffId !== null) {
+            return feedbackStaffId === 0 ? '1' : '2';
+          }
+        }
+      }
+
+      return null;
+    };
+    const addStaff = (
+      key: string | null | undefined,
+      staffId: unknown,
+      handAssignment: PlaybackTimelineHandAssignment | null = null
+    ) => {
+      if (
+        typeof key !== 'string' ||
+        key.length === 0 ||
+        staffByKey.has(key)
+      ) {
+        return;
+      }
+
+      const keyboardStaffId = normalizeStaffId(key, staffId, handAssignment);
+      if (!keyboardStaffId) {
+        return;
+      }
+
+      staffByKey.set(key, keyboardStaffId);
+    };
+
+    this.getLegacyPracticeRequiredNoteObjects().forEach((noteObj) =>
+      addStaff(noteObj?.key, noteObj?.staffId)
+    );
+    this.getPianoKeyboardGuideNotes().forEach((note) =>
+      addStaff(note.halfTone.toFixed(), note.staffId, note.handAssignment)
+    );
+    this.activePracticeGraphicalNotes.forEach((note) =>
+      addStaff(note?.halfTone?.toFixed?.(), note?.staffId)
+    );
+    this.realtimePreviousStepGraphicalNotes.forEach((note) =>
+      addStaff(note?.halfTone?.toFixed?.(), note?.staffId)
+    );
+    this.getRealtimeTimelineCurrentStepNotes().forEach((note) =>
+      addStaff(note.halfTone.toFixed(), note.staffId, note.handAssignment)
+    );
+    this.computerTimelineCurrentNotesByKey.forEach((notes, key) =>
+      notes.forEach((note) => addStaff(key, note.staffId, note.handAssignment))
+    );
+    this.computerTimelinePreviousNotesByKey.forEach((notes, key) =>
+      notes.forEach((note) => addStaff(key, note.staffId, note.handAssignment))
+    );
+
+    return staffByKey;
+  }
+
+  private buildPianoKeyboardVisualState(): PianoKeyboardVisualState {
+    return {
+      autoPressedKeys: new Set(this.mapNotesAutoPressed.keys()),
+      fingerByKey: this.getPianoKeyboardFingerByKey(),
+      pressedKeys: this.getPianoKeyboardPressedKeys(),
+      staffByKey: this.getPianoKeyboardStaffByKey(),
+      sustainedKeys: new Set(this.correctlyHeldPracticeKeys),
+      targetKeys: this.getPianoKeyboardTargetKeys(),
+    };
+  }
+
+  private refreshPianoKeyboardStatus(): void {
+    if (!this.pianoKeyboard) {
+      return;
+    }
+
+    this.pianoKeyboard.updateNotesStatus(this.buildPianoKeyboardVisualState());
   }
 
   private isRealtimePracticeKeyPressed(key: string): boolean {
@@ -9818,8 +10135,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.clearTimedLiveSimulatedReflectedState(reflectedNoteNames);
 
     if (activeOutputPitches.length === 0) {
-      if (reflectedNoteNames.length > 0 && this.pianoKeyboard) {
-        this.pianoKeyboard.updateNotesStatus();
+      if (reflectedNoteNames.length > 0) {
+        this.refreshPianoKeyboardStatus();
       }
       if (
         handoffToListenPlayback &&
@@ -9853,8 +10170,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       );
     });
 
-    if (reflectedNoteNames.length > 0 && this.pianoKeyboard) {
-      this.pianoKeyboard.updateNotesStatus();
+    if (reflectedNoteNames.length > 0) {
+      this.refreshPianoKeyboardStatus();
     }
 
     if (handoffToListenPlayback && this.running && this.listenMode) {
@@ -9912,7 +10229,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.autoPressedMidiInstrumentIds.delete(name);
     this.releaseTimedLiveSimulatedHeldNote(name);
     if (this.pianoKeyboard) {
-      this.pianoKeyboard.updateNotesStatus();
+      this.refreshPianoKeyboardStatus();
     }
   }
 
@@ -9922,7 +10239,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const pendingNote = this.consumeTimedLiveSimulatedPendingNote(name);
     if (!pendingNote) {
       if (this.pianoKeyboard) {
-        this.pianoKeyboard.updateNotesStatus();
+        this.refreshPianoKeyboardStatus();
       }
       return;
     }
@@ -9945,7 +10262,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     if (this.pianoKeyboard) {
-      this.pianoKeyboard.updateNotesStatus();
+      this.refreshPianoKeyboardStatus();
     }
   }
 
@@ -12193,7 +12510,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
     }
 
-    if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
+    this.refreshPianoKeyboardStatus();
     // `isRequiredNotesPressed()` is stateful: a successful call marks the
     // current required notes as no longer "new". Call it exactly once per
     // note-on path, otherwise listen/autoplay can consume the success state
@@ -12247,7 +12564,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     if (this.shouldUseTimedLiveRealtimeClassification()) {
       this.releaseRealtimePracticeKey(name);
       this.correctlyHeldPracticeKeys.delete(name);
-      if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
+      this.refreshPianoKeyboardStatus();
       return;
     }
 
@@ -12257,7 +12574,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.releaseLegacyPracticeKey(name);
     this.correctlyHeldPracticeKeys.delete(name);
 
-    if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
+    this.refreshPianoKeyboardStatus();
     if (!this.realtimeMode && this.areLegacyRequiredPracticeKeysPressed()) {
       if (!suppressAutoplayFeedback) {
         this.markCurrentNotesCorrect();
@@ -12553,6 +12870,21 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       });
   }
 
+  private getVisibleGuideTimelineNotesAtTimestamp(
+    timestamp: number
+  ): TimelineNote[] {
+    const practiceSelection = this.getVisiblePracticeStaffSelection();
+    return this.getPlaybackTimelineEventsAtTimestamp(timestamp)
+      .flatMap((event) => event.visibleNotes)
+      .filter((note) => {
+        if (note.tie.isContinuation && !note.tie.isStart) {
+          return false;
+        }
+
+        return note.staffId === null || practiceSelection[note.staffId];
+      });
+  }
+
   private playComputerNotes(audioTime?: number): void {
     if (!this.realtimeMode) {
       return;
@@ -12563,6 +12895,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
+    this.playLegacyComputerNotes(audioTime);
+  }
+
+  private playLegacyComputerNotes(audioTime?: number): void {
     this.computerNotesService.playRequiredNotes(
       (note, velocity, noteObj) => {
         const key = (note - 12).toFixed();
@@ -12605,9 +12941,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    const visibleNotes = eventsAtTimestamp
-      .flatMap((event) => event.visibleNotes)
-      .filter((note) => this.shouldPlayComputerTimelineVisibleNote(note));
+    const guideVisibleNotes =
+      this.getVisibleGuideTimelineNotesAtTimestamp(currentTimestamp);
+    const visibleNotes = guideVisibleNotes.filter((note) =>
+      this.shouldPlayComputerTimelineVisibleNote(note)
+    );
     const backingNotes = this.checkboxBackingTrack
       ? eventsAtTimestamp.flatMap((event) => event.backingNotes)
       : [];
@@ -12626,6 +12964,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       );
     }
 
+    guideVisibleNotes.forEach((note) =>
+      this.schedulePianoKeyboardGuideTimelineNote(note)
+    );
     playableVisibleNotes.forEach((note) =>
       this.scheduleComputerPlaybackTimelineNote(note, audioTime)
     );
@@ -12686,6 +13027,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const key = note.halfTone.toFixed();
 
     this.computerPressedNotes.set(key, 1);
+    if (note.role === 'visible') {
+      this.setPianoKeyboardComputerPressedKey(key, true);
+    }
     this.keyPressNoteInternal(pitch, 60, audioTime, false, midiInstrumentId);
 
     const releaseAudioTime =
@@ -12696,6 +13040,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.timeouts.push(
       setTimeout(() => {
         this.computerPressedNotes.delete(key);
+        if (note.role === 'visible') {
+          this.setPianoKeyboardComputerPressedKey(key, false);
+        }
         this.keyReleaseNoteInternal(pitch, releaseAudioTime, false, midiInstrumentId);
       }, Math.max(durationMs, 0))
     );

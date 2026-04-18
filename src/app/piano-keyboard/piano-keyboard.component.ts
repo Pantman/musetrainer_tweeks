@@ -1,6 +1,15 @@
-import { Component } from '@angular/core';
+import { ChangeDetectorRef, Component } from '@angular/core';
 
 import { NotesService } from '../notes.service';
+
+export interface PianoKeyboardVisualState {
+  autoPressedKeys: Set<string>;
+  fingerByKey: Map<string, string>;
+  pressedKeys: Set<string>;
+  staffByKey: Map<string, string>;
+  sustainedKeys: Set<string>;
+  targetKeys: Set<string>;
+}
 
 @Component({
   selector: 'app-piano-keyboard',
@@ -14,7 +23,10 @@ export class PianoKeyboardComponent {
   keyFingers: string[] = [];
   keyStaffs: string[] = [];
 
-  constructor(private notesService: NotesService) {
+  constructor(
+    private notesService: NotesService,
+    private changeDetectorRef: ChangeDetectorRef
+  ) {
     // Initialize keboard to unpressed
     for (let i = 0; i < 88; i++) {
       this.keyStates.push('unpressed');
@@ -42,12 +54,17 @@ export class PianoKeyboardComponent {
   }
 
   // Update note status for piano keyboard
-  updateNotesStatus(): void {
+  updateNotesStatus(visualState?: PianoKeyboardVisualState | null): void {
     for (let i = 0; i < 88; i++) {
       this.keyStates[i] = 'unpressed';
       this.keyFingers[i] = '';
       this.keyStaffs[i] = '';
     }
+    if (visualState) {
+      this.updateNotesStatusFromVisualState(visualState);
+      return;
+    }
+
     if (this.notesService.getMapRequired().size) {
       for (const [key] of this.notesService.getMapPressed()) {
         let value;
@@ -93,6 +110,55 @@ export class PianoKeyboardComponent {
     } else {
       for (const [key] of this.notesService.getMapPressed()) {
         this.keyStates[parseInt(key) - 9] = 'pressed';
+      }
+    }
+
+    this.changeDetectorRef.detectChanges();
+  }
+
+  private updateNotesStatusFromVisualState(
+    visualState: PianoKeyboardVisualState
+  ): void {
+    for (const key of visualState.pressedKeys) {
+      const idx = parseInt(key) - 9;
+      if (!Number.isFinite(idx) || idx < 0 || idx >= this.keyStates.length) {
+        continue;
+      }
+
+      if (visualState.targetKeys.has(key)) {
+        this.keyStates[idx] = 'pressed';
+      } else if (
+        visualState.sustainedKeys.has(key) ||
+        visualState.autoPressedKeys.has(key)
+      ) {
+        this.keyStates[idx] = 'pressedkeep';
+      } else {
+        this.keyStates[idx] = 'pressedwrong';
+      }
+
+      const finger = visualState.fingerByKey.get(key) ?? '';
+      const staff = visualState.staffByKey.get(key) ?? '';
+      this.keyFingers[idx] = finger;
+      this.keyStaffs[idx] = staff ? `${this.keyStates[idx]}__staff${staff}` : '';
+    }
+
+    for (const key of visualState.targetKeys) {
+      const idx = parseInt(key) - 9;
+      if (!Number.isFinite(idx) || idx < 0 || idx >= this.keyStates.length) {
+        continue;
+      }
+
+      if (this.keyStates[idx] === 'unpressed') {
+        this.keyStates[idx] = 'unpressedreq';
+      }
+
+      const finger = visualState.fingerByKey.get(key) ?? '';
+      const staff = visualState.staffByKey.get(key) ?? '';
+      if (finger) {
+        this.keyFingers[idx] = finger;
+      }
+      if (staff) {
+        this.keyStaffs[idx] = `${this.keyStates[idx]}__staff${staff}`;
       }
     }
   }
