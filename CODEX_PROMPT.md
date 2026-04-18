@@ -334,7 +334,8 @@ That stash represents an alternate wrap implementation that was intentionally se
   - start validation requires at least one human-controlled hand
   - the warning is intentionally shown on pressing `Play`, not on toggling
     wait mode on
-  - metronome/count-in are disabled in wait mode
+  - wait mode keeps the transport count-in for clear startup feedback
+  - metronome defaults off in wait mode
   - the grey cursor is hidden in wait mode
   - wait-mode progression is now based on current timeline event notes for the
     enabled human-controlled hands
@@ -591,7 +592,9 @@ Wait mode is now expected to follow these product rules:
 - backing tracks should not play in wait mode
 - computer-controlled hand tracks should not autoplay in wait mode
 - loops must still work in wait mode for short-section drilling
-- metronome is probably unnecessary in wait mode and should default off
+- metronome should default off in wait mode
+- wait mode should keep the normal transport count-in so the user gets clear
+  feedback that the mode has started
 
 #### Hand / control rules
 
@@ -603,8 +606,8 @@ Wait mode is now expected to follow these product rules:
 - if one hand has an earlier timeline step than the other, that earlier step
   must be satisfied first
 - if both hands are set to computer in wait mode, the app should not start
-  normally; show a clear explicit message instead of inventing strange
-  behavior
+  normally; show a clear explicit dialog when `Play` is pressed instead of
+  inventing strange behavior
 
 #### Tie / hold rule
 
