@@ -476,7 +476,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.17.36';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.17.50';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -594,6 +594,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private autoPressedSoftwareRouteKeys = new Map<string, string[]>();
   computerPressedNotes = new Map<string, number>();
   computerNotesService: NotesService;
+  private computerTimelineCurrentNotesByKey = new Map<string, TimelineNote[]>();
+  private computerTimelinePreviousNotesByKey = new Map<string, TimelineNote[]>();
   private correctNoteheadElements = new Map<string, HTMLElement>();
   private incorrectNoteheadElements = new Map<string, HTMLElement>();
   private timingFeedbackNoteheadElements = new Map<string, HTMLElement>();
@@ -1280,6 +1282,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     );
   }
 
+  private releaseAllActiveSoftwareRoutes(audioTime?: number): void {
+    Array.from(this.activeSoftwareOutputRoutes.keys()).forEach((routeKey) =>
+      this.releaseSoftwareNoteRoute(routeKey, audioTime)
+    );
+  }
+
   private getMidiInstrumentIdForNoteObject(
     noteObj: NoteObject | null | undefined
   ): number | null {
@@ -1306,6 +1314,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private getPreferredPracticeMidiInstrumentId(pitch?: number): number | null {
+    if (!this.running) {
+      return this.getIdleManualInputMidiInstrumentId();
+    }
+
     if (this.realtimeMode && this.shouldUseTimedLiveRealtimeClassification()) {
       const currentNotes = this.getRealtimeTimelineCurrentStepNotes();
       if (Number.isFinite(pitch)) {
@@ -1370,7 +1382,31 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return this.getMidiInstrumentIdForStaffId(this.staffIdList[0] ?? null);
   }
 
+  private getIdleManualInputMidiInstrumentId(): number | null {
+    const rightHandEntry = this.getTrackAssignmentEntriesForHand('right').find(
+      (entry) => Number.isFinite(entry.midiInstrumentId)
+    );
+    if (Number.isFinite(rightHandEntry?.midiInstrumentId)) {
+      return Number(rightHandEntry?.midiInstrumentId);
+    }
+
+    const rightHandStaffId = this.getTrackAssignmentEntriesForHand('right')
+      .flatMap((entry) => this.getTrackEntryStaffIdsForHand(entry, 'right'))
+      .find((staffId) => Number.isFinite(staffId));
+    if (Number.isFinite(rightHandStaffId)) {
+      const midiInstrumentId = this.getMidiInstrumentIdForStaffId(
+        Number(rightHandStaffId)
+      );
+      if (Number.isFinite(midiInstrumentId)) {
+        return Number(midiInstrumentId);
+      }
+    }
+
+    return null;
+  }
+
   private monitorMidiInputNoteOn(pitch: number, velocity: number): void {
+    void startTone().catch(() => undefined);
     const currentCount = this.monitoredMidiInputCounts.get(pitch) ?? 0;
     this.monitoredMidiInputCounts.set(pitch, currentCount + 1);
     if (currentCount > 0) {
@@ -1957,6 +1993,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.trackAssignmentEntries = this.buildTrackAssignmentEntriesFromSheet();
     this.refreshStaffToolbarButtons();
     this.applyTrackAssignmentsToSheet(false);
+    this.resetIdleManualInputPreviewState();
   }
 
   private refreshStaffToolbarButtons(): void {
@@ -2188,6 +2225,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       instrument.Visible = visibleIndices.has(index);
     });
 
+    this.resetIdleManualInputPreviewState();
+
     if (!reRender || !this.fileLoaded) {
       return;
     }
@@ -2196,6 +2235,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.openSheetMusicDisplay.render();
     this.refreshMeasureOverlaysDeferred();
     this.refreshIdleCursorDerivedStateDeferred();
+  }
+
+  private resetIdleManualInputPreviewState(): void {
+    if (this.running) {
+      return;
+    }
+
+    this.releaseMonitoredMidiInputNotes();
+    this.releaseAllActiveSoftwareRoutes();
   }
 
   getTrackAssignmentLabel(assignment: TrackAssignmentMode): string {
@@ -3300,7 +3348,15 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       // here so the step does not forget them and redraw them later as missed.
       this.rehydrateTimedLiveRealtimeMatchesForCurrentStep();
       if (this.playbackTimeline && Number.isFinite(scoreTimestamp)) {
-        this.syncComputerNotesServiceToTimeline(Number(scoreTimestamp));
+        const currentComputerNotes = this.syncComputerTimelineStepState(
+          Number(scoreTimestamp)
+        );
+        this.tracePlaybackTimelineStepState(
+          'computer step',
+          currentComputerNotes,
+          measureNumber,
+          scoreTimestamp
+        );
       } else {
         this.computerNotesService.calculateRequired(
           this.openSheetMusicDisplay.cursors[0],
@@ -3308,13 +3364,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           back,
           this.getTrackEntryInstruments(this.getBackingTrackAssignmentEntries())
         );
+        this.tracePlaybackStepState(
+          'computer step',
+          this.computerNotesService,
+          measureNumber,
+          scoreTimestamp
+        );
       }
-      this.tracePlaybackStepState(
-        'computer step',
-        this.computerNotesService,
-        measureNumber,
-        scoreTimestamp
-      );
       this.tempoInBPM = this.resolveRealtimeTempo();
       const hasCurrentRequiredPressKeys = this.shouldUseTimedLiveRealtimeClassification()
         ? this.getRealtimeRequiredPressKeysForActiveStep().size > 0
@@ -3339,6 +3395,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private resetPlaybackNoteStateForStart(): void {
     this.releaseComputerPressedNotes();
     this.computerNotesService.clear();
+    this.computerTimelineCurrentNotesByKey.clear();
+    this.computerTimelinePreviousNotesByKey.clear();
     this.notesService.clear();
     this.realtimePracticePressedKeys.clear();
     this.correctlyHeldPracticeKeys.clear();
@@ -3782,7 +3840,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     // races can leave residual route keys after `mapNotesAutoPressed` was
     // already cleared for a pitch.
     this.releaseComputerPressedNotes();
-    for (const [key] of this.mapNotesAutoPressed) {
+    const trackedAutoPressedKeys = new Set<string>([
+      ...this.mapNotesAutoPressed.keys(),
+      ...this.autoPressedSoftwareRouteKeys.keys(),
+      ...this.computerPressedNotes.keys(),
+    ]);
+    for (const key of trackedAutoPressedKeys) {
       this.releaseTrackedAutoPressedPitch(key);
     }
     this.mapNotesAutoPressed.clear();
@@ -3791,6 +3854,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.computerPressedNotes.clear();
     this.notesService.clear();
     this.computerNotesService.clear();
+    this.computerTimelineCurrentNotesByKey.clear();
+    this.computerTimelinePreviousNotesByKey.clear();
     this.activePracticeNoteElements = [];
     this.activePracticeGraphicalNotes = [];
     this.clearLoopStartCheckpoint();
@@ -6302,38 +6367,19 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    const timeline = this.timedLiveCursorTimeline;
-    const currentTimestamp = this.getCurrentPracticeTimestamp();
-    if (!timeline || !Number.isFinite(currentTimestamp)) {
-      return;
-    }
-
-    const timestampEpsilon = 1e-7;
-    timeline.events.forEach((event) => {
-      if (Math.abs(event.timestamp - currentTimestamp) > timestampEpsilon) {
+    this.getRealtimeTimelineCurrentStepNotes().forEach((note) => {
+      const timingClass = this.getTimedLiveRealtimePlaybackNoteTimingClass(note);
+      if (!timingClass || timingClass === 'missed') {
         return;
       }
 
-      this.getTimedLiveSelectedEventNotes(event).forEach(({ note, index }) => {
-        const timingClass = this.timedLiveRealtimeMatchedEventNotes.get(
-          this.getTimedLiveRealtimeMatchKey(event, note, index)
-        );
-        if (!timingClass || timingClass === 'missed') {
-          return;
-        }
-
-        const key = note.halfTone.toString();
-        this.realtimeCurrentStepMatchedKeys.add(key);
-        if (note.playbackNoteId) {
-          this.realtimeCurrentStepMatchedNoteIds.add(note.playbackNoteId);
-        }
-        if (timingClass === 'correct') {
-          this.realtimeCurrentStepCorrectKeys.add(key);
-          if (note.playbackNoteId) {
-            this.realtimeCurrentStepCorrectNoteIds.add(note.playbackNoteId);
-          }
-        }
-      });
+      const key = note.halfTone.toString();
+      this.realtimeCurrentStepMatchedKeys.add(key);
+      this.realtimeCurrentStepMatchedNoteIds.add(note.id);
+      if (timingClass === 'correct') {
+        this.realtimeCurrentStepCorrectKeys.add(key);
+        this.realtimeCurrentStepCorrectNoteIds.add(note.id);
+      }
     });
   }
 
@@ -10318,6 +10364,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return `${this.loopPass}:${note.playbackNoteId ?? `${event.id}:${index}`}`;
   }
 
+  private getTimedLiveRealtimeMatchKeyForPlaybackNoteId(
+    playbackNoteId: string
+  ): string {
+    return `${this.loopPass}:${playbackNoteId}`;
+  }
+
   private getTimedLiveEventAtTimestamp(
     timestamp: number
   ): {
@@ -10351,6 +10403,22 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   ): boolean {
     return this.timedLiveRealtimeMatchedEventNotes.has(
       this.getTimedLiveRealtimeMatchKey(event, note, index)
+    );
+  }
+
+  private getTimedLiveRealtimePlaybackNoteTimingClass(
+    note: TimelineNote
+  ): TimedLiveSimulatedFeedbackTimingClass | null {
+    return (
+      this.timedLiveRealtimeMatchedEventNotes.get(
+        this.getTimedLiveRealtimeMatchKeyForPlaybackNoteId(note.id)
+      ) ?? null
+    );
+  }
+
+  private isTimedLiveRealtimePlaybackNoteMatched(note: TimelineNote): boolean {
+    return this.timedLiveRealtimeMatchedEventNotes.has(
+      this.getTimedLiveRealtimeMatchKeyForPlaybackNoteId(note.id)
     );
   }
 
@@ -10435,11 +10503,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           (candidate) =>
             candidate.offsetMs >= -earlyConsiderationMs &&
             candidate.offsetMs <= lateConsiderationMs &&
-            !this.isTimedLiveRealtimeNoteMatched(
-              candidate.event,
-              candidate.note,
-              candidate.index
-            )
+            !this.isTimedLiveRealtimePlaybackNoteMatched(candidate.playbackNote)
         )
         .sort((left, right) => {
           const absOffsetDelta =
@@ -10485,6 +10549,31 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     return null;
+  }
+
+  private getPlaybackNoteIdForGraphicalPracticeNote(
+    note: PracticeGraphicalNote
+  ): string | null {
+    const sourceNote = note.graphicalNote?.sourceNote;
+    const measureNumber =
+      sourceNote?.SourceMeasure?.MeasureNumber ??
+      sourceNote?.sourceMeasure?.MeasureNumber ??
+      sourceNote?.sourceMeasure?.measureNumber ??
+      null;
+    const timestamp =
+      sourceNote?.getAbsoluteTimestamp?.()?.RealValue ??
+      sourceNote?.AbsoluteTimestamp?.RealValue ??
+      sourceNote?.absoluteTimestamp?.realValue ??
+      null;
+    const playbackNote =
+      Number.isFinite(measureNumber) && Number.isFinite(timestamp)
+        ? this.findPlaybackTimelineVisibleNoteForSourceNote(
+            sourceNote,
+            Number(measureNumber),
+            Number(timestamp)
+          )
+        : null;
+    return playbackNote?.id ?? null;
   }
 
   private buildTimedLiveRealtimePendingNote(
@@ -12291,53 +12380,33 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         ? currentRequiredNoteIds.size > 0
         : currentRequiredPressKeys.size > 0
     ) {
-      const currentEvent = this.getTimedLiveEventAtTimestamp(
-        this.getCurrentPracticeTimestamp()
-      );
-      const missedTimedLiveNotes =
-        currentEvent?.selectedNotes.filter(
-          ({ note, index }) =>
-            !this.isTimedLiveRealtimeNoteMatched(currentEvent.event, note, index)
-        ) ?? [];
+      const currentPlaybackNotes = timedLiveRealtimeClassification
+        ? this.getRealtimeTimelineCurrentStepNotes()
+        : [];
+      const missedPlaybackNotes = timedLiveRealtimeClassification
+        ? currentPlaybackNotes.filter(
+            (note) => !this.isTimedLiveRealtimePlaybackNoteMatched(note)
+          )
+        : [];
       const missedKeys = timedLiveRealtimeClassification
-        ? missedTimedLiveNotes.map(({ note }) => this.noteKeyToLabel(note.halfTone.toFixed()))
+        ? missedPlaybackNotes.map((note) =>
+            this.noteKeyToLabel(note.halfTone.toFixed())
+          )
         : Array.from(currentRequiredPressKeys)
             .filter((key) => !this.realtimeCurrentStepMatchedKeys.has(key))
             .map((key) => this.noteKeyToLabel(key));
       if (missedKeys.length > 0) {
         const missedPlaybackNoteIds = new Set(
-          missedTimedLiveNotes
-            .map(({ note }) => note.playbackNoteId)
-            .filter((noteId): noteId is string => typeof noteId === 'string')
+          missedPlaybackNotes.map((note) => note.id)
         );
         const missedGraphicalNotes = this.activePracticeGraphicalNotes.filter((note) => {
           if (this.isTieContinuationGraphicalPracticeNote(note)) {
             return false;
           }
 
-          const sourceNote = note.graphicalNote?.sourceNote;
-          const measureNumber =
-            sourceNote?.SourceMeasure?.MeasureNumber ??
-            sourceNote?.sourceMeasure?.MeasureNumber ??
-            sourceNote?.sourceMeasure?.measureNumber ??
-            null;
-          const timestamp =
-            sourceNote?.getAbsoluteTimestamp?.()?.RealValue ??
-            sourceNote?.AbsoluteTimestamp?.RealValue ??
-            sourceNote?.absoluteTimestamp?.realValue ??
-            null;
-          const playbackNote =
-            Number.isFinite(measureNumber) && Number.isFinite(timestamp)
-              ? this.findPlaybackTimelineVisibleNoteForSourceNote(
-                  sourceNote,
-                  Number(measureNumber),
-                  Number(timestamp)
-                )
-              : null;
-          return (
-            !!playbackNote?.id &&
-            missedPlaybackNoteIds.has(playbackNote.id)
-          );
+          const playbackNoteId =
+            this.getPlaybackNoteIdForGraphicalPracticeNote(note);
+          return !!playbackNoteId && missedPlaybackNoteIds.has(playbackNoteId);
         });
         this.debugRealtimeStats.missedExpected += missedKeys.length;
         this.appendRealtimeDebugEvent(
@@ -12352,12 +12421,18 @@ export class PlayPageComponent implements OnInit, OnDestroy {
           this.getCurrentPracticeTimestamp()
         );
       }
-      if (currentEvent) {
-        missedTimedLiveNotes.forEach(({ note, index }) => {
+      if (timedLiveRealtimeClassification) {
+        missedPlaybackNotes.forEach((playbackNote) => {
+          const timedLiveMatch = this.findTimedLiveCursorNoteByPlaybackNoteId(
+            playbackNote.id
+          );
+          if (!timedLiveMatch) {
+            return;
+          }
           this.recordCompletedRunOutcome(
-            currentEvent.event,
-            note,
-            index,
+            timedLiveMatch.event,
+            timedLiveMatch.note,
+            timedLiveMatch.index,
             'missed'
           );
         });
@@ -12571,49 +12646,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return this.handEnabled.left || this.handEnabled.right;
   }
 
-  private syncComputerNotesServiceToTimeline(timestamp: number): void {
+  private syncComputerTimelineStepState(timestamp: number): TimelineNote[] {
+    this.computerTimelinePreviousNotesByKey = new Map(
+      this.computerTimelineCurrentNotesByKey
+    );
     const nextNotes = this.getComputerTimelineNotesAtTimestamp(timestamp);
-    const required = this.computerNotesService.getMapRequired();
-    const previous = this.computerNotesService.getMapPrevRequired();
-    const nextRequired = new Map<string, NoteObject>();
-
-    previous.clear();
-    required.forEach((noteObj, key) => {
-      previous.set(key, { ...noteObj });
-    });
-
-    nextNotes.forEach((note) => {
-      const key = note.halfTone.toFixed();
-      const existing = nextRequired.get(key);
-      const previousValue = required.get(key)?.value ?? 0;
-      const nextNoteObject: NoteObject = {
-        value: required.has(key) ? previousValue + 1 : 0,
-        key,
-        timestamp: note.endTimestamp,
-        staffId: Number.isFinite(note.staffId) ? Number(note.staffId) : -1,
-        voice: Number.isFinite(note.voiceId) ? Number(note.voiceId) : -1,
-        fingering: '',
-        isGrace: false,
-        midiInstrumentId: note.midiInstrumentId,
-      };
-
-      if (!existing) {
-        nextRequired.set(key, nextNoteObject);
-        return;
-      }
-
-      nextRequired.set(key, {
-        ...existing,
-        timestamp: Math.max(existing.timestamp, nextNoteObject.timestamp),
-        value: Math.min(existing.value, nextNoteObject.value),
-        midiInstrumentId: existing.midiInstrumentId ?? nextNoteObject.midiInstrumentId,
-      });
-    });
-
-    required.clear();
-    nextRequired.forEach((noteObj, key) => {
-      required.set(key, noteObj);
-    });
+    this.computerTimelineCurrentNotesByKey =
+      this.groupTimelineNotesByPitchKey(nextNotes);
+    return nextNotes;
   }
 
   private getComputerTimelineNotesAtTimestamp(timestamp: number): TimelineNote[] {
@@ -12646,7 +12686,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     const key = note.halfTone.toFixed();
 
     this.computerPressedNotes.set(key, 1);
-    this.computerNotesService.press(key);
     this.keyPressNoteInternal(pitch, 60, audioTime, false, midiInstrumentId);
 
     const releaseAudioTime =
@@ -12657,20 +12696,49 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.timeouts.push(
       setTimeout(() => {
         this.computerPressedNotes.delete(key);
-        this.computerNotesService.release(key);
         this.keyReleaseNoteInternal(pitch, releaseAudioTime, false, midiInstrumentId);
       }, Math.max(durationMs, 0))
     );
   }
 
+  private groupTimelineNotesByPitchKey(
+    notes: TimelineNote[]
+  ): Map<string, TimelineNote[]> {
+    const grouped = new Map<string, TimelineNote[]>();
+    notes.forEach((note) => {
+      const key = note.halfTone.toFixed();
+      const existing = grouped.get(key) ?? [];
+      existing.push(note);
+      grouped.set(key, existing);
+    });
+    return grouped;
+  }
+
+  private getComputerTimelineMidiInstrumentIdForKey(
+    key: string
+  ): number | null {
+    const candidates = [
+      ...(this.computerTimelineCurrentNotesByKey.get(key) ?? []),
+      ...(this.computerTimelinePreviousNotesByKey.get(key) ?? []),
+    ];
+    const midiInstrumentId = candidates
+      .map((note) => note.midiInstrumentId)
+      .find((value) => Number.isFinite(value));
+    return Number.isFinite(midiInstrumentId) ? Number(midiInstrumentId) : null;
+  }
+
   private releaseComputerPressedNotes(): void {
+    const usingTimelineComputerState = this.playbackTimeline !== null;
     for (const [key] of this.computerPressedNotes) {
-      this.computerNotesService.release(key);
+      if (!usingTimelineComputerState) {
+        this.computerNotesService.release(key);
+      }
       this.releaseTrackedAutoPressedPitch(
         key,
-        this.getMidiInstrumentIdForNoteObject(
-          this.computerNotesService.getMapRequired().get(key)
-        ) ??
+        this.getComputerTimelineMidiInstrumentIdForKey(key) ??
+          this.getMidiInstrumentIdForNoteObject(
+            this.computerNotesService.getMapRequired().get(key)
+          ) ??
           this.getMidiInstrumentIdForNoteObject(
             this.computerNotesService.getMapPrevRequired().get(key)
           ) ??
@@ -12706,9 +12774,14 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private resolveRealtimeTempo(): number {
-    const candidates = this.shouldUseTimedLiveRealtimeClassification()
-      ? [this.tempoInBPM, this.computerNotesService.tempoInBPM]
-      : [this.notesService.tempoInBPM, this.computerNotesService.tempoInBPM];
+    if (this.shouldUseTimedLiveRealtimeClassification()) {
+      return this.tempoInBPM;
+    }
+
+    const candidates = [
+      this.notesService.tempoInBPM,
+      this.computerNotesService.tempoInBPM,
+    ];
 
     const realtimeTempo = candidates.find(
       (tempo) => Number.isFinite(tempo) && (tempo as number) > 0
