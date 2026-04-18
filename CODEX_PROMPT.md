@@ -294,6 +294,8 @@ These fixes have already been made and committed:
 - `0295ba9` `Checkpoint playback lifecycle refactor`
   Centralized more playback lifecycle behavior and timeline note-bucket
   selection.
+- `5037452` `Update Codex prompt for wait mode refactor`
+  Captured the new wait-mode product direction before changing behavior.
 
 There is also a stash that may still be useful:
 
@@ -328,6 +330,15 @@ That stash represents an alternate wrap implementation that was intentionally se
 - A shared playback-lifecycle helper layer now exists in `play.page.ts` for:
   - legacy service-driven note playback
   - timeline-driven note playback
+- Wait mode has now started its migration onto `playbackTimeline`:
+  - start validation requires at least one human-controlled hand
+  - the warning is intentionally shown on pressing `Play`, not on toggling
+    wait mode on
+  - metronome/count-in are disabled in wait mode
+  - the grey cursor is hidden in wait mode
+  - wait-mode progression is now based on current timeline event notes for the
+    enabled human-controlled hands
+  - tie continuations no longer block wait-mode step progression
   - retrigger release handling
 
 ## Known Gotchas
@@ -595,12 +606,12 @@ Wait mode is now expected to follow these product rules:
   normally; show a clear explicit message instead of inventing strange
   behavior
 
-#### Tie / hold rule for first implementation
+#### Tie / hold rule
 
-- initial implementation should require tied notes to remain held if the step
-  still depends on them
-- however, holding a tied note must never count as a failure by itself
-- if this feels awkward in practice, the hold requirement can be relaxed later
+- tied continuations should not block wait-mode progression
+- for wait mode, progression should be based on the current step's playable
+  onset notes rather than requiring held tie continuations
+- holding a tied note must never count as a failure by itself
 
 #### Visual / keyboard rule
 
@@ -617,6 +628,16 @@ The next meaningful legacy-removal step is likely:
   satisfied
 - move OSMD cursor/render state to follow that step, instead of using
   `notesService.calculateRequired(...)` as the source of truth
+
+Current implementation progress:
+
+- wait mode has begun this migration
+- current required wait notes are now taken from the current
+  `playbackTimeline` event for the enabled human-controlled hands
+- non-human hands should not block progression
+- tie continuations are intentionally excluded from wait progression
+- remaining work is mainly cursor/bootstrap cleanup and full removal of the
+  remaining legacy wait-mode branches
 
 This is probably the largest remaining reason `notesService` still exists in
 normal play behavior.

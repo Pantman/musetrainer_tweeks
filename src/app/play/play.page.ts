@@ -7,6 +7,7 @@ import {
   isDevMode,
 } from '@angular/core';
 import {
+  AlertController,
   IonContent,
   NavController,
   Platform,
@@ -483,7 +484,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.18.61';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.18.73';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -718,6 +719,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     public platform: Platform,
     public navCtrl: NavController,
     private notesService: NotesService,
+    private alertCtrl: AlertController,
     private toastCtrl: ToastController,
     private route: ActivatedRoute
   ) {
@@ -1724,6 +1726,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   startTransport(): void {
+    if (this.checkboxWaitMode) {
+      if (!this.hasWaitModeHumanPracticeTarget()) {
+        void this.notifyWaitModeNeedsHumanHand();
+        return;
+      }
+    }
     void startTone().catch(() => undefined);
     this.completedRunSummary = null;
     this.updateRepeat();
@@ -1802,6 +1810,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   toggleWaitMode(): void {
     this.checkboxWaitMode = !this.checkboxWaitMode;
+    if (this.checkboxWaitMode) {
+      this.checkboxMetronome = false;
+    }
   }
 
   handleBackingTrackToggleChange(): void {
@@ -2793,7 +2804,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.markCursorTraceLoopBoundary('practice start');
     this.setTransportMode('wait');
     this.stopTimedLiveCursorDebugLoop(true);
-    this.startFlashCount = 4;
+    this.startFlashCount = 0;
     this.osmdCursorStart();
   }
 
@@ -3334,6 +3345,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         measureNumber,
         scoreTimestamp
       );
+    } else if (this.isWaitModeUsingPlaybackTimeline()) {
+      this.tracePlaybackTimelineStepState(
+        'practice step',
+        this.getWaitModeCurrentStepNotes(),
+        measureNumber,
+        scoreTimestamp
+      );
     } else {
       this.rebuildLegacyPracticeStepState(
         back,
@@ -3790,6 +3808,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return false;
     }
 
+    if (this.isWaitModeUsingPlaybackTimeline()) {
+      return this.getWaitModeCurrentStepNotes().length === 0;
+    }
+
     return !this.hasCurrentRequiredPressKeys();
   }
 
@@ -3803,7 +3825,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    if (this.hasCurrentRequiredPressKeys()) {
+    if (
+      this.isWaitModeUsingPlaybackTimeline()
+        ? this.getWaitModeCurrentStepNotes().length > 0
+        : this.hasCurrentRequiredPressKeys()
+    ) {
       this.pendingTimedStartBootstrapAdvance = false;
       return;
     }
@@ -3829,13 +3855,20 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     if (this.listenMode && this.isTimedTransportMode()) {
       this.syncTimedPlaybackVisibleEventIndexToCurrentCursor();
     }
-    this.pendingTimedStartBootstrapAdvance = !this.hasCurrentRequiredPressKeys();
+    this.pendingTimedStartBootstrapAdvance = this.isWaitModeUsingPlaybackTimeline()
+      ? this.getWaitModeCurrentStepNotes().length === 0
+      : !this.hasCurrentRequiredPressKeys();
   }
 
   // Move cursor to next note
   osmdCursorPlayMoveNext(skipFeedback = false): void {
     // Required to stop next calls if stop is pressed during play
     if (!this.running) return;
+
+    if (this.isWaitModeUsingPlaybackTimeline()) {
+      this.advanceWaitModeTimelineStep(skipFeedback);
+      return;
+    }
 
     if (!skipFeedback && this.notesService.getMapRequired().size > 0) {
       this.markCurrentNotesCorrect();
@@ -3977,6 +4010,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     this.refreshCursorWrapDebugSnapshot();
+    if (this.transportMode === 'wait') {
+      this.openSheetMusicDisplay?.cursors?.[1]?.hide?.();
+    }
     this.osmdCursorStart2(startContext);
   }
 
@@ -4035,7 +4071,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.updatePlaybackTransportAnchor(this.playbackStartScoreTimestamp, audioTime);
     this.syncTimedLiveCursorDebugLoop();
 
-    this.startMetronome();
+    if (this.transportMode !== 'wait') {
+      this.startMetronome();
+    } else {
+      this.openSheetMusicDisplay?.cursors?.[1]?.hide?.();
+    }
 
     // Play initial notes
     if (this.listenMode) {
@@ -6600,6 +6640,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return guideKeys;
     }
 
+    if (this.isWaitModeUsingPlaybackTimeline()) {
+      return new Set(
+        this.getWaitModeCurrentStepNotes().map((note) => note.halfTone.toFixed())
+      );
+    }
+
     return this.realtimeMode
       ? this.getRealtimeRequiredPressKeysForActiveStep()
       : this.getCurrentRequiredPressKeys();
@@ -6660,18 +6706,27 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private getPianoKeyboardVisibleTimelineActiveNotesAtTimestamp(
     timestamp: number
   ): TimelineNote[] {
+    return this.getVisibleTimelineActiveNotesAtTimestamp(
+      timestamp,
+      this.getVisiblePracticeStaffSelection()
+    );
+  }
+
+  private getVisibleTimelineActiveNotesAtTimestamp(
+    timestamp: number,
+    staffSelection: Record<number, boolean>
+  ): TimelineNote[] {
     const timeline = this.playbackTimeline;
     if (!timeline || !Number.isFinite(timestamp)) {
       return [];
     }
 
-    const visibleSelection = this.getVisiblePracticeStaffSelection();
     const timestampEpsilon = 1e-7;
     return timeline.notes.filter((note) => {
       if (note.role !== 'visible') {
         return false;
       }
-      if (note.staffId !== null && !visibleSelection[note.staffId]) {
+      if (note.staffId !== null && !staffSelection[note.staffId]) {
         return false;
       }
       return (
@@ -6875,6 +6930,16 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     const pressedKeys = this.getRealtimePracticePressedKeys();
+    return Array.from(requiredKeys).every((key) => pressedKeys.has(key));
+  }
+
+  private areWaitModeCurrentStepKeysPressed(): boolean {
+    const requiredKeys = this.getRealtimeRequiredPressKeysForActiveStep();
+    if (requiredKeys.size === 0) {
+      return false;
+    }
+
+    const pressedKeys = new Set(this.notesService.getMapPressed().keys());
     return Array.from(requiredKeys).every((key) => pressedKeys.has(key));
   }
 
@@ -7486,7 +7551,22 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private formatRequiredNoteSummary(): string {
     if (this.realtimeMode && this.shouldUseTimedLiveRealtimeClassification()) {
-    const notes = this.getRealtimeTimelineCurrentStepNotes()
+      const notes = this.getRealtimeTimelineCurrentStepNotes()
+        .map((note) => {
+          const pitchLabel = this.noteKeyToLabel(note.halfTone.toString());
+          const freshness =
+            note.tie.isContinuation && !note.tie.isStart ? 'hold1' : 'new';
+          return `${pitchLabel}:${freshness}@${this.formatScoreTimestamp(
+            note.endTimestamp
+          )}`;
+        })
+        .sort();
+
+      return notes.join(' ') || 'none';
+    }
+
+    if (this.isWaitModeUsingPlaybackTimeline()) {
+      const notes = this.getWaitModeCurrentStepNotes()
         .map((note) => {
           const pitchLabel = this.noteKeyToLabel(note.halfTone.toString());
           const freshness =
@@ -9088,6 +9168,125 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     return timeline.events.filter((event) => event.visibleNotes.length > 0);
+  }
+
+  private getWaitModeVisibleEvents(): PlaybackEvent[] {
+    const timeline = this.playbackTimeline;
+    if (!timeline) {
+      return [];
+    }
+
+    return timeline.events.filter(
+      (event) => this.getWaitModePracticeNotesForEvent(event).length > 0
+    );
+  }
+
+  private getWaitModeCurrentStepEvent(): PlaybackEvent | null {
+    const currentTimestamp =
+      this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentSourceTimestamp
+        ?.RealValue ?? NaN;
+    if (!Number.isFinite(currentTimestamp)) {
+      return null;
+    }
+
+    const timestampEpsilon = 1e-7;
+    return (
+      this.getWaitModeVisibleEvents().find(
+        (event) => Math.abs(event.timestamp - Number(currentTimestamp)) <= timestampEpsilon
+      ) ?? null
+    );
+  }
+
+  private getNextWaitModeVisibleEventAfter(
+    currentTimestamp: number
+  ): PlaybackEvent | null {
+    const timestampEpsilon = 1e-7;
+    return (
+      this.getWaitModeVisibleEvents().find(
+        (event) => event.timestamp > currentTimestamp + timestampEpsilon
+      ) ?? null
+    );
+  }
+
+  private getWaitModeCurrentStepNotes(): TimelineNote[] {
+    if (!this.isWaitModeUsingPlaybackTimeline()) {
+      return [];
+    }
+
+    const currentEvent = this.getWaitModeCurrentStepEvent();
+    if (!currentEvent) {
+      return [];
+    }
+
+    return this.getWaitModePracticeNotesForEvent(currentEvent);
+  }
+
+  private isWaitModePracticeHandRequired(
+    handAssignment: PlaybackTimelineHandAssignment
+  ): boolean {
+    const leftHuman = !this.handEnabled.left;
+    const rightHuman = !this.handEnabled.right;
+
+    if (handAssignment === 'left') {
+      return leftHuman;
+    }
+
+    if (handAssignment === 'right') {
+      return rightHuman;
+    }
+
+    if (handAssignment === 'both' || handAssignment === 'unassigned') {
+      return leftHuman || rightHuman;
+    }
+
+    return false;
+  }
+
+  private getWaitModePracticeNotesForEvent(event: PlaybackEvent): TimelineNote[] {
+    return event.visibleNotes.filter((note) => {
+      if (note.tie.isContinuation) {
+        return false;
+      }
+
+      return this.isWaitModePracticeHandRequired(note.handAssignment);
+    });
+  }
+
+  private advanceWaitModeTimelineStep(skipFeedback = false): void {
+    if (!this.running) {
+      return;
+    }
+
+    if (!skipFeedback && this.getWaitModeCurrentStepNotes().length > 0) {
+      this.markCurrentNotesCorrect();
+    }
+
+    const currentTimestamp =
+      this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentSourceTimestamp
+        ?.RealValue ?? NaN;
+    if (!Number.isFinite(currentTimestamp)) {
+      return;
+    }
+
+    const nextEvent = this.getNextWaitModeVisibleEventAfter(Number(currentTimestamp));
+    if (!nextEvent) {
+      if (this.checkboxRepeat) {
+        this.restartLoopPlayback();
+      } else {
+        this.osmdCursorStop();
+      }
+      return;
+    }
+
+    if (!this.advancePlayCursorToTimestamp(nextEvent.timestamp)) {
+      return;
+    }
+
+    this.syncTempoCursorToPlayCursor();
+    this.openSheetMusicDisplay?.cursors?.[1]?.hide?.();
+    this.rebuildCurrentPlaybackStepState();
+    this.alignOrAnimatePlayCursorAfterAdvance();
+    this.pendingTimedStartBootstrapAdvance = false;
   }
 
   private syncTimedPlaybackVisibleEventIndexToCurrentCursor(): void {
@@ -12282,6 +12481,16 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     await toast.present();
   }
 
+  async notifyWaitModeNeedsHumanHand() {
+    const alert = await this.alertCtrl.create({
+      header: 'Wait Mode Needs Human Input',
+      message:
+        'Set at least one hand to human control before starting wait mode.',
+      buttons: ['OK'],
+    });
+    await alert.present();
+  }
+
   midiDeviceHandler(devices: any) {
     if (devices.length) {
       this.midiAvailable = true;
@@ -12623,7 +12832,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         Array.from(requiredNoteIds).every((noteId) =>
           this.realtimeCurrentStepMatchedNoteIds.has(noteId)
         )
-      : !acceptedLateRealtimeNote && this.areLegacyRequiredPracticeKeysPressed();
+      : this.isWaitModeUsingPlaybackTimeline()
+        ? !acceptedLateRealtimeNote && this.areWaitModeCurrentStepKeysPressed()
+        : !acceptedLateRealtimeNote && this.areLegacyRequiredPracticeKeysPressed();
     if (currentStepPressedNow) {
       // Timing-classified notes can still make the required pitch set "pressed"
       // in realtime mode, but only on-time notes should be rendered as green
@@ -12677,6 +12888,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.correctlyHeldPracticeKeys.delete(name);
 
     this.refreshPianoKeyboardStatus();
+    if (this.isWaitModeUsingPlaybackTimeline()) {
+      return;
+    }
     if (!this.realtimeMode && this.areLegacyRequiredPracticeKeysPressed()) {
       if (!suppressAutoplayFeedback) {
         this.markCurrentNotesCorrect();
@@ -12689,6 +12903,35 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return !Object.values(this.getPracticeStaffSelection()).some(Boolean);
   }
 
+  private getWaitModePracticeTrackEntries(): TrackAssignmentEntry[] {
+    return Array.from(
+      new Map(
+        [
+          ...(!this.handEnabled.left
+            ? this.getTrackAssignmentEntriesForHand('left')
+            : []),
+          ...(!this.handEnabled.right
+            ? this.getTrackAssignmentEntriesForHand('right')
+            : []),
+        ].map((entry) => [entry.instrumentIndex, entry])
+      ).values()
+    );
+  }
+
+  private getWaitModePracticeStaffSelection(): Record<number, boolean> {
+    return this.buildStaffSelectionFromTrackEntries(
+      this.getWaitModePracticeTrackEntries()
+    );
+  }
+
+  private hasWaitModeHumanPracticeTarget(): boolean {
+    return Object.values(this.getWaitModePracticeStaffSelection()).some(Boolean);
+  }
+
+  private isWaitModeUsingPlaybackTimeline(): boolean {
+    return this.transportMode === 'wait' && !!this.playbackTimeline;
+  }
+
   private isInputCountInActive(): boolean {
     return this.running && this.startFlashCount > 0;
   }
@@ -12698,6 +12941,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private getPracticeStaffSelection(): Record<number, boolean> {
+    if (this.transportMode === 'wait') {
+      return this.getWaitModePracticeStaffSelection();
+    }
+
     if (!this.realtimeMode) {
       return this.getVisiblePracticeStaffSelection();
     }
@@ -12906,6 +13153,12 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private getRealtimeRequiredPressKeysForActiveStep(): Set<string> {
+    if (this.isWaitModeUsingPlaybackTimeline()) {
+      return new Set(
+        this.getWaitModeCurrentStepNotes().map((note) => note.halfTone.toFixed())
+      );
+    }
+
     if (!this.shouldUseTimedLiveRealtimeClassification()) {
       return this.getCurrentRequiredPressKeys();
     }
@@ -12918,6 +13171,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   }
 
   private getRealtimeRequiredNoteIdsForActiveStep(): Set<string> {
+    if (this.isWaitModeUsingPlaybackTimeline()) {
+      return new Set(this.getWaitModeCurrentStepNotes().map((note) => note.id));
+    }
+
     if (!this.shouldUseTimedLiveRealtimeClassification()) {
       return new Set<string>();
     }
