@@ -476,7 +476,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.15.34';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.17.36';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -1339,16 +1339,16 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     if (Number.isFinite(pitch)) {
-      const noteObj = this.notesService
-        .getMapRequired()
-        .get((Number(pitch) - 12).toFixed());
+      const noteObj = this.getLegacyPracticeRequiredNoteObject(
+        (Number(pitch) - 12).toFixed()
+      );
       const noteInstrumentId = this.getMidiInstrumentIdForNoteObject(noteObj);
       if (Number.isFinite(noteInstrumentId)) {
         return noteInstrumentId;
       }
     }
 
-    for (const noteObj of this.notesService.getMapRequired().values()) {
+    for (const noteObj of this.getLegacyPracticeRequiredNoteObjects()) {
       const midiInstrumentId = this.getMidiInstrumentIdForNoteObject(noteObj);
       if (Number.isFinite(midiInstrumentId)) {
         return midiInstrumentId;
@@ -2688,7 +2688,6 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.osmdCursorStop();
     this.timeouts.map((to) => clearTimeout(to));
     this.timeouts = [];
-    this.releaseComputerPressedNotes();
     this.clearLoopStartCheckpoint();
     this.clearPlaybackClock();
     this.playCursorLoopWrapAnimation = null;
@@ -3319,7 +3318,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.tempoInBPM = this.resolveRealtimeTempo();
       const hasCurrentRequiredPressKeys = this.shouldUseTimedLiveRealtimeClassification()
         ? this.getRealtimeRequiredPressKeysForActiveStep().size > 0
-        : this.hasCurrentRequiredPressKeys();
+        : this.hasLegacyPracticeRequiredPressKeys();
       this.currentStepSatisfied =
         !hasCurrentRequiredPressKeys || this.areRealtimeRequiredPressKeysPressed();
       // A realtime step may already be "satisfied" because the required keys
@@ -3329,7 +3328,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       this.currentStepSatisfiedAsCorrect = !hasCurrentRequiredPressKeys;
       this.refreshRealtimeNextStepKeys();
     } else {
-      this.tempoInBPM = this.notesService.tempoInBPM;
+      this.tempoInBPM = this.getLegacyPracticeTempoBPM();
     }
 
     if (this.pianoKeyboard) {
@@ -3778,6 +3777,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         cursor.hide();
       });
     });
+    // Release computer-tracked notes first. Their route bookkeeping is more
+    // precise than the generic auto-pressed map, and some loop-boundary stop
+    // races can leave residual route keys after `mapNotesAutoPressed` was
+    // already cleared for a pitch.
+    this.releaseComputerPressedNotes();
     for (const [key] of this.mapNotesAutoPressed) {
       this.releaseTrackedAutoPressedPitch(key);
     }
@@ -6355,7 +6359,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     );
   }
 
-  private getCurrentRequiredPressKeys(notesService = this.notesService): Set<string> {
+  private getLegacyPracticeRequiredPressKeys(
+    notesService = this.notesService
+  ): Set<string> {
     return new Set(
       Array.from(notesService.getMapRequired().entries())
         .filter(([, noteObj]) => noteObj.value === 0)
@@ -6363,7 +6369,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     );
   }
 
-  private hasCurrentRequiredPressKeys(notesService = this.notesService): boolean {
+  private hasLegacyPracticeRequiredPressKeys(
+    notesService = this.notesService
+  ): boolean {
     for (const [, noteObj] of notesService.getMapRequired()) {
       if (noteObj.value === 0) {
         return true;
@@ -6373,16 +6381,44 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return false;
   }
 
+  private getCurrentRequiredPressKeys(notesService = this.notesService): Set<string> {
+    return this.getLegacyPracticeRequiredPressKeys(notesService);
+  }
+
+  private hasCurrentRequiredPressKeys(notesService = this.notesService): boolean {
+    return this.hasLegacyPracticeRequiredPressKeys(notesService);
+  }
+
+  private getLegacyPracticePressedKeys(): Set<string> {
+    return new Set(this.notesService.getMapPressed().keys());
+  }
+
+  private isLegacyPracticeKeyPressed(key: string): boolean {
+    return this.notesService.getMapPressed().has(key);
+  }
+
+  private pressLegacyPracticeKey(key: string): void {
+    this.notesService.press(key);
+  }
+
+  private releaseLegacyPracticeKey(key: string): void {
+    this.notesService.release(key);
+  }
+
+  private areLegacyRequiredPracticeKeysPressed(): boolean {
+    return this.notesService.isRequiredNotesPressed();
+  }
+
   private getRealtimePracticePressedKeys(): Set<string> {
     return this.shouldUseTimedLiveRealtimeClassification()
       ? this.realtimePracticePressedKeys
-      : new Set(this.notesService.getMapPressed().keys());
+      : this.getLegacyPracticePressedKeys();
   }
 
   private isRealtimePracticeKeyPressed(key: string): boolean {
     return this.shouldUseTimedLiveRealtimeClassification()
       ? this.realtimePracticePressedKeys.has(key)
-      : this.notesService.getMapPressed().has(key);
+      : this.isLegacyPracticeKeyPressed(key);
   }
 
   private pressRealtimePracticeKey(key: string): void {
@@ -6391,7 +6427,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    this.notesService.press(key);
+    this.pressLegacyPracticeKey(key);
   }
 
   private releaseRealtimePracticeKey(key: string): void {
@@ -6400,13 +6436,13 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    this.notesService.release(key);
+    this.releaseLegacyPracticeKey(key);
   }
 
   private areRealtimeRequiredPressKeysPressed(): boolean {
     const requiredKeys = this.shouldUseTimedLiveRealtimeClassification()
       ? this.getRealtimeRequiredPressKeysForActiveStep()
-      : this.getCurrentRequiredPressKeys();
+      : this.getLegacyPracticeRequiredPressKeys();
     if (requiredKeys.size === 0) {
       return false;
     }
@@ -6560,9 +6596,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    this.realtimePreviousStepKeys = this.getCurrentRequiredPressKeys();
+    this.realtimePreviousStepKeys = this.getLegacyPracticeRequiredPressKeys();
     this.realtimePreviousStepMatchedKeys = new Set(
-      Array.from(this.notesService.getMapPressed().keys()).filter((key) =>
+      Array.from(this.getLegacyPracticePressedKeys()).filter((key) =>
         this.realtimePreviousStepKeys.has(key)
       )
     );
@@ -6754,6 +6790,20 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.appendPlaybackTraceEvent(
       `${label} m${measureNumber} t${this.formatScoreTimestamp(scoreTimestamp ?? null)} ${notes || 'none'}`
     );
+  }
+
+  private getLegacyPracticeTempoBPM(): number {
+    return this.notesService.tempoInBPM;
+  }
+
+  private getLegacyPracticeRequiredNoteObjects(): NoteObject[] {
+    return Array.from(this.notesService.getMapRequired().values());
+  }
+
+  private getLegacyPracticeRequiredNoteObject(
+    key: string
+  ): NoteObject | undefined {
+    return this.notesService.getMapRequired().get(key);
   }
 
   private tracePlaybackTimelineStepState(
@@ -7009,7 +7059,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
 
   private formatRequiredNoteSummary(): string {
     if (this.realtimeMode && this.shouldUseTimedLiveRealtimeClassification()) {
-      const notes = this.getRealtimeTimelineCurrentStepNotes()
+    const notes = this.getRealtimeTimelineCurrentStepNotes()
         .map((note) => {
           const pitchLabel = this.noteKeyToLabel(note.halfTone.toString());
           const freshness =
@@ -7023,7 +7073,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return notes.join(' ') || 'none';
     }
 
-    const notes = Array.from(this.notesService.getMapRequired().values())
+    const notes = this.getLegacyPracticeRequiredNoteObjects()
       .map((note) => {
         const pitchLabel = this.noteKeyToLabel(note.key);
         const freshness = note.value === 0 ? 'new' : `hold${note.value}`;
@@ -11948,7 +11998,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     if (timedLiveRealtimeClassification) {
       this.pressRealtimePracticeKey(name);
     } else if (!acceptedLateRealtimeNote) {
-      this.notesService.press(name);
+      this.pressLegacyPracticeKey(name);
     }
 
     if (timedLiveRealtimeClassification && scoreTimestamp !== null) {
@@ -12065,7 +12115,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         Array.from(requiredNoteIds).every((noteId) =>
           this.realtimeCurrentStepMatchedNoteIds.has(noteId)
         )
-      : !acceptedLateRealtimeNote && this.notesService.isRequiredNotesPressed();
+      : !acceptedLateRealtimeNote && this.areLegacyRequiredPracticeKeysPressed();
     if (currentStepPressedNow) {
       // Timing-classified notes can still make the required pitch set "pressed"
       // in realtime mode, but only on-time notes should be rendered as green
@@ -12115,11 +12165,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     if (this.isAcceptedLateRealtimeNote(name)) {
       return;
     }
-    this.notesService.release(name);
+    this.releaseLegacyPracticeKey(name);
     this.correctlyHeldPracticeKeys.delete(name);
 
     if (this.pianoKeyboard) this.pianoKeyboard.updateNotesStatus();
-    if (!this.realtimeMode && this.notesService.isRequiredNotesPressed()) {
+    if (!this.realtimeMode && this.areLegacyRequiredPracticeKeysPressed()) {
       if (!suppressAutoplayFeedback) {
         this.markCurrentNotesCorrect();
       }
