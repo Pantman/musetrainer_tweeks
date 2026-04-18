@@ -24,7 +24,18 @@ The main long-term goal is to make live playback feel visually exact and robust:
 - the code should be heavily commented so future prompt-driven edits do not regress behavior
 - live mode behavior should be identical regardless of whether notes are played by the computer or by the human
 
-This work is focused on live playback modes, not wait mode.
+This work is now focused on both:
+
+- live/timed playback architecture
+- porting wait mode away from legacy cursor-required-note semantics
+
+Important wait-mode direction:
+
+- wait mode is for learning finger positions, not time accuracy
+- wait mode should eventually use `playbackTimeline` step/event truth instead
+  of `notesService.calculateRequired(...)` / `isRequiredNotesPressed()`
+- new work should not preserve deprecated grey-cursor / backing-track /
+  autoplay behavior in wait mode just because the legacy implementation did
 
 ## Important Files
 
@@ -265,6 +276,24 @@ These fixes have already been made and committed:
 - `aa9b98e` `Checkpoint realtime matching handoff to playback note ids`
   Began moving realtime matching and scorecard dedupe from timed-live
   `event.id:index` bookkeeping to shared playback note ids.
+- `1f2a390` `Checkpoint realtime notesService port to playback timeline`
+  Moved another substantial chunk of timed-live realtime required-step logic
+  off `notesService` and onto `playbackTimeline`.
+- `792c714` `Checkpoint realtime notesService cleanup`
+  Reduced more realtime dependency on `notesService` and stabilized tempo
+  resolution during the transition.
+- `9526403` `Checkpoint realtime isolation and loop-end stop fix`
+  Fixed loop-end stuck-note stop behavior and further isolated realtime
+  playback state.
+- `bb7c2d1` `Checkpoint startup keyboard audio routing`
+  Stabilized startup keyboard/manual-input routing behavior.
+- `a2c3d85` `Checkpoint virtual keyboard timeline guide state`
+  Began the virtual keyboard migration so bold vs desaturated key states can
+  be driven from timeline/current-input state instead of old required-note
+  overlap.
+- `0295ba9` `Checkpoint playback lifecycle refactor`
+  Centralized more playback lifecycle behavior and timeline note-bucket
+  selection.
 
 There is also a stash that may still be useful:
 
@@ -286,12 +315,20 @@ That stash represents an alternate wrap implementation that was intentionally se
   `src/app/play/playback-timeline.ts`.
 - Realtime computer playback uses `playbackTimeline` rather than the old
   mixed cursor-derived `computerNotesService.playRequiredNotes(...)` path.
+- Virtual keyboard state is now largely snapshot-driven rather than reading
+  `NotesService` directly:
+  - bold keys represent actual held input / computer keydown
+  - desaturated keys are moving toward timeline-driven guide state
 - Backing-track notes are now separated from visible/computer-piano playback
   more reliably in the known multi-track repro.
 - Playback tie spans across barlines are working again in the known bars 25-26
   repro.
 - Stop/release behavior for long backing notes is improved; the known stuck
   backing-note-on-stop issue was fixed.
+- A shared playback-lifecycle helper layer now exists in `play.page.ts` for:
+  - legacy service-driven note playback
+  - timeline-driven note playback
+  - retrigger release handling
 
 ## Known Gotchas
 
@@ -499,6 +536,13 @@ Important rule for future work:
 - avoid reintroducing new cursor-derived logic if the same behavior can be
   expressed using stable `playbackTimeline` note/event identity
 
+Important companion rule:
+
+- while legacy code still exists, keep it behind an explicit legacy boundary
+  instead of inlining `notesService` usage everywhere
+- the goal is to make the remaining dependency obvious enough to port/remove,
+  not to cosmetically flatten it
+
 ### 9. Known deferred issues after the recent timeline work
 
 These came up after the last prompt refresh and should be remembered for future
@@ -517,6 +561,65 @@ or chords, especially repeated eighth-note chords:
   timestamp distance is not always musically satisfying, but adding too much
   tactical matcher logic before the rearchitecture is complete risks more
   churn
+
+#### Tie-continuation feedback classification is still incomplete
+
+- tied playback duration across barlines has been fixed
+- but visual/classification behavior for held tie continuations is still not a
+  finished system
+- future work should likely solve this from stable tie-chain / playback-note
+  identity, not pitch-only held-key memory
+
+### 10. Wait mode should be redefined, not blindly ported
+
+Wait mode is now expected to follow these product rules:
+
+- wait mode is for finger-position practice, not time training
+- the green cursor remains the only cursor source of truth
+- the old grey cursor / expected-position cursor is deprecated in wait mode
+- backing tracks should not play in wait mode
+- computer-controlled hand tracks should not autoplay in wait mode
+- loops must still work in wait mode for short-section drilling
+- metronome is probably unnecessary in wait mode and should default off
+
+#### Hand / control rules
+
+- left and right hands must respect the existing hand enable controls
+- enabled human-controlled hands should be the only ones that block step
+  advancement
+- if both hands are enabled for the user, one hand must not advance past a
+  step that still requires the other hand
+- if one hand has an earlier timeline step than the other, that earlier step
+  must be satisfied first
+- if both hands are set to computer in wait mode, the app should not start
+  normally; show a clear explicit message instead of inventing strange
+  behavior
+
+#### Tie / hold rule for first implementation
+
+- initial implementation should require tied notes to remain held if the step
+  still depends on them
+- however, holding a tied note must never count as a failure by itself
+- if this feels awkward in practice, the hold requirement can be relaxed later
+
+#### Visual / keyboard rule
+
+- virtual keyboard guide behavior in wait mode should show the current required
+  step only, not future notes
+- this should align with the same step the green cursor is currently pointing at
+
+#### Architectural direction for wait mode
+
+The next meaningful legacy-removal step is likely:
+
+- replace wait-mode / non-timed progression with `playbackTimeline` step truth
+- advance a timeline step pointer when the current required visible notes are
+  satisfied
+- move OSMD cursor/render state to follow that step, instead of using
+  `notesService.calculateRequired(...)` as the source of truth
+
+This is probably the largest remaining reason `notesService` still exists in
+normal play behavior.
 
 Current recommendation:
 
