@@ -484,7 +484,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   private static readonly FEEDBACK_MISS_HALO =
     '0 0 0 1px rgb(255 255 255 / 0.25)';
   // Bump this marker whenever we want a visibly new play-screen build badge.
-  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.18.76';
+  private static readonly PLAY_SCREEN_BUILD_MARKER = '2026.04.18.82';
   private static readonly ENABLE_CURSOR_TRACE = false;
   @ViewChild(IonContent, { static: false }) content!: IonContent;
   @ViewChild(PianoKeyboardComponent)
@@ -544,6 +544,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   playbackStartScoreTimestamp: number = 0;
   private playbackStartAudioTimeSec: number | null = null;
   private transportMode: TransportMode | null = null;
+  private waitModeVisibleEventIndex: number = -1;
   private playbackClock: PlaybackClockState = {
     scheduledAudioTimeSec: null,
     pendingLoopRestartAudioTimeSec: null,
@@ -2308,6 +2309,17 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     return this.loopStartCheckpoint?.measureLeftX ?? null;
   }
 
+  private positionPlayCursorAtLoopStartTarget(): void {
+    const cursorPosition = this.getPlayCursorPosition();
+    const targetX = this.getLoopStartCursorTargetX();
+
+    if (!cursorPosition || !Number.isFinite(targetX)) {
+      return;
+    }
+
+    this.positionPlayCursorAtX(Number(targetX), cursorPosition.left);
+  }
+
   private seedPendingLoopRestartAudioTime(): void {
     const scheduledAudioTimeSec = this.playbackClock.scheduledAudioTimeSec;
     this.playbackClock.pendingLoopRestartAudioTimeSec =
@@ -2748,6 +2760,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   osmdStop(): void {
     this.running = false;
     this.setTransportMode(null);
+    this.waitModeVisibleEventIndex = -1;
     this.timedPlaybackVisibleEventIndex = -1;
     this.timePlayStart = 0;
     this.playbackStartScoreTimestamp = 0;
@@ -3282,7 +3295,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.seedPendingLoopRestartAudioTime();
     this.stopTimedLiveSimulatedFeedbackPlayback();
     this.osmdResetFeedback();
+    this.cancelScheduledPlayCursorAlignment();
+    this.pendingLoopRestartCursorTeleport = false;
     this.loopPass++;
+    this.waitModeVisibleEventIndex = -1;
     this.markCursorTraceLoopBoundary('loop wrap');
     this.osmdCursorStart();
   }
@@ -3346,6 +3362,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
         scoreTimestamp
       );
     } else if (this.isWaitModeUsingPlaybackTimeline()) {
+      if (this.waitModeVisibleEventIndex < 0) {
+        this.syncWaitModeVisibleEventIndexToCurrentCursor();
+      }
       this.tracePlaybackTimelineStepState(
         'practice step',
         this.getWaitModeCurrentStepNotes(),
@@ -3362,6 +3381,8 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     }
 
     if (this.realtimeMode) {
+      this.clearRealtimeCurrentStepMatches();
+    } else if (this.isWaitModeUsingPlaybackTimeline()) {
       this.clearRealtimeCurrentStepMatches();
     }
 
@@ -3766,9 +3787,11 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     this.snapPlayCursorForJump();
     if (this.pendingLoopRestartCursorTeleport) {
       this.positionPlayCursorAtLoopStartBoundary();
+    } else if (this.isLoopRestartStart(startContext) && !this.isTimedTransportMode()) {
+      this.positionPlayCursorAtLoopStartTarget();
     }
     this.suppressPlayCursorAlignmentForStep =
-      this.isLoopRestartStart(startContext);
+      this.isLoopRestartStart(startContext) && this.isTimedTransportMode();
     this.tracePlayCursor(
       'start positioned',
       this.isLoopRestartStart(startContext) ? 'loop restart' : 'fresh'
@@ -3783,6 +3806,25 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     if (this.isTimedTransportMode()) {
       this.syncTempoCursorToPlayCursor();
       return true;
+    }
+
+    if (this.isWaitModeUsingPlaybackTimeline()) {
+      const currentEvent = this.getWaitModeCurrentStepEvent();
+      const currentTimestamp =
+        this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentSourceTimestamp
+          ?.RealValue ?? NaN;
+      const timestampEpsilon = 1e-7;
+      if (
+        currentEvent &&
+        Number.isFinite(currentTimestamp) &&
+        currentEvent.timestamp > Number(currentTimestamp) + timestampEpsilon
+      ) {
+        if (!this.advancePlayCursorToTimestamp(currentEvent.timestamp)) {
+          return false;
+        }
+        this.syncWaitModeVisibleEventIndexToCurrentCursor();
+        this.rebuildCurrentPlaybackStepState();
+      }
     }
 
     while (this.shouldAutoAdvanceWaitModeStartStep()) {
@@ -3897,6 +3939,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   osmdCursorStop(): void {
     this.setTransportMode(null);
     this.running = false;
+    this.waitModeVisibleEventIndex = -1;
     this.loopPass = 0;
     this.currentStepSatisfied = false;
     this.currentStepSatisfiedAsCorrect = false;
@@ -3961,6 +4004,9 @@ export class PlayPageComponent implements OnInit, OnDestroy {
   // Resets the cursor to the first note
   osmdCursorStart(): void {
     const startContext = this.buildPlaybackStartContext();
+    if (this.transportMode === 'wait') {
+      this.waitModeVisibleEventIndex = -1;
+    }
 
     // this.content.scrollToTop();
     this.resetPlayCursorTransition();
@@ -4401,10 +4447,21 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    const graphicalNotes =
+    const waitModeCurrentStepNoteIds = this.isWaitModeUsingPlaybackTimeline()
+      ? new Set(this.getWaitModeCurrentStepNotes().map((note) => note.id))
+      : null;
+    const graphicalNotes = (
       this.activePracticeGraphicalNotes.length > 0
         ? this.activePracticeGraphicalNotes
-        : this.getCurrentPracticeGraphicalNotes();
+        : this.getCurrentPracticeGraphicalNotes()
+    ).filter((note) => {
+      if (!waitModeCurrentStepNoteIds) {
+        return true;
+      }
+
+      const playbackNoteId = this.getPlaybackNoteIdForGraphicalPracticeNote(note);
+      return !!playbackNoteId && waitModeCurrentStepNoteIds.has(playbackNoteId);
+    });
     this.renderCorrectPracticeNotes(
       graphicalNotes,
       this.getCurrentPracticeTimestamp()
@@ -5027,6 +5084,7 @@ export class PlayPageComponent implements OnInit, OnDestroy {
     startContext: PlaybackStartContext
   ): boolean {
     return (
+      this.transportMode !== 'wait' &&
       this.isLoopRestartStart(startContext) &&
       !!this.loopStartCheckpoint &&
       this.loopStartCheckpoint.range.lower === this.inputMeasure.lower &&
@@ -9176,36 +9234,97 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return [];
     }
 
-    return timeline.events.filter(
-      (event) => this.getWaitModePracticeNotesForEvent(event).length > 0
-    );
+    const timestampEpsilon = 1e-7;
+    const groupedEvents: PlaybackEvent[] = [];
+
+    timeline.events.forEach((event) => {
+      const practiceNotes = this.getWaitModePracticeNotesForEvent(event);
+      if (practiceNotes.length === 0) {
+        return;
+      }
+
+      const previousGroup = groupedEvents[groupedEvents.length - 1] ?? null;
+      if (
+        previousGroup &&
+        Math.abs(previousGroup.timestamp - event.timestamp) <= timestampEpsilon
+      ) {
+        const mergedVisibleNotes = [
+          ...previousGroup.visibleNotes,
+          ...practiceNotes.filter(
+            (note) =>
+              !previousGroup.visibleNotes.some(
+                (existing) => existing.id === note.id
+              )
+          ),
+        ];
+        groupedEvents[groupedEvents.length - 1] = {
+          ...previousGroup,
+          visibleNotes: mergedVisibleNotes,
+          allNotes: mergedVisibleNotes,
+        };
+        return;
+      }
+
+      groupedEvents.push({
+        id: `wait-step-${groupedEvents.length}-${event.id}`,
+        timestamp: event.timestamp,
+        measureNumber: event.measureNumber,
+        beatInMeasure: event.beatInMeasure,
+        visibleNotes: [...practiceNotes],
+        backingNotes: [],
+        allNotes: [...practiceNotes],
+      });
+    });
+
+    return groupedEvents;
   }
 
-  private getWaitModeCurrentStepEvent(): PlaybackEvent | null {
+  private syncWaitModeVisibleEventIndexToCurrentCursor(): number {
     const currentTimestamp =
       this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentSourceTimestamp
         ?.RealValue ?? NaN;
     if (!Number.isFinite(currentTimestamp)) {
-      return null;
+      this.waitModeVisibleEventIndex = -1;
+      return this.waitModeVisibleEventIndex;
     }
 
     const timestampEpsilon = 1e-7;
-    return (
-      this.getWaitModeVisibleEvents().find(
-        (event) => Math.abs(event.timestamp - Number(currentTimestamp)) <= timestampEpsilon
-      ) ?? null
+    const visibleEvents = this.getWaitModeVisibleEvents();
+    const exactIndex = visibleEvents.findIndex(
+      (event) =>
+        Math.abs(event.timestamp - Number(currentTimestamp)) <= timestampEpsilon
     );
+    if (exactIndex >= 0) {
+      this.waitModeVisibleEventIndex = exactIndex;
+      return this.waitModeVisibleEventIndex;
+    }
+
+    this.waitModeVisibleEventIndex = visibleEvents.findIndex(
+      (event) => event.timestamp >= Number(currentTimestamp) - timestampEpsilon
+    );
+    return this.waitModeVisibleEventIndex;
   }
 
-  private getNextWaitModeVisibleEventAfter(
-    currentTimestamp: number
-  ): PlaybackEvent | null {
-    const timestampEpsilon = 1e-7;
-    return (
-      this.getWaitModeVisibleEvents().find(
-        (event) => event.timestamp > currentTimestamp + timestampEpsilon
-      ) ?? null
-    );
+  private getWaitModeCurrentStepEvent(): PlaybackEvent | null {
+    const visibleEvents = this.getWaitModeVisibleEvents();
+    if (visibleEvents.length === 0) {
+      this.waitModeVisibleEventIndex = -1;
+      return null;
+    }
+
+    if (
+      this.waitModeVisibleEventIndex >= 0 &&
+      this.waitModeVisibleEventIndex < visibleEvents.length
+    ) {
+      return visibleEvents[this.waitModeVisibleEventIndex] ?? null;
+    }
+
+    const syncedIndex = this.syncWaitModeVisibleEventIndexToCurrentCursor();
+    if (syncedIndex < 0 || syncedIndex >= visibleEvents.length) {
+      return null;
+    }
+
+    return visibleEvents[syncedIndex] ?? null;
   }
 
   private getWaitModeCurrentStepNotes(): TimelineNote[] {
@@ -9257,18 +9376,26 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    if (!skipFeedback && this.getWaitModeCurrentStepNotes().length > 0) {
+    const visibleEvents = this.getWaitModeVisibleEvents();
+    const currentEvent = this.getWaitModeCurrentStepEvent();
+    const currentStepNotes = currentEvent
+      ? this.getWaitModePracticeNotesForEvent(currentEvent)
+      : [];
+
+    if (!skipFeedback && currentStepNotes.length > 0) {
       this.markCurrentNotesCorrect();
     }
 
-    const currentTimestamp =
-      this.openSheetMusicDisplay?.cursors?.[0]?.iterator?.CurrentSourceTimestamp
-        ?.RealValue ?? NaN;
-    if (!Number.isFinite(currentTimestamp)) {
+    const currentIndex =
+      this.waitModeVisibleEventIndex >= 0 &&
+      this.waitModeVisibleEventIndex < visibleEvents.length
+        ? this.waitModeVisibleEventIndex
+        : this.syncWaitModeVisibleEventIndexToCurrentCursor();
+    if (currentIndex < 0 || currentIndex >= visibleEvents.length) {
       return;
     }
 
-    const nextEvent = this.getNextWaitModeVisibleEventAfter(Number(currentTimestamp));
+    const nextEvent = visibleEvents[currentIndex + 1] ?? null;
     if (!nextEvent) {
       if (this.checkboxRepeat) {
         this.restartLoopPlayback();
@@ -9282,6 +9409,10 @@ export class PlayPageComponent implements OnInit, OnDestroy {
       return;
     }
 
+    const nextEventIndex = visibleEvents.findIndex(
+      (event) => event.id === nextEvent.id
+    );
+    this.waitModeVisibleEventIndex = nextEventIndex;
     this.syncTempoCursorToPlayCursor();
     this.openSheetMusicDisplay?.cursors?.[1]?.hide?.();
     this.rebuildCurrentPlaybackStepState();
